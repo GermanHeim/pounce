@@ -120,6 +120,67 @@ changes.
   `docs/src/troubleshooting.md` now says which rung moves the start.
 
 ### Changed
+- **`pounce.find_minima` runs on the shared Rust search (gh#966).** The
+  pure-Python loop in `python/pounce/_minima.py` is gone: the problem is still
+  built exactly as `pounce.minimize` builds it (`_prepare_nlp` — bounds,
+  constraints, finite-difference warnings, option translation), and then
+  `pounce_minima::find_minima`, the code `pounce --minima` and
+  `pounce_rs::minima` run, drives it. The signature, `MinimaResult` and every
+  method, knob and default are unchanged; on six-hump camel and
+  `rastrigin` (2-D and 6-D), with and without `hess=`, all six methods over
+  five seeds, it is faster in every cell — 1.03× to 36× (6-D flooding without
+  a Hessian, 6.5 s → 0.18 s), the same minima found within seed noise. For
+  the same model, options and seed, Python and the CLI now return the same
+  search — status, solve count and every value — which
+  `python/tests/test_minima_cli_parity.py` asserts across all six methods.
+  What changes for a caller:
+  - **Start sequences.** The sampler is the CLI's (Owen-scrambled Sobol' +
+    ChaCha8), so a seed gives the same starts as `pounce --minima --seed`, and
+    *not* the starts it gave in 0.12.0 (scipy / NumPy).
+  - **`seed=None` is reported.** One is drawn at random as before, and now
+    returned as `MinimaResult.seed`, so any run can be replayed.
+  - **`MinimaResult.lambdas`** (new): each minimum's constraint multipliers,
+    recovered by a clean re-solve; `results[i].info["mult_g"]` carries the
+    same. `results[i]` is a recorded point for every method (it was the
+    polish solve's full `OptimizeResult` for the repulsion methods).
+  - **Unknown `strategy_kw` keys raise `ValueError`** (a typo used to run the
+    default silently), and `options={"solver_selection": ...}` other than
+    `"nlp"` raises: the repulsion methods change the objective, so the convex
+    routes cannot apply.
+  - **No second-opinion ladder per local solve.** It re-ran a failed start up
+    to three times, uncounted in `n_solves`; a failed start in a multistart
+    search is routine, and the CLI's search never ran it.
+  - **A local solve's success is its status** (`Solve_Succeeded` /
+    `Solved_To_Acceptable_Level`); `minimize`'s upgrade of other statuses whose
+    KKT error is within `acceptable_tol` no longer applies inside the search.
+  - **Tunneling's gradient is analytic** (it was finite-differenced), and its
+    and the constrained penalty solves' L-BFGS runs use `mu_strategy =
+    monotone` unless you set one — what the Python search's Hessian-less
+    subproblems always ran.
+  - **Constrained penalty solves are quasi-Newton** even with `hess=` (see the
+    next entry), and the saddle check is skipped above `n = 256`, with a
+    `RuntimeWarning`.
+  - The private helpers (`_gauss_terms`, `_pole_terms`, `_resolve_lengths`,
+    `_auto_amplitude`, `_Context`, `MinimaArchive`) are gone; their unit tests
+    moved to `crates/pounce-minima`.
+- **`--minima`'s L-BFGS subproblems pin `mu_strategy = monotone` when it is
+  unset (gh#966).** Tunneling and constrained penalty solves run L-BFGS
+  because the search chose it, and gh#746's rule — an unset `mu_strategy`
+  under limited-memory means `adaptive` — read a barrier preference out of
+  that choice. An explicit `mu_strategy` still wins, and exact solves are
+  untouched. Over seeds 0–9 (`--n-minima 6 --max-solves 30`): camel
+  tunneling mean minima found 3.2 → 3.9, `circle_parabola_t0p5` tunneling
+  both minima on 9 → 10 seeds, `haverly` deflation 9% fewer solves; wavy and
+  `haverly` tunneling find the same at 10–15% more solves, and
+  `circle_parabola_t0p5` deflation 8 → 7. `scripts/sweep-minima.sh` moves 5
+  of 54 lines, camel tunneling `converged`/3 → `target_reached`/6 among them.
+- **`--minima` skips the dual-recovery re-solve on a model with no
+  constraints (gh#966).** There are no duals to recover, and the re-solve,
+  started exactly at a minimum where `max |∇f|` is ~1e-10, tripped the gh#983
+  small-objective audit into re-solving with the objective multiplied by
+  ~1e10 — cheap under Newton, two `max_iter` runs under L-BFGS (6-D
+  Rastrigin from Python without `hess=`: 145 011 evaluations and 11 s for six
+  search solves). Nothing the search reports changes (sweep: 0 of 54).
 - **`--minima` flooding and deflation solve their penalty subproblems on the
   exact Hessian when the model is unconstrained or bound-only (gh#966).** They
   declined the augmented Hessian and ran L-BFGS; `pounce.find_minima(hess=...)`

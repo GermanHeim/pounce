@@ -60,7 +60,7 @@ pub fn run(
         }
     };
     for w in &result.warnings {
-        eprintln!("pounce: {w}");
+        eprintln!("pounce: --minima {w}");
     }
     // An empty result caused by the filter is never silent (gh#983 review).
     if result.minima.is_empty() && result.n_kkt_rejected > 0 {

@@ -174,6 +174,12 @@ struct Driver<'a> {
     n: usize,
     m: usize,
     nnz_h: usize,
+    /// The base problem has a real Hessian: a nonzero structure *and* the
+    /// solver says it is exact ([`LocalSolve::has_exact_hessian`]). A frontend
+    /// with no user Hessian may still declare a structure (for the L-BFGS
+    /// workspace) and fill it with zeros, which must not be read as
+    /// curvature.
+    has_hessian: bool,
     /// 1 when the TNLP emits Fortran (1-based) triplet indices, else 0.
     index_offset: usize,
     x0: Vec<Number>,
@@ -269,7 +275,18 @@ impl<'a> Driver<'a> {
     /// the point is already kept, so this does not consume a `--max-solves`
     /// slot. Falls back to zeros if the recovery solve does not converge or the
     /// nlp exposes no user-facing duals (length ≠ `m`).
+    ///
+    /// With no constraints there is nothing to recover, and the re-solve is
+    /// skipped: it was not free. Started exactly at a minimum, where
+    /// `max |∇f|` is ~1e-10, it reads to the gh#983 audit as a badly scaled
+    /// objective, which re-solves with the objective multiplied by ~1e10 —
+    /// cheap under Newton, but under L-BFGS (Python without `hess=`) both
+    /// attempts ran to `max_iter`: measured on 6-D Rastrigin, 145 011
+    /// objective evaluations and 11 s for 6 search solves (gh#966).
     fn recover_duals(&mut self, x: &[Number]) -> Vec<Number> {
+        if self.m == 0 {
+            return Vec::new();
+        }
         let t: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(SeededTnlp::new(
             Rc::clone(&self.base),
             x.to_vec(),
@@ -304,7 +321,7 @@ impl<'a> Driver<'a> {
     /// constrained problem keeps the quasi-Newton solve.
     fn solve_penalty(&mut self, seed_x: &[Number], kernel: Kernel) -> Result<SolveOut, Stop> {
         let base = Rc::clone(&self.base);
-        let exact = if self.m == 0 && self.nnz_h > 0 && self.n <= PSD_MAX_N {
+        let exact = if self.m == 0 && self.has_hessian && self.n <= PSD_MAX_N {
             PenaltyTnlp::with_exact_hessian(Rc::clone(&base), kernel.clone())
         } else {
             None
@@ -357,7 +374,7 @@ impl<'a> Driver<'a> {
     /// Dense objective Hessian at `x` (row-major n×n), or `None` when no
     /// exact Hessian is available / the problem is too large.
     fn obj_hessian_dense(&mut self, x: &[Number]) -> Option<Vec<Number>> {
-        if self.n > PSD_MAX_N || self.nnz_h == 0 {
+        if self.n > PSD_MAX_N || !self.has_hessian {
             return None;
         }
         let nnz = self.nnz_h;
@@ -413,7 +430,7 @@ impl<'a> Driver<'a> {
         if self.n > PSD_MAX_N {
             if !self.psd_skipped_logged {
                 self.warnings.push(format!(
-                    "--minima saddle-rejection (PSD) check skipped — n={} exceeds the \
+                    "saddle-rejection (PSD) check skipped — n={} exceeds the \
                      dense-eigendecomposition cap ({PSD_MAX_N}); accepting converged points as minima.",
                     self.n
                 ));
@@ -435,9 +452,7 @@ impl<'a> Driver<'a> {
         min_eig >= -self.cfg.psd_tol
     }
 
-    /// Per-dimension width vector from a knob spec, mirroring
-    /// `_resolve_lengths`: a vector ⇒ used as given; a scalar ⇒ isotropic;
-    /// neither ("auto") ⇒ `frac · L` when a box is known, else `fallback`.
+    /// Per-dimension width vector from a knob spec; see [`resolve_lengths`].
     fn resolve_lengths(
         &self,
         per_dim: Option<&Vec<f64>>,
@@ -446,40 +461,15 @@ impl<'a> Driver<'a> {
         frac_override: Option<f64>,
         fallback: f64,
     ) -> Vec<Number> {
-        if let Some(v) = per_dim {
-            return v.clone();
-        }
-        match spec {
-            Some(s) => vec![s; self.n],
-            None => {
-                let frac = frac_override.unwrap_or(frac_default);
-                if self.has_box {
-                    self.l_scale.iter().map(|&l| frac * l).collect()
-                } else {
-                    vec![fallback; self.n]
-                }
-            }
-        }
+        let frac = frac_override.unwrap_or(frac_default);
+        resolve_lengths(per_dim, spec, frac, fallback, &self.l_scale, self.has_box)
     }
 
-    /// Curvature-based escape height for a flooding bump at `center`
-    /// (`margin · μ_min` of `diag(σ)·H·diag(σ)`); `None` when no Hessian.
+    /// Curvature-based escape height for a flooding bump at `center`; see
+    /// [`auto_amplitude`]. `None` when no Hessian.
     fn auto_amplitude(&mut self, center: &[Number], sigma: &[Number], margin: f64) -> Option<f64> {
         let h = self.obj_hessian_dense(center)?;
-        let n = self.n;
-        let mut s_mat = vec![0.0; n * n];
-        for i in 0..n {
-            for j in 0..n {
-                s_mat[i * n + j] = sigma[i] * sigma[j] * h[i * n + j];
-            }
-        }
-        let mut w = vec![0.0; n];
-        let mut v = vec![0.0; n * n];
-        if !pounce_linalg::symmetric_eigen(&s_mat, n, &mut w, &mut v) {
-            return None;
-        }
-        let mu_min = w.iter().cloned().fold(f64::INFINITY, f64::min);
-        Some(margin * mu_min.max(1e-12))
+        auto_amplitude(&h, sigma, margin)
     }
 
     /// Draw a fresh start from the box (Sobol'/uniform) or jitter around x0.
@@ -996,6 +986,7 @@ pub fn find_minima_with<'a>(
         .max_samples
         .unwrap_or_else(|| max_solves.saturating_mul(batch));
 
+    let has_hessian = nnz_h > 0 && solver.has_exact_hessian();
     let mut driver = Driver {
         solver,
         hooks,
@@ -1005,6 +996,7 @@ pub fn find_minima_with<'a>(
         n,
         m,
         nnz_h,
+        has_hessian,
         index_offset,
         x0,
         x_l: x_l.clone(),
@@ -1048,6 +1040,49 @@ pub fn find_minima_with<'a>(
     })
 }
 
+/// Per-dimension width vector from a knob spec, mirroring
+/// `_resolve_lengths`: a vector ⇒ used as given; a scalar ⇒ isotropic;
+/// neither ("auto") ⇒ `frac · L` when a box is known, else `fallback`.
+fn resolve_lengths(
+    per_dim: Option<&Vec<f64>>,
+    spec: Option<f64>,
+    frac: f64,
+    fallback: f64,
+    l_scale: &[Number],
+    has_box: bool,
+) -> Vec<Number> {
+    if let Some(v) = per_dim {
+        return v.clone();
+    }
+    match spec {
+        Some(s) => vec![s; l_scale.len()],
+        None if has_box => l_scale.iter().map(|&l| frac * l).collect(),
+        None => vec![fallback; l_scale.len()],
+    }
+}
+
+/// Flooding's escape height for a bump of widths `sigma` on a minimum with
+/// dense objective Hessian `h` (row-major `n×n`): `margin · μ_min` of
+/// `S = diag(σ)·H·diag(σ)`, the smallest generalized eigenvalue of
+/// `H v = μ·diag(1/σ²) v` — the height at which the bump turns the minimum
+/// into a saddle — floored at `1e-12`. `None` if the eigensolve fails.
+fn auto_amplitude(h: &[Number], sigma: &[Number], margin: f64) -> Option<f64> {
+    let n = sigma.len();
+    let mut s_mat = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            s_mat[i * n + j] = sigma[i] * sigma[j] * h[i * n + j];
+        }
+    }
+    let mut w = vec![0.0; n];
+    let mut v = vec![0.0; n * n];
+    if !pounce_linalg::symmetric_eigen(&s_mat, n, &mut w, &mut v) {
+        return None;
+    }
+    let mu_min = w.iter().cloned().fold(f64::INFINITY, f64::min);
+    Some(margin * mu_min.max(1e-12))
+}
+
 /// The `kkt_tol` acceptance bound (gh#983 review): `kkt_tol · max(1, g0,
 /// dual_scale)`, with `g0 = max |∇f(x0)|` and `dual_scale` the magnitude of the
 /// terms the unscaled residual is assembled from at the returned point
@@ -1080,7 +1115,55 @@ fn coord_in_bounds(xi: Number, lo: Number, hi: Number) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{better_sample_within, coord_in_bounds, kkt_bound, scaled_distance};
+    use super::{
+        auto_amplitude, better_sample_within, coord_in_bounds, kkt_bound, resolve_lengths,
+        scaled_distance,
+    };
+
+    /// `_resolve_lengths`' cases (ported from `test_minima_scaling.py`).
+    #[test]
+    fn resolve_lengths_auto_scalar_vector() {
+        let l = [10.0, 0.1];
+        let close = |a: Vec<f64>, b: [f64; 2]| {
+            assert!(
+                a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-12),
+                "{a:?} vs {b:?}"
+            )
+        };
+        // auto -> frac * range, per dimension
+        close(resolve_lengths(None, None, 0.1, 0.5, &l, true), [1.0, 0.01]);
+        // no box -> fallback
+        close(
+            resolve_lengths(None, None, 0.1, 0.5, &[1.0, 1.0], false),
+            [0.5, 0.5],
+        );
+        // scalar -> isotropic
+        close(
+            resolve_lengths(None, Some(0.3), 0.1, 0.5, &l, true),
+            [0.3, 0.3],
+        );
+        // vector -> as given, over the scalar
+        let v = vec![2.0, 4.0];
+        close(
+            resolve_lengths(Some(&v), Some(0.3), 0.1, 0.5, &l, true),
+            [2.0, 4.0],
+        );
+    }
+
+    /// `_auto_amplitude`'s cases (ported from `test_minima_scaling.py`).
+    #[test]
+    fn auto_amplitude_from_curvature() {
+        let h = [1.0, 0.0, 0.0, 100.0];
+        // Isotropic σ: the smallest eigenvalue is 1, so amp = margin·1.
+        let a = auto_amplitude(&h, &[1.0, 1.0], 2.0).unwrap();
+        assert!((a - 2.0).abs() < 1e-12, "{a}");
+        // A narrow σ in the stiff direction rebalances the metric (S = I).
+        let a = auto_amplitude(&h, &[1.0, 0.1], 2.0).unwrap();
+        assert!((a - 2.0).abs() < 1e-10, "{a}");
+        // A non-positive curvature floors at 1e-12, not a negative height.
+        let a = auto_amplitude(&[-1.0, 0.0, 0.0, 1.0], &[1.0, 1.0], 2.0).unwrap();
+        assert_eq!(a, 2e-12);
+    }
 
     /// The bound is relative to a *gradient* scale, never to the residual: a
     /// residual of 0.5 against scale 1 is rejected, against 1e6 it is not

@@ -6,8 +6,10 @@ the same interior-point solver in a loop, escaping each minimum it finds, and
 collects the distinct local minima into a deduplicated archive. It is the
 pure-Rust counterpart of the Python [`find_minima`](find-minima.md) API and
 needs no Python — it works on built-in problems and on AMPL `.nl` files alike.
-The same search is a library call from Rust:
-[`pounce_rs::minima::find_minima`](rust.md#multiple-minima).
+It is the same search, not a port: Python's `find_minima` and Rust's
+[`pounce_rs::minima::find_minima`](rust.md#multiple-minima) run the same code,
+so for the same model, options and `--seed` they return the same minima in the
+same number of solves.
 
 ```console
 $ pounce model.nl --minima flooding --n-minima 10

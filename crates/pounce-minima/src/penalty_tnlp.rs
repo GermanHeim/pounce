@@ -474,6 +474,48 @@ impl TNLP for TunnelTnlp {
 mod tests {
     use super::Kernel;
 
+    /// Central differences of `value` must match `add_grad`, for both
+    /// kernels, with widths spanning 2.5 orders (ported from
+    /// `test_minima_scaling.py::test_anisotropic_kernel_derivatives`).
+    #[test]
+    fn kernel_gradients_match_finite_differences_of_the_value() {
+        let centers = vec![vec![0.1, 0.2, 0.3, 0.4], vec![-0.2, 0.1, 0.0, 0.5]];
+        let widths: [f64; 4] = [0.3, 1.0, 5.0, 100.0];
+        let inv2: Vec<f64> = widths.iter().map(|w| 1.0 / (w * w)).collect();
+        let kernels = [
+            Kernel::Gauss {
+                centers: centers.clone(),
+                amps: vec![2.0, 2.0],
+                inv_sigma2: inv2.clone(),
+            },
+            Kernel::Pole {
+                centers,
+                eta: 1.5,
+                q: 1.0,
+                soft: 1e-3,
+                inv_len2: inv2,
+            },
+        ];
+        let x = [0.15, 0.25, 0.2, 0.35];
+        let h = 1e-6;
+        for kernel in &kernels {
+            let mut g = vec![0.0; 4];
+            kernel.add_grad(&x, &mut g);
+            let scale = g.iter().fold(1.0_f64, |a, v| a.max(v.abs()));
+            for i in 0..4 {
+                let (mut xp, mut xm) = (x, x);
+                xp[i] += h;
+                xm[i] -= h;
+                let fd = (kernel.value(&xp) - kernel.value(&xm)) / (2.0 * h);
+                assert!(
+                    (g[i] - fd).abs() < 1e-6 * scale,
+                    "{kernel:?} [{i}]: {} vs {fd}",
+                    g[i]
+                );
+            }
+        }
+    }
+
     /// Central differences of `add_grad` must match `add_hess_lower`, for
     /// both kernels, at an anisotropic point away from every center.
     #[test]

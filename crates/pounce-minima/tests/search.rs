@@ -20,6 +20,7 @@
 //! | `on_accept_sees_every_minimum_and_can_abort` | `Hooks::on_accept`, both `ControlFlow` arms |
 //! | `a_custom_distance_decides_dedup` | `Hooks::distance` |
 //! | `the_trace_records_every_candidate` | `Hooks::trace`, on and off |
+//! | `ipopt_local_solve_leaves_the_callers_mu_strategy_alone` | the quasi-Newton `mu_strategy` pin, unset and caller-set |
 
 use pounce_algorithm::application::IpoptApplication;
 use pounce_common::types::Number;
@@ -616,5 +617,30 @@ fn the_trace_records_every_candidate() {
     for t in &r.trace {
         assert_eq!(t.n_found, found);
         found += usize::from(t.accepted);
+    }
+}
+
+/// The quasi-Newton `mu_strategy` pin is the adapter's own: the caller's
+/// option table reads the same afterwards, unset or set.
+#[test]
+fn ipopt_local_solve_leaves_the_callers_mu_strategy_alone() {
+    for preset in [None, Some("adaptive")] {
+        let mut app = quiet_app();
+        if let Some(v) = preset {
+            app.options_mut()
+                .set_string_value("mu_strategy", v, true, true)
+                .unwrap();
+        }
+        {
+            let mut solver = IpoptLocalSolve::new(&mut app);
+            // Tunneling reaches both modes: clean solves and L-BFGS tunnels.
+            let cfg = opts(Method::Tunneling, 3, 8);
+            let _ = find_minima(&camel(), &mut solver, &cfg).unwrap();
+        }
+        let (v, set) = app.options().get_string_value("mu_strategy", "").unwrap();
+        match preset {
+            None => assert!(!set, "left pinned at {v}"),
+            Some(p) => assert!(set && v == p, "caller's {p} became {v}"),
+        }
     }
 }

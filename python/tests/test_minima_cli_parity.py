@@ -1,19 +1,19 @@
-"""`pounce --minima` and `pounce.find_minima` agree on what they accept (gh#966).
+"""`pounce --minima` and `pounce.find_minima` run the same search (gh#966).
 
-The two searches are separate implementations of the same six methods
-(`crates/pounce-cli/src/minima/` and `python/pounce/_minima.py`), coupled by
-comments rather than by code, and they have already drifted: gh#983's
-`kkt_tol` veto landed in Python only, so the CLI kept returning points the
-solver labelled a success at a non-stationary point. This file is the guard
-that would have caught that, run through the real binary and the real
-extension module.
+They were separate implementations of the same six methods, coupled by
+comments rather than by code, and they drifted: gh#983's `kkt_tol` veto
+landed in Python only, so the CLI kept returning points the solver labelled
+a success at a non-stationary point. Both now call
+`pounce_minima::find_minima`. This file is the guard that they stay one
+search, run through the real binary and the real extension module -- a
+frontend that built the problem, the options or the seed differently would
+show up here, which no test of the shared crate can see.
 
-What it compares is deliberately limited to what is independent of the start
-sequence. The two sides draw starts from different Sobol' generators (scipy
-vs `sobol_burley`), so the same seed gives different starts, and a model with
-more minima than the search is asked for legitimately returns different
-subsets. Each fixture is chosen so the compared quantities do not depend on
-which starts were drawn:
+`test_same_search_on_both` is the strong form: same model, method and seed,
+so the same starts, and the two must agree on status, solve count and every
+value. The rest predate the shared core (when the two sides drew starts from
+different Sobol' generators and only start-independent quantities could be
+compared) and stay as named branch checks:
 
 * ``camel`` -- exactly six minima, all of them found: the sorted values agree.
 * ``bowl`` -- one minimum: both report ``converged`` with that one point.
@@ -246,3 +246,16 @@ def test_the_bound_is_relative_on_both(tmp_path):
     assert py.status == cli["status"] == "target_reached"
     assert len(py) == cli["n_minima"] == 4
     assert py.n_kkt_rejected == cli.get("n_kkt_rejected", 0) == 0
+
+
+@pytest.mark.parametrize("model", ["camel", "bowl"])
+@pytest.mark.parametrize("method", ["multistart", "mlsl", "basinhopping",
+                                    "flooding", "deflation", "tunneling"])
+def test_same_search_on_both(tmp_path, model, method):
+    fixture = {"camel": _camel, "bowl": _bowl}[model]()
+    py, _, cli, _ = _both(fixture, tmp_path, method, n_minima=6,
+                          max_solves=80, patience=20, dedup=1e-3, seed=0)
+    assert py.status == cli["status"]
+    assert py.n_solves == cli["n_solves"]
+    assert len(py) == cli["n_minima"]
+    np.testing.assert_allclose(py.values, cli["values"], atol=1e-9, rtol=0)

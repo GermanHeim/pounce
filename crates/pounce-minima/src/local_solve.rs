@@ -73,6 +73,16 @@ pub struct LocalOutcome {
 /// sequential and the search counts them against its own budget.
 pub trait LocalSolve {
     fn solve(&mut self, problem: Rc<RefCell<dyn TNLP>>, mode: HessianMode) -> LocalOutcome;
+
+    /// Whether the problem's `eval_h` is its real Hessian. A frontend that
+    /// declares a Hessian structure only to give L-BFGS a workspace, and fills
+    /// it with zeros, returns `false`: the search then treats the problem as
+    /// having no Hessian — no saddle check, the fallback flooding amplitude,
+    /// quasi-Newton penalty solves — as `pounce.find_minima` does without
+    /// `hess=`. Default `true`.
+    fn has_exact_hessian(&self) -> bool {
+        true
+    }
 }
 
 /// [`LocalSolve`] over one reused [`IpoptApplication`] (no rebuild per start).
@@ -95,15 +105,37 @@ pub trait LocalSolve {
 /// Holding the application mutably for its lifetime also keeps the caller's
 /// own on-converged callback, if any, out of the search's solves; it is put
 /// back when this is dropped.
+///
+/// A quasi-Newton solve also pins `mu_strategy = monotone`, unless the caller
+/// set `mu_strategy` themselves: the search, not the caller, chose L-BFGS for
+/// that subproblem, and gh#746's rule (an unset `mu_strategy` under
+/// limited-memory resolves to `adaptive`) would otherwise read a barrier
+/// preference out of that choice — the inference `pounce-py`'s `prepare`
+/// already refuses for the same reason. Exact solves get the option unset
+/// again, so they see the registered default exactly as before. Measured on
+/// six-hump camel tunneling over 20 seeds (`find_minima(hess=...)`, gh#966):
+/// mean minima found 3.2 under the inferred `adaptive`, 4.5 under `monotone`
+/// (the pure-Python search, whose tunnel solves were Hessian-less problems
+/// and so ran `monotone`: 3.85).
 pub struct IpoptLocalSolve<'a> {
     app: &'a mut IpoptApplication,
     previous_hook: Option<ConvergedCallback>,
+    /// The caller left `mu_strategy` unset, so the quasi-Newton solves pin it.
+    pin_mu: bool,
 }
 
 impl<'a> IpoptLocalSolve<'a> {
     pub fn new(app: &'a mut IpoptApplication) -> Self {
         let previous_hook = app.take_on_converged();
-        Self { app, previous_hook }
+        let pin_mu = matches!(
+            app.options().get_string_value("mu_strategy", ""),
+            Ok((_, false))
+        );
+        Self {
+            app,
+            previous_hook,
+            pin_mu,
+        }
     }
 }
 
@@ -113,7 +145,18 @@ impl LocalSolve for IpoptLocalSolve<'_> {
             HessianMode::Exact => "hessian_approximation exact\n",
             HessianMode::QuasiNewton => "hessian_approximation limited-memory\n",
         };
-        let _ = self.app.options_mut().read_from_str(line, true);
+        let opts = self.app.options_mut();
+        let _ = opts.read_from_str(line, true);
+        if self.pin_mu {
+            match mode {
+                HessianMode::QuasiNewton => {
+                    let _ = opts.set_string_value("mu_strategy", "monotone", true, true);
+                }
+                HessianMode::Exact => {
+                    opts.unset_value("mu_strategy");
+                }
+            }
+        }
         let slot: FinalSlot = Rc::new(RefCell::new(None));
         let wrapped: Rc<RefCell<dyn TNLP>> =
             Rc::new(RefCell::new(CaptureTnlp::new(problem, Rc::clone(&slot))));
@@ -148,6 +191,10 @@ impl LocalSolve for IpoptLocalSolve<'_> {
 
 impl Drop for IpoptLocalSolve<'_> {
     fn drop(&mut self) {
+        // Leave the caller's options as they were.
+        if self.pin_mu {
+            self.app.options_mut().unset_value("mu_strategy");
+        }
         // Put back whatever the caller had registered.
         if let Some(cb) = self.previous_hook.take() {
             self.app.set_on_converged(cb);
