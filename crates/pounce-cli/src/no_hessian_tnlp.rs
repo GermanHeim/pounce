@@ -130,6 +130,10 @@ impl TNLP for NoHessianTnlp {
     fn get_list_of_nonlinear_variables(&mut self, pos: &mut [Index]) -> bool {
         self.inner.borrow_mut().get_list_of_nonlinear_variables(pos)
     }
+    fn wants_intermediate_callback(&self) -> bool {
+        self.inner.borrow().wants_intermediate_callback()
+    }
+
     fn intermediate_callback(&mut self, s: IterStats, d: &IpoptData, cq: &IpoptCq) -> bool {
         self.inner.borrow_mut().intermediate_callback(s, d, cq)
     }

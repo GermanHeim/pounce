@@ -2273,6 +2273,12 @@ impl IpoptAlgorithm {
         let Some(nlp) = self.nlp.as_ref() else {
             return true;
         };
+        // Nothing reads the payload, so building it is the whole cost of the
+        // fire (gh#965). The sink below is skipped with it, which is safe:
+        // its only reader re-emits the row into this same callback.
+        if !tnlp.borrow().wants_intermediate_callback() {
+            return true;
+        }
         let stats = self.build_iter_stats();
         // Record exactly what the callback is about to receive, so a losing
         // retry can re-emit the winning attempt's final row (pounce#870).

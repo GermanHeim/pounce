@@ -2207,6 +2207,12 @@ impl TNLP for CCallbackTnlp {
         ok != FALSE
     }
 
+    /// Only a registered `SetIntermediateCallback` reads the payload, and
+    /// the `GetIpoptCurrent*` inspectors are valid only inside it (gh#965).
+    fn wants_intermediate_callback(&self) -> bool {
+        self.intermediate_cb.is_some()
+    }
+
     fn intermediate_callback(
         &mut self,
         stats: pounce_nlp::tnlp::IterStats,
