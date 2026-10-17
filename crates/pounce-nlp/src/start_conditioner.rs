@@ -606,6 +606,10 @@ impl TNLP for ConditionedStartTnlp {
         self.inner.borrow_mut().derivative_proofs()
     }
 
+    fn wants_intermediate_callback(&self) -> bool {
+        self.inner.borrow().wants_intermediate_callback()
+    }
+
     fn intermediate_callback(
         &mut self,
         stats: IterStats,

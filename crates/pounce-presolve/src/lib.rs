@@ -2225,6 +2225,10 @@ impl TNLP for PresolveTnlp {
             .get_list_of_nonlinear_variables(pos_nonlin_vars)
     }
 
+    fn wants_intermediate_callback(&self) -> bool {
+        self.inner.borrow().wants_intermediate_callback()
+    }
+
     fn intermediate_callback(
         &mut self,
         stats: IterStats,

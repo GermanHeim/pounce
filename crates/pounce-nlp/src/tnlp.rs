@@ -283,6 +283,25 @@ pub trait TNLP {
         crate::constant_derivatives::DerivativeProofs::default()
     }
 
+    /// Does [`Self::intermediate_callback`] do anything with its payload?
+    ///
+    /// The algorithm assembles an [`IterStats`] for every fire, and on a
+    /// solve whose callback is the no-op default that is pure overhead:
+    /// `inf_du` assembles ∇L afresh (two `Jᵀy` products plus norms), 4.6% of
+    /// a 53-iteration AC-OPF solve (gh#965). Returning `false` lets the
+    /// algorithm skip the fire, the stats build, and the gh#870 trace-floor
+    /// sink, which only ever feeds this callback back.
+    ///
+    /// The default is `true`, because Rust cannot tell whether an
+    /// implementor overrode `intermediate_callback`: a `false` default would
+    /// silently stop calling every user callback that exists. Return `false`
+    /// only from a TNLP whose callback is the no-op, or provably ignores its
+    /// argument. A decorator that forwards `intermediate_callback` must
+    /// forward this too, or it keeps paying for a callback nobody reads.
+    fn wants_intermediate_callback(&self) -> bool {
+        true
+    }
+
     /// Per-iteration intermediate callback. Returning false requests
     /// early termination with `User_Requested_Stop`.
     fn intermediate_callback(

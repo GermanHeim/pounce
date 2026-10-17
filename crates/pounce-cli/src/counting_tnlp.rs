@@ -183,6 +183,10 @@ impl TNLP for CountingTnlp {
         self.inner.borrow_mut().get_list_of_nonlinear_variables(pos)
     }
 
+    fn wants_intermediate_callback(&self) -> bool {
+        self.inner.borrow().wants_intermediate_callback()
+    }
+
     fn intermediate_callback(
         &mut self,
         stats: IterStats,

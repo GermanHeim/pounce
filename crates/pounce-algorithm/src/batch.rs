@@ -176,6 +176,10 @@ impl<T: TNLP> TNLP for CaptureTnlp<T> {
     ) -> bool {
         self.inner.get_list_of_nonlinear_variables(pos_nonlin_vars)
     }
+    fn wants_intermediate_callback(&self) -> bool {
+        self.inner.wants_intermediate_callback()
+    }
+
     fn intermediate_callback(
         &mut self,
         stats: IterStats,
@@ -554,6 +558,10 @@ impl<T: TNLP> TNLP for WarmStartTnlp<T> {
     ) -> bool {
         self.inner.get_list_of_nonlinear_variables(pos_nonlin_vars)
     }
+    fn wants_intermediate_callback(&self) -> bool {
+        self.inner.wants_intermediate_callback()
+    }
+
     fn intermediate_callback(
         &mut self,
         stats: IterStats,

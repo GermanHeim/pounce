@@ -1175,6 +1175,18 @@ changes.
 
 ### Changed
 
+- **The intermediate-callback payload is built only when something reads it
+  (gh#965).** Every iteration assembled an `IterStats`, `inf_du` included,
+  which builds ∇L afresh (two `Jᵀy` products plus norms), even when the
+  TNLP's callback was the no-op default. On a 53-iteration solve of PGLib
+  `case1354_pegase` that was about 4% of single-threaded wall time
+  (`FireIntermediateCallback` 0.07 s). `TNLP::wants_intermediate_callback`
+  gates the fire. It defaults to `true`, because Rust cannot tell whether an
+  implementor overrode the callback, and every forwarding decorator passes
+  it through. `.nl` models (the CLI and the browser build) return `false`;
+  the C interface returns `true` only when a callback is registered. The
+  timer now reads 0.000 s on that model, and its iteration log is
+  byte-identical. The fixture sweep is empty: 0 of 220 fixture-legs move.
 - **FERAL 0.20.0: warm refactorizations reuse their output buffers
   (feral#219).** Each interior-point iteration refactors a KKT matrix with
   the same pattern, and feral used to allocate about six new buffers per

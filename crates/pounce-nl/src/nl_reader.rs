@@ -6097,6 +6097,12 @@ impl NlTnlp {
 }
 
 impl TNLP for NlTnlp {
+    /// An `.nl` model carries no callback: the CLI and the browser build
+    /// read the iteration log, not `IterStats` (gh#965).
+    fn wants_intermediate_callback(&self) -> bool {
+        false
+    }
+
     fn get_nlp_info(&mut self) -> Option<NlpInfo> {
         Some(NlpInfo {
             n: self.prob.n as Index,
