@@ -1007,7 +1007,9 @@ dependencies = [
 name = "pounce-minima"
 version = "0.12.0"
 dependencies = [
+ "pounce-algorithm",
  "pounce-common",
+ "pounce-linalg",
  "pounce-nlp",
  "rand",
  "rand_chacha",
@@ -1117,6 +1119,7 @@ dependencies = [
  "pounce-hsl",
  "pounce-linalg",
  "pounce-linsol",
+ "pounce-minima",
  "pounce-nlp",
  "pounce-observability",
  "pounce-presolve",

@@ -1,16 +1,23 @@
-//! The building blocks of POUNCE's multistart / find-minima global search:
-//! the deduplicating archive of found minima, the start sampler (seedable
-//! ChaCha8 + Owen-scrambled Sobol'), the penalty / tunnel TNLP wrappers the
-//! repulsion strategies solve, and the search options.
+//! POUNCE's multistart / find-minima global search.
 //!
-//! Extracted from `pounce-cli` (gh#966) so the search can be shared by every
-//! frontend instead of being re-implemented in each. The search driver still
-//! lives in `pounce_cli::minima` and moves here next; until then this crate is
-//! the parts that do not depend on the solver application.
+//! [`find_minima`] drives a local solver in a loop — six strategies:
+//! multistart, MLSL, basin-hopping, flooding, deflation, tunneling — and
+//! returns the distinct local minima it found, deduplicated and ranked. The
+//! local solves go through the [`LocalSolve`] trait; [`IpoptLocalSolve`] runs
+//! them on a reused [`IpoptApplication`](pounce_algorithm::application::IpoptApplication).
+//!
+//! This is the search the `pounce --minima` CLI runs, extracted from
+//! `pounce-cli` (gh#966) so every frontend shares one implementation instead
+//! of each carrying its own. `pounce-rs` re-exports it behind its `minima`
+//! feature.
 
 pub mod archive;
+pub mod local_solve;
 pub mod options;
 pub mod penalty_tnlp;
 pub mod sampling;
+pub mod search;
 
+pub use local_solve::{HessianMode, IpoptLocalSolve, LocalOutcome, LocalSolve, SolveQuality};
 pub use options::{Method, MinimaOptions};
+pub use search::{MinimaError, MinimaResult, Minimum, Stop, find_minima};

@@ -94,6 +94,13 @@ pub struct MinimaOptions {
     pub restart_jitter: Option<f64>,
 }
 
+impl MinimaOptions {
+    /// The solve budget: `max_solves`, or `8 * n_minima` when unset.
+    pub fn max_solves_or_default(&self) -> usize {
+        self.max_solves.unwrap_or(8 * self.n_minima)
+    }
+}
+
 impl Default for MinimaOptions {
     fn default() -> Self {
         Self {

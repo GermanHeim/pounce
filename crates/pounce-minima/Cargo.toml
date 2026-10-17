@@ -6,13 +6,17 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 readme = "README.md"
-description = "Multistart / find-minima global search building blocks for POUNCE: archive, sampler, penalty wrappers, options."
+description = "Multistart / find-minima global search for POUNCE: six strategies (multistart, MLSL, basin-hopping, flooding, deflation, tunneling) over a pluggable local solver."
 keywords = ["ipopt", "multistart", "global-optimization", "nlp", "optimization"]
 categories = ["mathematics", "science"]
 
 [dependencies]
 pounce-common.workspace = true
 pounce-nlp.workspace = true
+# The dense eigendecomposition behind the saddle-rejection (PSD) check.
+pounce-linalg.workspace = true
+# `IpoptLocalSolve`, the `LocalSolve` over a reused `IpoptApplication`.
+pounce-algorithm.workspace = true
 # `rand_chacha` gives a seedable, portable PRNG (reproducible runs under a
 # seed); `sobol_burley` is an Owen-scrambled Sobol' source matching scipy's
 # `qmc.Sobol(scramble=True)` used by `pounce.find_minima`. Moved here from

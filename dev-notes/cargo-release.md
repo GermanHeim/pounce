@@ -59,10 +59,10 @@ Layer 0: `pounce-common`, `pounce-studio-core` (leaves)
 Layer 1: `pounce-linalg`
 Layer 2: `pounce-linsol`, `pounce-nlp`, `pounce-sens-core`
 Layer 3: `pounce-convex`, `pounce-feral`, `pounce-hsl`, `pounce-l1penalty`,
-         `pounce-minima`, `pounce-nl`, `pounce-observability`,
-         `pounce-presolve`, `pounce-qp`, `pounce-solve-report`
+         `pounce-nl`, `pounce-observability`, `pounce-presolve`, `pounce-qp`,
+         `pounce-solve-report`
 Layer 4: `pounce-algorithm`
-Layer 5: `pounce-restoration`, `pounce-sensitivity`
+Layer 5: `pounce-minima`, `pounce-restoration`, `pounce-sensitivity`
 Layer 6: `pounce-cinterface`, `pounce-cli`
 
 `pounce-convex` (LP/QP/SOCP/SDP conic IPM) depends only on `pounce-common` +

@@ -30,9 +30,8 @@
 # published as of 0.4.0 — the published pounce-cli took a hard dependency
 # on it, so the old "nothing published depends on studio" exclusion no
 # longer holds. pounce-nl is likewise required by pounce-cli and published.
-# pounce-minima (gh#966) needs only pounce-common + pounce-nlp today, but it
-# sits after pounce-algorithm because the search driver moving into it next
-# depends on the application.
+# pounce-minima (gh#966) depends on pounce-algorithm (its IpoptLocalSolve
+# drives the application), so it publishes after it.
 # (The benchmark crates pounce-cutest and pounce-large-scale were retired
 # when those suites moved to .nl.)
 

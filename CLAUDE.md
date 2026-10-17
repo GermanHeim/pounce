@@ -217,7 +217,8 @@ passes `--minima`, so a change to `crates/pounce-minima` or
 fixture set chosen per branch (constrained models for dual recovery, saddle
 models whose every line reads `found=0`, a model whose every candidate reaches
 the `kkt_tol` veto), recording status, solves, every minimum and the best
-point's duals. A pure move must diff empty; gh#966's extraction did, 54 lines.
+point's duals. A pure move must diff empty; gh#966's extraction did, 54
+lines, both when the files moved and when the driver went behind `LocalSolve`.
 
 "It cannot produce a wrong answer" is **not** the relevant safety property
 here, and that exact argument is what shipped gh#544 in 0.10.0: a trajectory
