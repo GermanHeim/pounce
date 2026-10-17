@@ -212,10 +212,16 @@ pub(crate) const REL_FLOOR_KAPPA: f64 = 64.0;
 /// need not be small (gh#1000, I.8: the blend LP at costs `1e4` read a
 /// `2e-13` slack, rounding of `1e3`-sized terms, times `ẑ = 1.6e6` as a
 /// `3e-7` violation, and ground on for 90 iterations).
+///
+/// `conflict` is [`crate::qp::parallel_row_conflict`]: the slack a row keeps
+/// at every point because a duplicate of it carries a conflicting right-hand
+/// side. That much of each product is excused, as the verdict excuses it
+/// (gh#1023).
 pub(crate) fn true_slack_complementarity(
     h: &[f64],
     gx: &[f64],
     gabs: &[f64],
+    conflict: &[f64],
     z: &[f64],
     tau: f64,
 ) -> f64 {
@@ -223,11 +229,12 @@ pub(crate) fn true_slack_complementarity(
         return f64::INFINITY;
     }
     let mut worst = 0.0_f64;
-    for (((&hi, &gxi), &gai), &zi) in h.iter().zip(gx).zip(gabs).zip(z) {
+    for ((((&hi, &gxi), &gai), &wi), &zi) in h.iter().zip(gx).zip(gabs).zip(conflict).zip(z) {
         let gxh = gxi / tau;
         let slack = hi - gxh;
         if slack.abs() > REL_FLOOR_KAPPA * f64::EPSILON * hi.abs().max(gai / tau) {
-            worst = worst.max((slack * zi / tau).abs());
+            let zh = (zi / tau).abs();
+            worst = worst.max((slack.abs() - wi).max(0.0) * zh);
         }
     }
     worst
@@ -563,6 +570,7 @@ where
     let tol_cost = opts.tol * unit_d;
     let tol_gap = opts.tol * unit_g;
     let tol_true_comp = opts.tol * crate::qp::report_units(prob).1;
+    let row_conflict = crate::qp::parallel_row_conflict(prob);
     // The relative arm's stash: the first iterate to satisfy it without being
     // inside the finite-precision floor (see `REL_FLOOR_KAPPA`).
     let mut rel_candidate: Option<RelCandidate> = None;
@@ -893,7 +901,8 @@ where
         let gap_excused = !gap_strict
             && gap < gap_noise
             && orthant_only
-            && true_slack_complementarity(&prob.h, &nrm_gx, &nrm_gabs, &z, tau) <= tol_gap;
+            && true_slack_complementarity(&prob.h, &nrm_gx, &nrm_gabs, &row_conflict, &z, tau)
+                <= tol_gap;
         // gh#1000 (I.8): the dual residual likewise cannot be asked to read
         // below the rounding noise of its own terms. `tol_cost` shrinks with
         // the cost unit and that noise does not -- the blend LP at costs
@@ -907,7 +916,8 @@ where
         let dres_excused = dres >= tol_cost
             && orthant_only
             && dual_excess_above_floor(prob, &x, &y, &z, &rho_x, tau) < tol_cost
-            && true_slack_complementarity(&prob.h, &nrm_gx, &nrm_gabs, &z, tau) <= tol_gap;
+            && true_slack_complementarity(&prob.h, &nrm_gx, &nrm_gabs, &row_conflict, &z, tau)
+                <= tol_gap;
         let abs_ok =
             pres < opts.tol && (dres < tol_cost || dres_excused) && (gap_strict || gap_excused);
         let rel_in_floor = rel_ok && pres <= cap_p && dres <= cap_d && gap <= cap_g;
@@ -941,7 +951,7 @@ where
         // read below `1e-7`, so the loop ran to 196 iterations on a point the
         // verdict accepts.
         let true_comp = if orthant_only {
-            true_slack_complementarity(&prob.h, &nrm_gx, &nrm_gabs, &z, tau)
+            true_slack_complementarity(&prob.h, &nrm_gx, &nrm_gabs, &row_conflict, &z, tau)
         } else {
             0.0
         };
@@ -1697,24 +1707,75 @@ mod tests {
         let h = [1e5, 1e9];
         let gx = [(1e5 - 5e-3) * tau, (1e9 + 1e-7) * tau];
         let z = [1.0 * tau, 1e3 * tau];
-        let c = true_slack_complementarity(&h, &gx, &gx.map(f64::abs), &z, tau);
+        let c = true_slack_complementarity(&h, &gx, &gx.map(f64::abs), &[0.0; 2], &z, tau);
         assert!((c - 5e-3).abs() < 1e-9, "{c:e}");
         // Both inside the quantum: nothing to count.
         let gx_tight = [1e5 * tau, 1e9 * tau];
         assert_eq!(
-            true_slack_complementarity(&h, &gx_tight, &gx_tight, &z, tau),
+            true_slack_complementarity(&h, &gx_tight, &gx_tight, &[0.0; 2], &z, tau),
             0.0
         );
         // A collapsed tau cannot certify anything.
-        assert!(true_slack_complementarity(&h, &gx, &gx, &z, 0.0).is_infinite());
+        assert!(true_slack_complementarity(&h, &gx, &gx, &[0.0; 2], &z, 0.0).is_infinite());
         // gh#1000 (I.8): `h = 0`, `Gx` a cancellation of `1e3`-sized terms
         // that left `2e-13`. The terms, not `|Gx|`, set the quantum.
         let (h0, gx0, z0) = ([0.0], [-2e-13 * tau], [1.6e6 * tau]);
-        assert!(true_slack_complementarity(&h0, &gx0, &gx0.map(f64::abs), &z0, tau) > 0.0);
+        assert!(true_slack_complementarity(&h0, &gx0, &gx0.map(f64::abs), &[0.0], &z0, tau) > 0.0);
         assert_eq!(
-            true_slack_complementarity(&h0, &gx0, &[2e3 * tau], &z0, tau),
+            true_slack_complementarity(&h0, &gx0, &[2e3 * tau], &[0.0], &z0, tau),
             0.0
         );
+        // gh#1023: a slack the data forces (a duplicate row's conflicting
+        // right-hand side) is excused up to the conflict's width, no further.
+        let (h1, gx1, z1) = ([4.9e-15], [-1.6e-16 * tau], [7.4e7 * tau]);
+        let gabs1 = [5e-16 * tau];
+        assert!(true_slack_complementarity(&h1, &gx1, &gabs1, &[0.0], &z1, tau) > 3e-7);
+        assert_eq!(
+            true_slack_complementarity(&h1, &gx1, &gabs1, &[5.1e-15], &z1, tau),
+            0.0
+        );
+        let part = true_slack_complementarity(&h1, &gx1, &gabs1, &[4.0e-15], &z1, tau);
+        assert!((part - 1.06e-15 * 7.4e7).abs() < 1e-9, "{part:e}");
+    }
+
+    #[test]
+    fn parallel_row_conflict_reads_duplicated_rows_only() {
+        use crate::qp::{Triplet, parallel_row_conflict};
+        // Rows 0..3 share `x0 + 2 x1` up to sign: `≤ 1e-15`, `≥ 4e-15`
+        // (written `−x0 − 2x1 ≤ −4e-15`), `≤ 3e-15`. Width `4e-15 − 1e-15`.
+        // Row 3 is parallel but scaled (`2x0 + 4x1`), row 4 a different row:
+        // neither is in the class.
+        let t = |row, col, val| Triplet { row, col, val };
+        let prob = QpProblem {
+            n: 2,
+            p_lower: vec![],
+            c: vec![0.0; 2],
+            a: vec![],
+            b: vec![],
+            g: vec![
+                t(0, 0, 1.0),
+                t(0, 1, 2.0),
+                t(1, 1, -2.0),
+                t(1, 0, -1.0),
+                t(2, 0, 1.0),
+                t(2, 1, 2.0),
+                t(3, 0, 2.0),
+                t(3, 1, 4.0),
+                t(4, 0, 1.0),
+            ],
+            h: vec![1e-15, -4e-15, 3e-15, -1.0, 0.0],
+            lb: vec![],
+            ub: vec![],
+        };
+        let w = parallel_row_conflict(&prob);
+        assert!((w[0] - 3e-15).abs() < 1e-30, "{w:?}");
+        assert_eq!(w[0], w[1]);
+        assert_eq!(w[0], w[2]);
+        assert_eq!(&w[3..], &[0.0, 0.0]);
+        // A consistent class (`≥` below `≤`) has no conflict.
+        let mut ok = prob.clone();
+        ok.h[1] = -0.5e-15;
+        assert!(parallel_row_conflict(&ok).iter().all(|&v| v == 0.0));
     }
 
     fn backend() -> Box<dyn SparseSymLinearSolverInterface> {

@@ -1616,8 +1616,30 @@ impl ParametricActiveSetSolver {
                 opts.feas_tol,
             );
 
-            let (mut alpha, blocker) =
+            let (mut alpha, mut blocker) =
                 select_blocker(&candidates, opts, expand_tol, force_bland, alpha_cap);
+            // Only where the F2 certificate below would fire, so no other
+            // step changes: re-ask "does anything block?" per unit of `p`.
+            if candidates.is_empty()
+                && delta > 0.0
+                && opts.certify_recession_ray
+                && (!alpha.is_finite() || ray_is_unbounded_descent(qp.h, qp.g, &x, &p))
+            {
+                candidates = direction_scaled_blockers(
+                    qp,
+                    &working,
+                    &x,
+                    &ax,
+                    &p,
+                    &ap,
+                    Some((&tabu_bounds, &tabu_cons, p_inf)),
+                    opts.feas_tol,
+                );
+                if !candidates.is_empty() {
+                    (alpha, blocker) =
+                        select_blocker(&candidates, opts, expand_tol, force_bland, alpha_cap);
+                }
+            }
 
             // F2(a): certified unboundedness on the active-set path. An
             // empty candidate list means NO inactive row or bound blocks
@@ -3806,8 +3828,21 @@ impl ParametricActiveSetSolver {
                 opts.feas_tol,
             );
 
-            let (mut alpha, blocker) =
+            let (mut alpha, mut blocker) =
                 select_blocker(&candidates, opts, expand_tol, false, alpha_cap);
+            // Only where the F2 certificate below would fire, so no other
+            // step changes: re-ask "does anything block?" per unit of `p`.
+            if candidates.is_empty()
+                && opts.certify_recession_ray
+                && (!alpha.is_finite() || ray_is_unbounded_descent(qp.h, qp.g, &x, &p))
+            {
+                candidates =
+                    direction_scaled_blockers(qp, &working, &x, &ax, &p, &ap, None, opts.feas_tol);
+                if !candidates.is_empty() {
+                    (alpha, blocker) =
+                        select_blocker(&candidates, opts, expand_tol, false, alpha_cap);
+                }
+            }
 
             // F2(a), Schur path. Same certificate as `solve_general`: an
             // empty candidate list means `+p` is feasible for every step
@@ -4781,6 +4816,76 @@ fn blocker_index_key(b: BlockerTarget) -> (u8, usize) {
 /// candidate, ensuring strictly positive step length even at
 /// degenerate vertices where multiple constraints have α = 0
 /// under the strict ratio test.
+/// The ratio-test candidates along `p`, with the rate threshold taken
+/// relative to the direction's own length — `feas_tol · ‖p‖∞` instead of the
+/// absolute `feas_tol`. Called only when the absolute test found no blocker
+/// and the F2 recession-ray certificate is about to fire (a step that would
+/// not certify is left exactly as it was), and only for `‖p‖∞ < 1`
+/// (above that the absolute threshold is the looser one already applied).
+///
+/// A ray is a direction, so whether anything blocks it cannot depend on how
+/// long `p` happens to be. The absolute filter makes it depend on exactly
+/// that: gh#1023's LP reached a vertex (67 active rows, `n = 67`) whose step
+/// was a `1.9e-8` drift correction in the epigraph variable, every row's
+/// `a·p` sat below `1e-9` (the largest `2.1e-11`, i.e. `1.1e-3` per unit of
+/// `p`), the candidate list came back empty, and an LP with a finite optimum
+/// was certified `Unbounded`.
+///
+/// `tabu` carries `solve_general`'s rank-tabu flags and `‖p‖∞` so the same
+/// drift-band suppression applies; the Schur path has none.
+#[allow(clippy::too_many_arguments)]
+fn direction_scaled_blockers(
+    qp: &QpProblem,
+    working: &WorkingSet,
+    x: &[Number],
+    ax: &[Number],
+    p: &[Number],
+    ap: &[Number],
+    tabu: Option<(&[bool], &[bool], Number)>,
+    feas_tol: Number,
+) -> Vec<(BlockerTarget, Number, Number)> {
+    let p_scale = p.iter().fold(0.0_f64, |acc, v| acc.max(v.abs()));
+    let mut candidates = Vec::new();
+    if !(p_scale > 0.0 && p_scale < 1.0) {
+        return candidates;
+    }
+    let tol = feas_tol * p_scale;
+    let in_drift_band = |flags: Option<&[bool]>, i: usize, rate: Number| match (flags, tabu) {
+        (Some(f), Some((_, _, p_inf))) => f[i] && rate.abs() <= TABU_DRIFT_REL * p_inf,
+        _ => false,
+    };
+    for i in 0..qp.n {
+        if working.bounds[i].is_active() || in_drift_band(tabu.map(|t| t.0), i, p[i]) {
+            continue;
+        }
+        if p[i] < -tol && qp.xl[i] > NLP_LOWER_BOUND_INF {
+            let r = (x[i] - qp.xl[i]) / -p[i];
+            candidates.push((BlockerTarget::Bound(i, BoundStatus::AtLower), r, p[i].abs()));
+        }
+        if p[i] > tol && qp.xu[i] < NLP_UPPER_BOUND_INF {
+            let r = (qp.xu[i] - x[i]) / p[i];
+            candidates.push((BlockerTarget::Bound(i, BoundStatus::AtUpper), r, p[i].abs()));
+        }
+    }
+    for i in 0..qp.m {
+        if working.constraints[i].is_active()
+            || qp.bl[i] == qp.bu[i]
+            || in_drift_band(tabu.map(|t| t.1), i, ap[i])
+        {
+            continue;
+        }
+        if ap[i] < -tol && qp.bl[i] > NLP_LOWER_BOUND_INF {
+            let r = (ax[i] - qp.bl[i]) / -ap[i];
+            candidates.push((BlockerTarget::Cons(i, ConsStatus::AtLower), r, ap[i].abs()));
+        }
+        if ap[i] > tol && qp.bu[i] < NLP_UPPER_BOUND_INF {
+            let r = (qp.bu[i] - ax[i]) / ap[i];
+            candidates.push((BlockerTarget::Cons(i, ConsStatus::AtUpper), r, ap[i].abs()));
+        }
+    }
+    candidates
+}
+
 fn select_blocker(
     candidates: &[(BlockerTarget, f64, f64)],
     opts: &QpOptions,
@@ -5042,8 +5147,15 @@ impl ParametricActiveSetSolver {
         // /`solve_general_schur` *directly*, bypassing this entry, so the
         // recovery cannot loop. A feasible warm start (the common case —
         // a good crossover/SQP hint) passes untouched.
+        //
+        // Feasible is judged per row against the terms that meet in it
+        // (`point_is_feasible_scaled`), as the drift-repair acceptance below
+        // already is. An absolute `feas_tol` sits under one ulp once a row's
+        // terms pass ~`1e7`: gh#1023's exact simplex vertex read `4.8e-7` on a
+        // row with right-hand side `6.0e8`, went to elastic, and the elastic
+        // phase-1 ran to the iteration cap.
         if let Some(w) = ws {
-            if !point_is_feasible(qp, &w.x, opts.feas_tol) {
+            if !point_is_feasible_scaled(qp, &w.x, opts.feas_tol) {
                 return self.solve_elastic(qp, opts);
             }
         }

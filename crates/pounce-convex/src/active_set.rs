@@ -1502,11 +1502,16 @@ fn adjudicated_kkt_error(prob: &QpProblem, sol: &QpSolution, tol: f64, obj_const
         return err;
     }
     let rel = crate::ipm::equilibrated_kkt_rel_parts(prob, sol, obj_constant);
-    err.min(
-        res.primal_infeasibility
-            .max(rel.dual_infeasibility)
-            .max(rel.complementarity),
-    )
+    // Primal stays in the user's units (see above) but is read above the
+    // rounding floor of evaluating each row, the per-row measure the IPM's
+    // verdict applies (`QpSolution::kkt_residuals_above_floor`). A row whose
+    // terms reach `6e8` is quantized at `1.2e-7`: gh#1023's LP, solved here to
+    // its exact optimum, read `1.19e-7` on such a row and was reported
+    // `OptimalInaccurate`, which also sent the driver into two cold retries.
+    // The floor is `~1e-13` per unit of row magnitude, so `scaled_feasible_a`'s
+    // `7.8e-3` is untouched.
+    let primal = sol.kkt_residuals_above_floor(prob).primal_infeasibility;
+    err.min(primal.max(rel.dual_infeasibility).max(rel.complementarity))
 }
 
 /// Decide the reported status from the engine's verdict **and** the measured

@@ -275,34 +275,38 @@ pub(crate) fn simplex_feasible_vertex(prob: &QpProblem) -> Option<FeasibleVertex
     })
 }
 
-/// Does `x` satisfy `Ax = b`, `Gx ≤ h`, and the variable box, to `FEAS_TOL`?
+/// Does `x` satisfy `Ax = b`, `Gx ≤ h`, and the variable box, to `FEAS_TOL`
+/// relative to each row's own scale?
+///
+/// A row's tolerance is `FEAS_TOL · max(1, |rhs|, Σⱼ|aᵢⱼ xⱼ|)` and a bound's
+/// `FEAS_TOL · max(1, |bound|)`, the measure `pounce-qp`'s
+/// `point_is_feasible_scaled` applies. An absolute `1e-9` sits below one ulp
+/// once a row's terms pass ~`1e7`: gh#1023's LP carries right-hand sides of
+/// `6.0e8`, and the exactly refined vertex still read `4.8e-7` there.
 fn feasible_at(prob: &QpProblem, x: &[f64]) -> bool {
-    let mut ax = vec![0.0; prob.m_eq()];
-    for t in &prob.a {
-        ax[t.row] += t.val * x[t.col];
-    }
-    for (i, &v) in ax.iter().enumerate() {
-        if (v - prob.b[i]).abs() > FEAS_TOL {
-            return false;
+    let row_ok = |m: usize, trips: &[crate::qp::Triplet], rhs: &[f64], eq: bool| {
+        let mut v = vec![0.0; m];
+        let mut mag = vec![0.0_f64; m];
+        for t in trips {
+            v[t.row] += t.val * x[t.col];
+            mag[t.row] += (t.val * x[t.col]).abs();
         }
+        (0..m).all(|i| {
+            let r = v[i] - rhs[i];
+            let r = if eq { r.abs() } else { r };
+            r <= FEAS_TOL * 1.0_f64.max(rhs[i].abs()).max(mag[i])
+        })
+    };
+    if !row_ok(prob.m_eq(), &prob.a, &prob.b, true)
+        || !row_ok(prob.m_ineq(), &prob.g, &prob.h, false)
+    {
+        return false;
     }
-
-    let mut gx = vec![0.0; prob.m_ineq()];
-    for t in &prob.g {
-        gx[t.row] += t.val * x[t.col];
-    }
-    for (i, &v) in gx.iter().enumerate() {
-        if v - prob.h[i] > FEAS_TOL {
-            return false;
-        }
-    }
-
-    for (i, &xi) in x.iter().enumerate() {
-        if xi < lo_bound(prob.lb_of(i)) - FEAS_TOL || xi > hi_bound(prob.ub_of(i)) + FEAS_TOL {
-            return false;
-        }
-    }
-    true
+    let tol = |b: f64| FEAS_TOL * 1.0_f64.max(b.abs());
+    x.iter().enumerate().all(|(i, &xi)| {
+        let (lo, hi) = (lo_bound(prob.lb_of(i)), hi_bound(prob.ub_of(i)));
+        xi >= lo - tol(lo) && xi <= hi + tol(hi)
+    })
 }
 
 /// Treat `|v| ≥ 1e20` as an infinite bound (mirrors [`QpProblem`] conventions).
@@ -668,6 +672,57 @@ impl Simplex {
         Some(())
     }
 
+    /// The worst row residual of `M w = rhs`, each row measured relative to
+    /// the largest term that meets in it, `|rᵢ| / max(1, |rhsᵢ|, maxⱼ|mᵢⱼ wⱼ|)`,
+    /// together with the absolute residual vector. Per row, because a global
+    /// norm is owned by the largest rows: on gh#1023's LP the `6e8` rows carry
+    /// `1e-7` of honest round-off and hide a `3e-9` error in an `O(1)` row.
+    fn scaled_residual(&self) -> (f64, Vec<f64>) {
+        let mut r = self.rhs.clone();
+        let mut mag: Vec<f64> = self.rhs.iter().map(|v| v.abs().max(1.0)).collect();
+        for v in 0..self.nv {
+            let xv = self.xval[v];
+            if xv == 0.0 {
+                continue;
+            }
+            for &(row, val) in &self.cols[v] {
+                r[row] -= val * xv;
+                mag[row] = mag[row].max((val * xv).abs());
+            }
+        }
+        let worst = r
+            .iter()
+            .zip(&mag)
+            .fold(0.0_f64, |w, (ri, mi)| w.max(ri.abs() / mi));
+        (worst, r)
+    }
+
+    /// Iterative refinement of the basic values, `x_B += B⁻¹ r` with
+    /// `r = rhs − M w`, for as long as it reduces [`Self::scaled_residual`]
+    /// (at most a few rounds). Returns whether any round was kept.
+    fn refine_basics(&mut self) -> Option<bool> {
+        let mut kept = false;
+        let (mut worst, mut r) = self.scaled_residual();
+        for _ in 0..3 {
+            let saved: Vec<f64> = self.basis.iter().map(|&v| self.xval[v]).collect();
+            self.lu.as_mut()?.ftran(&mut r).ok()?;
+            for slot in 0..self.m {
+                self.xval[self.basis[slot]] += r[slot];
+            }
+            let (w, r_next) = self.scaled_residual();
+            if w >= worst {
+                for (slot, x) in saved.into_iter().enumerate() {
+                    self.xval[self.basis[slot]] = x;
+                }
+                break;
+            }
+            kept = true;
+            worst = w;
+            r = r_next;
+        }
+        Some(kept)
+    }
+
     /// `α = B⁻¹ a_q` (slot-space), where `a_q` is the entering column.
     fn ftran_col(&mut self, var: usize) -> Option<Vec<f64>> {
         let mut col = vec![0.0; self.m];
@@ -743,6 +798,7 @@ impl Simplex {
         // non-degenerate plateaus the per-pivot `stall` counter misses).
         let mut best_infeas = self.primal_infeasibility();
         let mut no_progress: u32 = 0;
+        let mut refined = false;
         for _it in 0..max_iter {
             if crate::deadline::expired() {
                 return None;
@@ -761,6 +817,21 @@ impl Simplex {
             let (q, t) = match entering {
                 Some(e) => e,
                 None => {
+                    // No improving direction. Before concluding anything, make
+                    // sure the infeasibility is the basis's and not the solve's:
+                    // a basis mixing `O(1)` and `1e7` entries solves `M w = rhs`
+                    // only to a few ulps of its largest terms, and that error
+                    // lands in the small rows as infeasibility no pivot can
+                    // price away (gh#1023: seven duplicated slacks at `-3.2e-9`,
+                    // every reduced cost below `DUAL_TOL`). Refinement removes
+                    // it; a genuine stall survives and is read as before.
+                    if !refined && self.refine_basics()? {
+                        refined = true;
+                        if self.primal_infeasibility() <= FEAS_TOL {
+                            return Some(());
+                        }
+                        continue;
+                    }
                     // No improving direction: feasible iff infeasibility is 0.
                     return if self.primal_infeasibility() <= 1e-7 {
                         Some(())

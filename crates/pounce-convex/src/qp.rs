@@ -587,6 +587,78 @@ pub(crate) fn report_units(prob: &QpProblem) -> (f64, f64) {
     }
 }
 
+/// Per inequality row, how far the data itself keeps the row's slack from
+/// zero: the conflict among the right-hand sides of rows that share its
+/// coefficients up to sign (gh#1023).
+///
+/// Rows `g·x ≤ uₖ` and `−g·x ≤ −lₖ` bound one quantity, `g·x ∈ [max lₖ, min
+/// uₖ]`. When `max lₖ > min uₖ` no point meets all of them, and at the best
+/// point some row of the class keeps a slack of up to the width `max lₖ −
+/// min uₖ`. A cutting-plane caller writes an equality as two opposed rows and
+/// repeats a cut with a right-hand side that differs by round-off: the
+/// discopt LP in gh#1023 holds 42 such classes, conflicting by up to
+/// `9e-15`, while their paired multipliers grow toward `7e7` without
+/// cancelling. `slack·z` there reads `3.5e-7` -- a product of an
+/// irreducible slack and an unbounded multiplier, not a complementarity
+/// error -- and the true-slack stop (gh#1000 I.D) ran to `max_iter`.
+///
+/// Zero for a row in no conflicting class, so a model without repeated
+/// rows is read exactly as before. Exact coefficient match only: a class is
+/// formed by a caller duplicating a row, not by rows that happen to be
+/// parallel.
+pub(crate) fn parallel_row_conflict(prob: &QpProblem) -> Vec<f64> {
+    let m = prob.m_ineq();
+    let mut rows: Vec<Vec<(usize, f64)>> = vec![Vec::new(); m];
+    for t in &prob.g {
+        if t.val != 0.0 {
+            rows[t.row].push((t.col, t.val));
+        }
+    }
+    let mut classes: std::collections::HashMap<Vec<(usize, u64)>, Vec<(usize, bool)>> =
+        std::collections::HashMap::new();
+    for (i, r) in rows.iter_mut().enumerate() {
+        r.sort_by_key(|&(c, _)| c);
+        // Duplicate triplets sum, as in every product with `G`.
+        let mut merged: Vec<(usize, f64)> = Vec::with_capacity(r.len());
+        for &(c, v) in r.iter() {
+            match merged.last_mut() {
+                Some(last) if last.0 == c => last.1 += v,
+                _ => merged.push((c, v)),
+            }
+        }
+        merged.retain(|&(_, v)| v != 0.0);
+        let Some(&(_, first)) = merged.first() else {
+            continue;
+        };
+        let positive = first > 0.0;
+        let key = merged
+            .iter()
+            .map(|&(c, v)| (c, if positive { v } else { -v }.to_bits()))
+            .collect();
+        classes.entry(key).or_default().push((i, positive));
+    }
+    let mut width = vec![0.0; m];
+    for members in classes.values() {
+        let upper = members
+            .iter()
+            .filter(|&&(_, p)| p)
+            .map(|&(i, _)| prob.h[i])
+            .fold(f64::INFINITY, f64::min);
+        let lower = members
+            .iter()
+            .filter(|&&(_, p)| !p)
+            .map(|&(i, _)| -prob.h[i])
+            .fold(f64::NEG_INFINITY, f64::max);
+        let w = lower - upper;
+        if w > 0.0 && w.is_finite() {
+            for &(i, _) in members {
+                width[i] = w;
+            }
+        }
+    }
+    width
+}
+
 /// A tiny-curvature warning fires when `‖P‖∞` is more than this many orders of
 /// magnitude below the rest of the problem data. Six orders is comfortably past
 /// where a well-scaled convex QP sits (curvature commensurate with the linear
@@ -793,10 +865,18 @@ impl QpSolution {
         // No global allowance: the second pass also excused every product by
         // `k` times the duality-gap scale `|cᵀx| + |hᵀz| + ...`, which let one
         // large term excuse every product in the model.
+        //
+        // A row whose right-hand side conflicts with a duplicate of itself
+        // cannot reach zero slack at any point, so the conflict's width is
+        // excused too, per row (gh#1023, [`parallel_row_conflict`]).
+        let conflict = parallel_row_conflict(prob);
         let mut comp = 0.0_f64;
         for (i, &zi) in self.z.iter().enumerate() {
             let slack = prob.h[i] - gx[i];
-            comp = comp.max(excess((zi * slack).abs(), zi.abs() * row_mag[i]));
+            comp = comp.max(excess(
+                (zi * slack).abs() - zi.abs() * conflict[i],
+                zi.abs() * row_mag[i],
+            ));
         }
         for i in 0..n {
             let (lb, ub, xi) = (prob.lb_of(i), prob.ub_of(i), x[i]);
