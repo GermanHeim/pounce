@@ -14,6 +14,7 @@
 //! | `kkt_tol_vetoes_a_converged_non_stationary_point` | the gh#983 veto, and `kkt_tol: None` |
 //! | `failed_solves_exhaust_patience` | a non-converged solve → reject → patience |
 //! | `ipopt_local_solve_puts_the_callers_hook_back` | `IpoptLocalSolve`'s `Drop` |
+//! | `honor_original_bounds_is_honoured` | the answer read from `finalize_solution`, projected |
 
 use pounce_algorithm::application::IpoptApplication;
 use pounce_common::types::Number;
@@ -331,4 +332,46 @@ fn ipopt_local_solve_puts_the_callers_hook_back() {
     // ...and is back in place for the caller's own.
     let _ = app.optimize_tnlp(bowl());
     assert_eq!(fired.get(), 1);
+}
+
+/// (x+1)^2 + (y-0.3)^2 on [0,2]x[-1,1]: the minimum binds x >= 0.
+fn bound_active() -> Rc<RefCell<dyn TNLP>> {
+    Rc::new(RefCell::new(Box2 {
+        f: |z| (z[0] + 1.0).powi(2) + (z[1] - 0.3).powi(2),
+        g: |z| [2.0 * (z[0] + 1.0), 2.0 * (z[1] - 0.3)],
+        h: |_| [2.0, 0.0, 2.0],
+        lo: [0.0, -1.0],
+        hi: [2.0, 1.0],
+        x0: [1.0, 0.0],
+    }))
+}
+
+fn bound_active_x(extra_options: &str) -> Number {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .read_from_str(&format!("print_level 0\nsb yes\n{extra_options}"), true)
+        .unwrap();
+    app.initialize().unwrap();
+    let mut solver = IpoptLocalSolve::new(&mut app);
+    let r = find_minima(
+        &bound_active(),
+        &mut solver,
+        &opts(Method::Multistart, 1, 4),
+    )
+    .unwrap();
+    assert_eq!(r.minima.len(), 1);
+    r.minima[0].x[0]
+}
+
+/// The answer is the `finalize_solution` payload, so `honor_original_bounds`
+/// is honoured. Reading the algorithm's iterate (the on-converged hook this
+/// replaced) returned the relaxed point either way.
+#[test]
+fn honor_original_bounds_is_honoured() {
+    // The premise: without the option the reported point sits past the bound
+    // by the bound relaxation, so this fixture reaches the projection branch.
+    let relaxed = bound_active_x("");
+    assert!(relaxed < 0.0 && relaxed > -1e-6, "relaxed x = {relaxed:e}");
+    let projected = bound_active_x("honor_original_bounds yes\n");
+    assert_eq!(projected, 0.0);
 }

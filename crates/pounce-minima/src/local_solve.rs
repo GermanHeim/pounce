@@ -6,6 +6,7 @@
 //! [`IpoptApplication`], which is what the CLI uses; a frontend with its own
 //! solve path (the Python bindings) implements the trait over that instead.
 
+use crate::capture_tnlp::{CaptureTnlp, FinalSlot};
 use pounce_algorithm::application::{ConvergedCallback, IpoptApplication};
 use pounce_common::types::Number;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
@@ -73,61 +74,35 @@ pub trait LocalSolve {
     fn solve(&mut self, problem: Rc<RefCell<dyn TNLP>>, mode: HessianMode) -> LocalOutcome;
 }
 
-/// On-converged capture slot: the lifted full-length primal `x` plus the
-/// base-problem constraint duals `lambda` of the most recent solve.
-type SolveCapture = Rc<RefCell<Option<(Vec<Number>, Vec<Number>)>>>;
-
 /// [`LocalSolve`] over one reused [`IpoptApplication`] (no rebuild per start).
 ///
 /// Each solve sets `hessian_approximation` for its [`HessianMode`] — the IPM
-/// rereads the option every solve — and captures the converged point through
-/// the application's on-converged hook. Construction installs that hook; any
-/// callback the caller had registered is put back when this is dropped.
+/// rereads the option every solve — and reads the answer from the
+/// `finalize_solution` payload, through a wrapper around the problem: the
+/// reported `x` (after `honor_original_bounds`, when set) and the user-space
+/// `lambda`, the same numbers a plain solve's `.sol` carries.
+///
+/// It used to read them from the application's on-converged hook instead,
+/// which sees the algorithm's iterate: the un-projected `x`, so
+/// `honor_original_bounds=yes` was ignored, and — when a later attempt lost
+/// and an earlier answer was restored from the floor (the mu fallback,
+/// pounce#870, on by default, or the gh#884 retry) — the *discarded*
+/// attempt's point, while the status described the winner's. The floor
+/// restore re-delivers the winner through `finalize_solution`, so the payload
+/// is right in both cases.
+///
+/// Holding the application mutably for its lifetime also keeps the caller's
+/// own on-converged callback, if any, out of the search's solves; it is put
+/// back when this is dropped.
 pub struct IpoptLocalSolve<'a> {
     app: &'a mut IpoptApplication,
-    capture: SolveCapture,
     previous_hook: Option<ConvergedCallback>,
 }
 
 impl<'a> IpoptLocalSolve<'a> {
     pub fn new(app: &'a mut IpoptApplication) -> Self {
-        // Capture the converged primal AND the base-problem constraint duals
-        // of each solve via the on-converged hook. `lambda` uses the same
-        // `finalize_solution_lambda` convention as the main NLP `.sol` path
-        // (c/d split inversion + unscaling), so the `.sol` duals match a plain
-        // solve. An nlp that does not expose user-facing duals returns an
-        // empty vec; that (or any length mismatch) falls back to zeros where
-        // the duals are stored.
-        let capture: SolveCapture = Rc::new(RefCell::new(None));
         let previous_hook = app.take_on_converged();
-        let cap = Rc::clone(&capture);
-        // NOTE (gh#884 follow-up): `set_on_converged` fires once per
-        // *attempt*. When a later attempt loses and an earlier one's answer
-        // is replayed through the three-sink floor -- the mu fallback
-        // (pounce#870, on by DEFAULT) or the gh#884 dual-divergence retry --
-        // the converged KKT state this closure reads belongs to the
-        // DISCARDED attempt, while the status, objective and statistics
-        // reported alongside it are the winner's.
-        // `IpoptApplication::answer_restored_from_floor()` reports that this
-        // happened; the CLI's main path consults it and re-reads the point
-        // from the `finalize_solution` payload. This site does not, because
-        // what it needs is the factorization and the KKT state, which the
-        // payload does not carry and which cannot be rewound. Pre-existing
-        // and unfixed: a sensitivity result taken across a floored solve
-        // describes the attempt that lost.
-        app.set_on_converged(Box::new(move |data, _cq, nlp, _pd| {
-            if let Some(curr) = data.borrow().curr.clone() {
-                let nlp_ref = nlp.borrow();
-                let x = nlp_ref.lift_x_to_full(&*curr.x);
-                let lambda = nlp_ref.finalize_solution_lambda(&*curr.y_c, &*curr.y_d);
-                *cap.borrow_mut() = Some((x, lambda));
-            }
-        }));
-        Self {
-            app,
-            capture,
-            previous_hook,
-        }
+        Self { app, previous_hook }
     }
 }
 
@@ -138,8 +113,10 @@ impl LocalSolve for IpoptLocalSolve<'_> {
             HessianMode::QuasiNewton => "hessian_approximation limited-memory\n",
         };
         let _ = self.app.options_mut().read_from_str(line, true);
-        *self.capture.borrow_mut() = None;
-        let status = self.app.optimize_tnlp(problem);
+        let slot: FinalSlot = Rc::new(RefCell::new(None));
+        let wrapped: Rc<RefCell<dyn TNLP>> =
+            Rc::new(RefCell::new(CaptureTnlp::new(problem, Rc::clone(&slot))));
+        let status = self.app.optimize_tnlp(wrapped);
         let succeeded = matches!(
             status,
             ApplicationReturnStatus::SolveSucceeded
@@ -151,7 +128,7 @@ impl LocalSolve for IpoptLocalSolve<'_> {
             unscaled_dual_scale: stats.final_unscaled_dual_scale,
             start_obj_grad_max: stats.start_obj_grad_max,
         };
-        match self.capture.borrow_mut().take() {
+        match slot.borrow_mut().take() {
             Some((x, lambda)) if succeeded => LocalOutcome {
                 converged: true,
                 x,
@@ -170,9 +147,7 @@ impl LocalSolve for IpoptLocalSolve<'_> {
 
 impl Drop for IpoptLocalSolve<'_> {
     fn drop(&mut self) {
-        // Put back whatever the caller had registered; dropping our own
-        // capture hook with it.
-        let _ = self.app.take_on_converged();
+        // Put back whatever the caller had registered.
         if let Some(cb) = self.previous_hook.take() {
             self.app.set_on_converged(cb);
         }

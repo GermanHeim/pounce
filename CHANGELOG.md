@@ -190,6 +190,19 @@ changes.
   rows violated by `3e-9` at multipliers near `8e7` down to `3e-15`. The
   fixture sweep (both legs) and Maros-Mészáros at the default routing are
   unchanged.
+- **`pounce --minima` honours `honor_original_bounds`, and reports the answer
+  the status describes (gh#966).** Each local solve's point and duals were
+  read from the application's on-converged hook, which sees the algorithm's
+  iterate rather than the reported answer. So `honor_original_bounds=yes` was
+  ignored (a bound-active minimum came back at `x = -8.7e-9` against a lower
+  bound of 0), and when a later attempt lost and an earlier answer was
+  restored from the floor — the mu fallback (pounce#870, on by default) or
+  the gh#884 retry — the archived point was the *discarded* attempt's while
+  the status described the winner's. The search now reads the
+  `finalize_solution` payload, which the floor restore re-delivers. At
+  default options nothing moves (`scripts/sweep-minima.sh`, 0 of 54 lines);
+  with `honor_original_bounds=yes`, 6 of 54 move, all on `haverly`, whose
+  minima now sit on their bounds.
 - **`pounce --minima` vetoes solver successes at non-stationary points, as
   `find_minima` does (gh#966).** gh#983 added `find_minima(kkt_tol=1e-4)`:
   a converged local solve is rejected when its *unscaled* dual infeasibility

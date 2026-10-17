@@ -12,6 +12,7 @@
 //! feature.
 
 pub mod archive;
+mod capture_tnlp;
 pub mod local_solve;
 pub mod options;
 pub mod penalty_tnlp;
