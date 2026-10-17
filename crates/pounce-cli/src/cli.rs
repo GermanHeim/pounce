@@ -218,6 +218,10 @@ pub struct MinimaArgs {
     pub dedup: f64,
     /// Smallest Hessian eigenvalue tolerated by saddle rejection (1e-6).
     pub psd_tol: f64,
+    /// Reject a converged solve whose unscaled dual infeasibility exceeds
+    /// `kkt_tol · max(1, max|∇f(x0)|, dual_scale)` (gh#983; default 1e-4).
+    /// `None` (`--kkt-tol none`) disables the check.
+    pub kkt_tol: Option<f64>,
     /// Seed for the sampler / Sobol' scramble (default 0; reproducible).
     pub seed: u64,
     /// Use a scrambled Sobol' sequence for box sampling (default true).
@@ -249,6 +253,7 @@ impl Default for MinimaArgs {
             patience: 8,
             dedup: 1e-4,
             psd_tol: 1e-6,
+            kkt_tol: Some(1e-4),
             seed: 0,
             sobol: true,
             sigma: None,
@@ -430,6 +435,9 @@ Multistart / find-minima (search for several local minima, not one):
                             are the same (default 1e-4)
   --psd-tol <t>             smallest Hessian eigenvalue tolerated by the
                             saddle-rejection check (default 1e-6)
+  --kkt-tol <t|none>        reject a converged solve whose unscaled dual
+                            infeasibility exceeds t*max(1, gradient scale)
+                            (default 1e-4; `none` disables)
   --seed <S>                seed for sampling / Sobol' scramble (default 0)
   --sobol / --no-sobol      use a scrambled Sobol' sequence for box
                             sampling (default: on)
@@ -638,6 +646,18 @@ Multistart / find-minima (search for several local minima, not one):
                 "--patience" => minima_num!("--patience", usize, patience),
                 "--dedup" => minima_num!("--dedup", f64, dedup),
                 "--psd-tol" => minima_num!("--psd-tol", f64, psd_tol),
+                "--kkt-tol" => {
+                    let v = flag_val!("--kkt-tol");
+                    let parsed = if v.eq_ignore_ascii_case("none") {
+                        None
+                    } else {
+                        Some(v.parse::<f64>().map_err(|e| format!("--kkt-tol: {e}"))?)
+                    };
+                    minima.get_or_insert_with(MinimaArgs::default).kkt_tol = parsed;
+                    if minima_knob.is_none() {
+                        minima_knob = Some("--kkt-tol");
+                    }
+                }
                 "--seed" => minima_num!("--seed", u64, seed),
                 "--sobol" => {
                     minima.get_or_insert_with(MinimaArgs::default).sobol = true;
@@ -1308,6 +1328,18 @@ mod tests {
         assert_eq!(m.psd_tol, 1e-8);
         assert_eq!(m.seed, 7);
         assert!(!m.sobol);
+    }
+
+    #[test]
+    fn minima_kkt_tol_defaults_on_and_accepts_none() {
+        let a = Args::parse_argv(argv(&["/tmp/foo.nl", "--multistart"])).unwrap();
+        assert_eq!(a.minima.unwrap().kkt_tol, Some(1e-4));
+        let a =
+            Args::parse_argv(argv(&["/tmp/foo.nl", "--multistart", "--kkt-tol", "1e-2"])).unwrap();
+        assert_eq!(a.minima.unwrap().kkt_tol, Some(1e-2));
+        let a =
+            Args::parse_argv(argv(&["/tmp/foo.nl", "--multistart", "--kkt-tol", "none"])).unwrap();
+        assert_eq!(a.minima.unwrap().kkt_tol, None);
     }
 
     #[test]

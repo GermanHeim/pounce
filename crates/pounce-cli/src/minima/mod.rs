@@ -15,8 +15,9 @@
 //! The local solver is reused across starts on a single `IpoptApplication`
 //! (no rebuild per start): each start wraps the base TNLP in a
 //! [`SeededTnlp`] (and, for the repulsion strategies, a penalty wrapper).
-//! Acceptance mirrors `_minima.py`: solve succeeded ∧ finite ∧ in-bounds ∧
-//! (Hessian PSD within `psd_tol`) ∧ not already in the archive.
+//! Acceptance mirrors `_minima.py`: solve succeeded ∧ unscaled stationarity
+//! within `kkt_tol` (gh#983) ∧ finite ∧ in-bounds ∧ (Hessian PSD within
+//! `psd_tol`) ∧ not already in the archive.
 
 pub mod archive;
 pub mod penalty_tnlp;
@@ -168,6 +169,12 @@ struct Driver<'a> {
     /// rejects every sample (pounce#103).
     max_samples: usize,
     psd_skipped_logged: bool,
+    /// The problem's gradient scale, `max |∇f(x0)|`, for the relative
+    /// `kkt_tol` bound (gh#983). Set at setup from the base TNLP; if that
+    /// evaluation fails, from the first solve's `start_obj_grad_max`.
+    grad_ref: Option<Number>,
+    /// Converged solves vetoed by `kkt_tol` (`MinimaResult.n_kkt_rejected`).
+    n_kkt_rejected: usize,
 }
 
 impl<'a> Driver<'a> {
@@ -199,7 +206,7 @@ impl<'a> Driver<'a> {
             status,
             ApplicationReturnStatus::SolveSucceeded
                 | ApplicationReturnStatus::SolvedToAcceptableLevel
-        );
+        ) && !self.kkt_rejects();
         match self.capture.borrow_mut().take() {
             // Only the primal is needed for acceptance; the duals are recovered
             // later by `recover_duals` (a clean base re-solve) so a point
@@ -212,6 +219,35 @@ impl<'a> Driver<'a> {
                 success: false,
                 x: Vec::new(),
             }),
+        }
+    }
+
+    /// gh#983: veto a converged solve whose **unscaled** stationarity residual
+    /// exceeds `kkt_tol · max(1, g0, dual_scale)`. `Solve_Succeeded` is a
+    /// verdict in the solver's scaled space, and gradient scaling frozen at a
+    /// huge-gradient start has been seen to certify points whose unscaled
+    /// residual is ~1. The bound is relative so an objective whose gradients
+    /// legitimately live at `1e12` is not rejected wholesale; see
+    /// [`kkt_bound`]. Mirrors `_Context.solve` in `_minima.py`.
+    fn kkt_rejects(&mut self) -> bool {
+        let Some(tol) = self.cfg.kkt_tol else {
+            return false;
+        };
+        let stats = self.app.statistics();
+        if self.grad_ref.is_none() && stats.start_obj_grad_max.is_finite() {
+            self.grad_ref = Some(stats.start_obj_grad_max);
+        }
+        let dual = stats.final_unscaled_dual_inf;
+        let bound = kkt_bound(
+            tol,
+            stats.final_unscaled_dual_scale,
+            self.grad_ref.unwrap_or(0.0),
+        );
+        if dual.is_finite() && dual > bound {
+            self.n_kkt_rejected += 1;
+            true
+        } else {
+            false
         }
     }
 
@@ -808,6 +844,15 @@ pub fn run(
         });
     }
 
+    // The gradient scale `max |∇f(x0)|` the `kkt_tol` bound is relative to
+    // (gh#983), as `find_minima` takes it from `jac(x0)`.
+    let grad_ref = cfg.kkt_tol.and_then(|_| {
+        let mut g = vec![0.0; n];
+        let ok = base.borrow_mut().eval_grad_f(&x0, true, &mut g);
+        let g0 = g.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
+        (ok && g0.is_finite()).then_some(g0)
+    });
+
     // Per-dimension scale and box availability (mirror `_scale_from_bounds`).
     let has_box = (0..n).all(|i| x_l[i] > -BOUND_INF && x_u[i] < BOUND_INF);
     let l_scale: Vec<Number> = (0..n)
@@ -888,10 +933,22 @@ pub fn run(
         n_samples: 0,
         max_samples,
         psd_skipped_logged: false,
+        grad_ref,
+        n_kkt_rejected: 0,
     };
 
     let stop = driver.run();
     let n_solves = driver.n_solves;
+    let n_kkt_rejected = driver.n_kkt_rejected;
+    // An empty result caused by the filter is never silent (gh#983 review).
+    if driver.archive.is_empty() && n_kkt_rejected > 0 {
+        eprintln!(
+            "pounce: --minima: every converged candidate ({n_kkt_rejected}) was rejected by \
+             --kkt-tol {} (unscaled dual infeasibility above kkt_tol * max(1, gradient \
+             scale)); no minima are returned. Loosen --kkt-tol, or pass --kkt-tol none.",
+            cfg.kkt_tol.unwrap_or(f64::NAN)
+        );
+    }
 
     // Rank the found minima by objective (best first).
     let order = driver.archive.order_by_objective();
@@ -905,7 +962,7 @@ pub fn run(
         .collect();
     let best_obj = order.first().map(|&i| driver.archive.fs[i]);
 
-    print_table(&minima, &l_scale, stop, n_solves, dual_sign);
+    print_table(&minima, &l_scale, stop, n_solves, n_kkt_rejected, dual_sign);
 
     // Write the per-minimum `.sol` files: best → <stub>.sol, the rest →
     // ranked siblings <stub>.minNNN.sol.
@@ -917,7 +974,19 @@ pub fn run(
     // plus a backward-compatible `minima` section listing all of them.
     if let Some(json_path) = &args.json_output {
         write_json_report(
-            json_path, args, cfg, stop, n_solves, &minima, n, m, &info, dual_sign,
+            json_path,
+            args,
+            cfg,
+            MinimaCounts {
+                stop,
+                n_solves,
+                n_kkt_rejected,
+            },
+            &minima,
+            n,
+            m,
+            &info,
+            dual_sign,
         );
     }
 
@@ -942,6 +1011,7 @@ fn print_table(
     l_scale: &[Number],
     stop: Stop,
     n_solves: usize,
+    n_kkt_rejected: usize,
     obj_sign: Number,
 ) {
     println!();
@@ -952,6 +1022,9 @@ fn print_table(
         n_solves,
         stop.as_str()
     );
+    if n_kkt_rejected > 0 {
+        println!("  {n_kkt_rejected} converged solve(s) rejected by --kkt-tol");
+    }
     if minima.is_empty() {
         println!("  (no accepted minima — try raising --max-solves or --patience)");
         return;
@@ -1018,6 +1091,14 @@ fn sibling_sol_path(sol_path: &Path, rank: usize) -> PathBuf {
     PathBuf::from(format!("{base}.min{rank:03}.sol"))
 }
 
+/// The search's stop reason and counters, as reported in the JSON `minima`
+/// block.
+struct MinimaCounts {
+    stop: Stop,
+    n_solves: usize,
+    n_kkt_rejected: usize,
+}
+
 /// Build the JSON report (standard best-solution report + `minima` section)
 /// and write it.
 #[allow(clippy::too_many_arguments)]
@@ -1025,8 +1106,7 @@ fn write_json_report(
     json_path: &Path,
     args: &Args,
     cfg: &MinimaArgs,
-    stop: Stop,
-    n_solves: usize,
+    counts: MinimaCounts,
     minima: &[Minimum],
     n: usize,
     m: usize,
@@ -1089,8 +1169,9 @@ fn write_json_report(
             "minima".to_string(),
             serde_json::json!({
                 "method": cfg.method.as_str(),
-                "status": stop.as_str(),
-                "n_solves": n_solves,
+                "status": counts.stop.as_str(),
+                "n_solves": counts.n_solves,
+                "n_kkt_rejected": counts.n_kkt_rejected,
                 "n_minima": minima.len(),
                 "minima": minima_json,
                 "values": values,
@@ -1109,6 +1190,23 @@ fn write_json_report(
     }
 }
 
+/// The `kkt_tol` acceptance bound (gh#983 review): `kkt_tol · max(1, g0,
+/// dual_scale)`, with `g0 = max |∇f(x0)|` and `dual_scale` the magnitude of the
+/// terms the unscaled residual is assembled from at the returned point
+/// (`final_unscaled_dual_scale`; `1` when not computed). Both are needed: at an
+/// interior minimum those terms *are* `∇f`, which is ~0 there, so the second
+/// alone reads the residual against itself. An absolute `1e-4` rejected every
+/// candidate of an objective whose gradients live at `1e12`. On an O(1) model
+/// the bound is the absolute one.
+fn kkt_bound(kkt_tol: Number, dual_scale: Number, grad_ref: Number) -> Number {
+    let scale = if dual_scale.is_finite() {
+        dual_scale
+    } else {
+        1.0
+    };
+    kkt_tol * 1.0_f64.max(scale).max(grad_ref)
+}
+
 /// Per-coordinate box test with a bound-magnitude-relative tolerance that
 /// absorbs the IPM's bound relaxation (`bound_relax_factor·max(1,|bound|)`,
 /// Ipopt default factor `1e-8`). A purely absolute tolerance rejects minima
@@ -1124,7 +1222,21 @@ fn coord_in_bounds(xi: Number, lo: Number, hi: Number) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{better_sample_within, coord_in_bounds, scaled_distance};
+    use super::{better_sample_within, coord_in_bounds, kkt_bound, scaled_distance};
+
+    /// The bound is relative to a *gradient* scale, never to the residual: a
+    /// residual of 0.5 against scale 1 is rejected, against 1e6 it is not
+    /// (the cases of `test_find_minima_relative_bound_still_rejects_a_non_
+    /// stationary_point` in the Python suite).
+    #[test]
+    fn kkt_bound_is_relative_to_the_gradient_scale() {
+        assert!(0.5 > kkt_bound(1e-4, 1.0, 0.0));
+        assert!(0.5 <= kkt_bound(1e-4, 1e6, 0.0));
+        assert!(0.5 <= kkt_bound(1e-4, 1.0, 1e6));
+        // Floored at 1, and a NaN scale (path that does not compute it) is 1.
+        assert_eq!(kkt_bound(1e-4, 1e-9, 0.0), 1e-4);
+        assert_eq!(kkt_bound(1e-4, f64::NAN, 0.0), 1e-4);
+    }
 
     /// The pruned sweep must give exactly the naive single-linkage answer.
     #[test]

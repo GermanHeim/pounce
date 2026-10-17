@@ -166,6 +166,27 @@ changes.
   rows violated by `3e-9` at multipliers near `8e7` down to `3e-15`. The
   fixture sweep (both legs) and Maros-Mészáros at the default routing are
   unchanged.
+- **`pounce --minima` vetoes solver successes at non-stationary points, as
+  `find_minima` does (gh#966).** gh#983 added `find_minima(kkt_tol=1e-4)`:
+  a converged local solve is rejected when its *unscaled* dual infeasibility
+  exceeds `kkt_tol · max(1, max|∇f(x0)|, dual_scale)`, because the solver's
+  success verdict is judged in its scaled space. That landed in the Python
+  search only, so the CLI's `--minima` kept archiving such points. Measured
+  with the acceptable-level test opened wide enough that every solve returns
+  its own start as `Solved_To_Acceptable_Level`: the CLI returned four
+  starting points with `|∇f|` between 1.45 and 2.84 as minima, where
+  `find_minima` returned none. The CLI now applies the same bound, with the
+  same default; `--kkt-tol <t|none>` sets or disables it, rejections are
+  reported as `minima.n_kkt_rejected` in the JSON report, and a warning is
+  printed when they empty the result. Well-behaved models are unaffected:
+  the bound is relative, so a model whose gradients live at `1e12` vetoes
+  nothing. `python/tests/test_minima_cli_parity.py` now runs the two searches
+  against each other through the real binary (in the wheel-smoke CI job) and
+  goes red on the pre-fix CLI. Nothing in the single-solve path changes.
+  It also pins, as a strict `xfail`, a divergence that is not fixed here:
+  `deflation` finds all six six-hump-camel minima in 6 of 6 seeds through
+  `find_minima(hess=...)` but in 2 of 6 through the CLI, whose penalty solves
+  decline the augmented Hessian and run L-BFGS.
 - **Limited-memory arm no longer spends `max_iter` on a dense convex quadratic
   (gh#1016).** `min ½xᵀQx − bᵀx` with a dense `Q` of condition `1e3`–`8e3` and
   `n = 10…40` ran 3000 iterations and, at `n = 40`, returned
