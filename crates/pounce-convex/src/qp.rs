@@ -954,9 +954,26 @@ impl QpSolution {
         let slack: Vec<f64> = prob.h.iter().zip(&gx).map(|(h, g)| h - g).collect();
         let z_comp =
             ParallelRows::new(prob).complementarity_multipliers(&prob.h, &self.z, &slack, &row_mag);
+        // Less one rounding unit of the objective's terms, which no product
+        // below can move: the stopping rule's `obj_ulp` (gh#1029,
+        // `crate::hsde::true_slack_complementarity`). Folded into the floor
+        // as `obj_ulp / k` because `excess` multiplies the floor by `k`.
+        let mut px = vec![0.0; n];
+        prob.p_mul(x, &mut px);
+        let obj_ulp = f64::EPSILON
+            * (0.5 * px.iter().zip(x).map(|(a, b)| a * b).sum::<f64>().abs()
+                + prob
+                    .c
+                    .iter()
+                    .zip(x)
+                    .map(|(a, b)| (a * b).abs())
+                    .sum::<f64>());
         let mut comp = 0.0_f64;
         for (i, &zi) in z_comp.iter().enumerate() {
-            comp = comp.max(excess((zi * slack[i]).abs(), zi.abs() * row_mag[i]));
+            comp = comp.max(excess(
+                (zi * slack[i]).abs(),
+                zi.abs() * row_mag[i] + obj_ulp / k,
+            ));
         }
         for i in 0..n {
             let (lb, ub, xi) = (prob.lb_of(i), prob.ub_of(i), x[i]);
@@ -974,14 +991,14 @@ impl QpSolution {
                 let zl = self.z_lb[i];
                 comp = comp.max(excess(
                     (zl * (xi - lb)).abs(),
-                    zl.abs() * (xi.abs() + lb.abs()),
+                    zl.abs() * (xi.abs() + lb.abs()) + obj_ulp / k,
                 ));
             }
             if ub < 1e19 {
                 let zu = self.z_ub[i];
                 comp = comp.max(excess(
                     (zu * (ub - xi)).abs(),
-                    zu.abs() * (xi.abs() + ub.abs()),
+                    zu.abs() * (xi.abs() + ub.abs()) + obj_ulp / k,
                 ));
             }
         }

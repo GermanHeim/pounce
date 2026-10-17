@@ -144,6 +144,28 @@ changes.
   and 32 iterations at the HiGHS objective (0.12.0 was `4e-8` and `1e-7`
   relative off). The fixture sweep (both legs) and Maros-Mészáros at the
   default routing are unchanged.
+- **Node LPs whose multipliers are large because `x` is now solve to `Optimal`
+  (gh#1029).** Four more fac2 node LPs from the same branch-and-bound ended
+  `IterationLimit` (200, `kappa` underflowed to `1e-169`) or
+  `OptimalInaccurate` (`kkt ≈ 1e-5` after the equilibrated retry). Their
+  columns reach `2e9` against `c = e₆₇`, so the multipliers reach `1.5e8`.
+  The only stop gate still shut was the true-slack complementarity, at
+  `1.2e-8` to `4.8e-8` against `tol = 1e-8`. It was reading those multipliers
+  times slacks of `3e-16` or `1.2e-14`: the linear solve's residual on a bound
+  row whose other terms are all zero, and a row whose `h` is itself `-1.4e-14`
+  of caller round-off. Neither is inside the row's own rounding quantum, but
+  each product is a tenth of one ulp of the objective (`4.3e-7`). Such a
+  product cannot move the objective it sums into. The loop and the verdict
+  (`kkt_residuals_above_floor`) now both take one ulp of the objective's terms,
+  `ε·(½|xᵀPx| + Σ|cⱼxⱼ|)`, off every complementarity product. It is one ulp
+  rather than `64` because the gh#984 item-3 product (`1.08e-5` on an objective
+  of about `1e9`) is real, can be reduced, and sits fifty ulps up. The four LPs
+  now reach `Optimal` in 85, 36, 38 and 32 iterations at `kkt ≤ 1.3e-14` and
+  the HiGHS objective. 0.12.0's `optimal` in about 25 was at absolute KKT
+  errors of 24 to 888. m1's extra iterations are real work: they drive bound
+  rows violated by `3e-9` at multipliers near `8e7` down to `3e-15`. The
+  fixture sweep (both legs) and Maros-Mészáros at the default routing are
+  unchanged.
 - **Limited-memory arm no longer spends `max_iter` on a dense convex quadratic
   (gh#1016).** `min ½xᵀQx − bᵀx` with a dense `Q` of condition `1e3`–`8e3` and
   `n = 10…40` ran 3000 iterations and, at `n = 40`, returned
