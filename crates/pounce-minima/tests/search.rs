@@ -17,6 +17,9 @@
 //! | `honor_original_bounds_is_honoured` | the answer read from `finalize_solution`, projected |
 //! | `penalty_solves_take_the_exact_hessian_only_when_unconstrained` | the exact-penalty-Hessian gate, all three branches |
 //! | `camel_deflation_finds_all_six_on_every_seed` | the exact penalty Hessian, through the IPM |
+//! | `on_accept_sees_every_minimum_and_can_abort` | `Hooks::on_accept`, both `ControlFlow` arms |
+//! | `a_custom_distance_decides_dedup` | `Hooks::distance` |
+//! | `the_trace_records_every_candidate` | `Hooks::trace`, on and off |
 
 use pounce_algorithm::application::IpoptApplication;
 use pounce_common::types::Number;
@@ -523,5 +526,95 @@ fn camel_deflation_finds_all_six_on_every_seed() {
         };
         let r = run(camel(), &cfg);
         assert_eq!(r.minima.len(), 6, "seed {seed}: {:?}", r.stop);
+    }
+}
+
+#[test]
+fn on_accept_sees_every_minimum_and_can_abort() {
+    use pounce_minima::{Hooks, find_minima_with};
+    use std::ops::ControlFlow;
+    // Sees every accept, in order, with the archived (x, f).
+    let mut seen: Vec<(Vec<Number>, Number)> = Vec::new();
+    let mut cb = |x: &[Number], f: Number| {
+        seen.push((x.to_vec(), f));
+        ControlFlow::Continue(())
+    };
+    let mut app = quiet_app();
+    let mut solver = IpoptLocalSolve::new(&mut app);
+    let cfg = opts(Method::Multistart, 6, 30);
+    let hooks = Hooks {
+        on_accept: Some(&mut cb),
+        ..Hooks::default()
+    };
+    let r = find_minima_with(&camel(), &mut solver, &cfg, hooks).unwrap();
+    assert_eq!(seen.len(), r.minima.len());
+    for (x, f) in &seen {
+        assert!(r.minima.iter().any(|m| &m.x == x && m.objective == *f));
+    }
+
+    // Break on the second accept ends the search there.
+    let mut n = 0;
+    let mut stop_at_two = |_: &[Number], _: Number| {
+        n += 1;
+        if n == 2 {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    };
+    let hooks = Hooks {
+        on_accept: Some(&mut stop_at_two),
+        ..Hooks::default()
+    };
+    let r = find_minima_with(&camel(), &mut solver, &cfg, hooks).unwrap();
+    assert_eq!(r.stop, Stop::Aborted);
+    assert_eq!(r.minima.len(), 2);
+}
+
+#[test]
+fn a_custom_distance_decides_dedup() {
+    use pounce_minima::{Hooks, find_minima_with};
+    // Everything is "the same point": only the first minimum is new.
+    let mut same = |_: &[Number], _: &[Number]| 0.0;
+    let mut app = quiet_app();
+    let mut solver = IpoptLocalSolve::new(&mut app);
+    let cfg = opts(Method::Multistart, 6, 30);
+    let hooks = Hooks {
+        distance: Some(&mut same),
+        ..Hooks::default()
+    };
+    let r = find_minima_with(&camel(), &mut solver, &cfg, hooks).unwrap();
+    assert_eq!(r.minima.len(), 1);
+    assert_eq!(r.stop, Stop::Converged);
+}
+
+#[test]
+fn the_trace_records_every_candidate() {
+    use pounce_minima::{Hooks, find_minima_with};
+    let mut app = quiet_app();
+    let mut solver = IpoptLocalSolve::new(&mut app);
+    let cfg = opts(Method::Multistart, 6, 30);
+    let r = find_minima(&camel(), &mut solver, &cfg).unwrap();
+    assert!(r.trace.is_empty(), "off by default");
+    let hooks = Hooks {
+        trace: true,
+        ..Hooks::default()
+    };
+    let r = find_minima_with(&camel(), &mut solver, &cfg, hooks).unwrap();
+    // Multistart: one candidate per solve, no polish solves.
+    assert_eq!(r.trace.len(), r.n_solves);
+    assert_eq!(
+        r.trace.iter().filter(|t| t.accepted).count(),
+        r.minima.len()
+    );
+    for (k, t) in r.trace.iter().enumerate() {
+        assert!(!t.accepted || t.success, "entry {k}");
+        assert!(t.f.is_finite() || t.x.is_empty(), "entry {k}");
+    }
+    // n_found counts the archive before each entry.
+    let mut found = 0;
+    for t in &r.trace {
+        assert_eq!(t.n_found, found);
+        found += usize::from(t.accepted);
     }
 }

@@ -45,8 +45,13 @@
 //! it, toggling `hessian_approximation` per solve, so the application's other
 //! options (tolerances, `print_level`, …) apply to all of them. To solve
 //! starts some other way, implement [`LocalSolve`].
+//!
+//! [`find_minima_with`] takes [`Hooks`]: a callback on each accepted minimum
+//! (which can stop the search), a custom dedup metric such as a periodic
+//! distance, and a [`TraceEntry`] per candidate considered.
 
 pub use pounce_minima::{
-    HessianMode, IpoptLocalSolve, LocalOutcome, LocalSolve, Method, MinimaError, MinimaOptions,
-    MinimaResult, Minimum, SolveQuality, Stop, find_minima,
+    HessianMode, Hooks, IpoptLocalSolve, LocalOutcome, LocalSolve, Method, MinimaError,
+    MinimaOptions, MinimaResult, Minimum, SolveQuality, Stop, TraceEntry, find_minima,
+    find_minima_with,
 };

@@ -28,6 +28,7 @@ use pounce_common::types::{Index, Number};
 use pounce_nlp::seeded_tnlp::SeededTnlp;
 use pounce_nlp::tnlp::{BoundsInfo, IndexStyle, SparsityRequest, StartingPoint, TNLP};
 use std::cell::RefCell;
+use std::ops::ControlFlow;
 use std::rc::Rc;
 
 /// AMPL bound sentinel: a bound beyond this magnitude counts as ±∞.
@@ -47,6 +48,8 @@ pub enum Stop {
     /// (gh#989: this used to read `budget_exhausted`, naming the wrong
     /// budget).
     SampleCapReached,
+    /// A [`Hooks::on_accept`] callback returned `ControlFlow::Break`.
+    Aborted,
 }
 
 impl Stop {
@@ -57,6 +60,7 @@ impl Stop {
             Stop::Converged => "converged",
             Stop::BudgetExhausted => "budget_exhausted",
             Stop::SampleCapReached => "sample_cap_reached",
+            Stop::Aborted => "aborted",
         }
     }
 }
@@ -122,13 +126,49 @@ fn better_sample_within(xs: &[Vec<Number>], fs: &[Number], l: &[Number], radius:
 /// One local solve's outcome (the captured minimizer + whether it converged).
 struct SolveOut {
     success: bool,
+    /// The returned point; a candidate only when `success`.
     x: Vec<Number>,
+}
+
+/// Caller hooks into the search, all optional ([`find_minima_with`]).
+#[derive(Default)]
+pub struct Hooks<'a> {
+    /// Called with `(x, f)` each time a minimum is archived. Returning
+    /// `ControlFlow::Break(())` ends the search with [`Stop::Aborted`].
+    #[allow(clippy::type_complexity)]
+    pub on_accept: Option<&'a mut dyn FnMut(&[Number], Number) -> ControlFlow<()>>,
+    /// The dedup metric `d(a, b)`, replacing the per-dimension-scaled
+    /// Euclidean distance `‖(a−b)/L‖` — e.g. a periodic one. It decides
+    /// whether a candidate is already known (within `dedup`) and, for MLSL,
+    /// whether a sample is near a known minimum; MLSL's sample-to-sample
+    /// clustering stays in the scaled metric.
+    #[allow(clippy::type_complexity)]
+    pub distance: Option<&'a mut dyn FnMut(&[Number], &[Number]) -> Number>,
+    /// Record a [`TraceEntry`] for every candidate considered.
+    pub trace: bool,
+}
+
+/// One candidate the search considered (`MinimaResult::trace`).
+#[derive(Clone, Debug)]
+pub struct TraceEntry {
+    /// The candidate, after the polish solve if there was one; empty when
+    /// the solve returned no point.
+    pub x: Vec<Number>,
+    /// The base objective at `x` (`NaN` when it could not be evaluated).
+    pub f: Number,
+    /// Whether its local solve converged (and passed `kkt_tol`).
+    pub success: bool,
+    pub accepted: bool,
+    /// Minima archived before this candidate.
+    pub n_found: usize,
 }
 
 /// The find-minima driver. Holds the local solver and base problem and runs
 /// the chosen strategy until a [`Stop`].
 struct Driver<'a> {
     solver: &'a mut dyn LocalSolve,
+    hooks: Hooks<'a>,
+    trace: Vec<TraceEntry>,
     base: Rc<RefCell<dyn TNLP>>,
     cfg: &'a MinimaOptions,
     n: usize,
@@ -190,19 +230,10 @@ impl<'a> Driver<'a> {
         // Only the primal is needed for acceptance; the duals are recovered
         // later by `recover_duals` (a clean base re-solve) so a point accepted
         // from an augmented penalty/tunnel solve still gets the base problem's
-        // multipliers. A failed solve has no usable point; acceptance needs
-        // success anyway, so the empty x is never read.
-        if out.converged && !self.kkt_rejects(&out) {
-            Ok(SolveOut {
-                success: true,
-                x: out.x,
-            })
-        } else {
-            Ok(SolveOut {
-                success: false,
-                x: Vec::new(),
-            })
-        }
+        // multipliers. A failed solve's point is carried only for the trace;
+        // acceptance needs success.
+        let success = out.converged && !self.kkt_rejects(&out);
+        Ok(SolveOut { success, x: out.x })
     }
 
     /// gh#983: veto a converged solve whose **unscaled** stationarity residual
@@ -405,15 +436,19 @@ impl<'a> Driver<'a> {
     }
 
     /// Per-dimension width vector from a knob spec, mirroring
-    /// `_resolve_lengths`: a scalar ⇒ isotropic; `None` ("auto") ⇒
-    /// `frac · L` when a box is known, else `fallback`.
+    /// `_resolve_lengths`: a vector ⇒ used as given; a scalar ⇒ isotropic;
+    /// neither ("auto") ⇒ `frac · L` when a box is known, else `fallback`.
     fn resolve_lengths(
         &self,
+        per_dim: Option<&Vec<f64>>,
         spec: Option<f64>,
         frac_default: f64,
         frac_override: Option<f64>,
         fallback: f64,
     ) -> Vec<Number> {
+        if let Some(v) = per_dim {
+            return v.clone();
+        }
         match spec {
             Some(s) => vec![s; self.n],
             None => {
@@ -470,34 +505,63 @@ impl<'a> Driver<'a> {
         if success && polish {
             let r = self.solve_seeded(&x, true)?;
             success = r.success;
-            if success {
-                x = r.x;
-            }
+            x = r.x;
         }
-        if !success {
+        let fval = if success || (self.hooks.trace && !x.is_empty()) {
+            self.clean_f(&x)
+        } else {
+            None
+        };
+        let accepted = success
+            && fval.is_some_and(|f| f.is_finite())
+            && x.iter().all(|v| v.is_finite())
+            && self.in_bounds(&x)
+            && self.is_minimum(&x)
+            && !self.is_known(&x);
+        if self.hooks.trace {
+            self.trace.push(TraceEntry {
+                x: x.clone(),
+                f: fval.unwrap_or(Number::NAN),
+                success,
+                accepted,
+                n_found: self.archive.len(),
+            });
+        }
+        if !accepted {
             return self.reject();
         }
-        let fval = match self.clean_f(&x) {
-            Some(f) => f,
-            None => return self.reject(),
-        };
-        let finite = x.iter().all(|v| v.is_finite()) && fval.is_finite();
-        let accepted =
-            finite && self.in_bounds(&x) && self.is_minimum(&x) && !self.archive.is_known(&x);
-        if accepted {
-            // Recover the base-problem duals at the accepted point before
-            // archiving (issue #196, related): the search may have accepted a
-            // point from an augmented penalty/tunnel solve whose multipliers
-            // are not the base problem's.
-            let lambda = self.recover_duals(&x);
-            self.archive.add(x, lambda, fval);
-            self.stagnant = 0;
-            if self.archive.len() >= self.cfg.n_minima {
-                return Err(Stop::TargetReached);
+        let fval = fval.unwrap_or(Number::NAN);
+        // Recover the base-problem duals at the accepted point before
+        // archiving (issue #196, related): the search may have accepted a
+        // point from an augmented penalty/tunnel solve whose multipliers are
+        // not the base problem's.
+        let lambda = self.recover_duals(&x);
+        self.archive.add(x, lambda, fval);
+        self.stagnant = 0;
+        if let Some(cb) = self.hooks.on_accept.as_mut() {
+            let last = self.archive.xs.last().map(Vec::as_slice).unwrap_or(&[]);
+            if cb(last, fval).is_break() {
+                return Err(Stop::Aborted);
             }
-            Ok(true)
-        } else {
-            self.reject()
+        }
+        if self.archive.len() >= self.cfg.n_minima {
+            return Err(Stop::TargetReached);
+        }
+        Ok(true)
+    }
+
+    /// Is `x` within `dedup` of an archived minimum, in the caller's metric
+    /// when one is given?
+    fn is_known(&mut self, x: &[Number]) -> bool {
+        let dedup = self.cfg.dedup;
+        self.near_any(x, dedup)
+    }
+
+    /// Is `x` within `radius` of an archived minimum (MLSL clustering)?
+    fn near_any(&mut self, x: &[Number], radius: Number) -> bool {
+        match self.hooks.distance.as_mut() {
+            Some(d) => self.archive.xs.iter().any(|m| d(x, m) <= radius),
+            None => self.archive.near_any(x, radius),
         }
     }
 
@@ -582,7 +646,7 @@ impl<'a> Driver<'a> {
             });
             for i in order {
                 // Single-linkage: skip if a *better* sample is within radius.
-                if better_near[i] || self.archive.near_any(&pool_x[i], radius) {
+                if better_near[i] || self.near_any(&pool_x[i], radius) {
                     continue;
                 }
                 let si = pool_x[i].clone();
@@ -620,13 +684,19 @@ impl<'a> Driver<'a> {
     }
 
     fn run_flooding(&mut self) -> Result<(), Stop> {
-        let sigma = self.resolve_lengths(self.cfg.sigma, 0.1, self.cfg.sigma_frac, 0.5);
+        let sigma = self.resolve_lengths(
+            self.cfg.sigma_per_dim.as_ref(),
+            self.cfg.sigma,
+            0.1,
+            self.cfg.sigma_frac,
+            0.5,
+        );
         let inv_sigma2: Vec<f64> = sigma.iter().map(|&s| 1.0 / (s * s)).collect();
         let amp_spec = self.cfg.amplitude;
         let margin = self.cfg.amp_margin.unwrap_or(2.0);
-        let bump_factor = 3.0;
-        let bump_cap = 1e3;
-        let fallback_amp = 2.0;
+        let bump_factor = self.cfg.amp_bump.unwrap_or(3.0);
+        let bump_cap = self.cfg.amp_bump_cap.unwrap_or(1e3);
+        let fallback_amp = self.cfg.amp_fallback.unwrap_or(2.0);
         let jitter = self.cfg.restart_jitter.unwrap_or(0.5);
         let x0 = self.x0.clone();
         let mut base_amp: Vec<f64> = Vec::new();
@@ -690,7 +760,13 @@ impl<'a> Driver<'a> {
         let eta = self.cfg.eta.unwrap_or(1.0);
         let power = self.cfg.power.unwrap_or(2.0);
         let soft = self.cfg.soft.unwrap_or(1e-3);
-        let length = self.resolve_lengths(self.cfg.length, 0.1, self.cfg.length_frac, 0.5);
+        let length = self.resolve_lengths(
+            self.cfg.length_per_dim.as_ref(),
+            self.cfg.length,
+            0.1,
+            self.cfg.length_frac,
+            0.5,
+        );
         let inv_len2: Vec<f64> = length.iter().map(|&l| 1.0 / (l * l)).collect();
         let jitter = self.cfg.restart_jitter.unwrap_or(0.5);
         let q = power / 2.0;
@@ -700,7 +776,7 @@ impl<'a> Driver<'a> {
             let polish = !centers.is_empty();
             // Step a little off the pole so the first gradient is finite.
             let mut s = start.clone();
-            if !centers.is_empty() && self.archive.is_known(&s) {
+            if !centers.is_empty() && self.is_known(&s) {
                 let scale: Vec<f64> = length.iter().map(|&l| 0.1 * l).collect();
                 s = self.sampler.perturb(&s, &scale);
             }
@@ -731,7 +807,13 @@ impl<'a> Driver<'a> {
         let eta = self.cfg.eta.unwrap_or(1.0);
         let power = self.cfg.power.unwrap_or(2.0);
         let soft = self.cfg.soft.unwrap_or(1e-3);
-        let length = self.resolve_lengths(self.cfg.length, 0.1, self.cfg.length_frac, 0.5);
+        let length = self.resolve_lengths(
+            self.cfg.length_per_dim.as_ref(),
+            self.cfg.length,
+            0.1,
+            self.cfg.length_frac,
+            0.5,
+        );
         let inv_len2: Vec<f64> = length.iter().map(|&l| 1.0 / (l * l)).collect();
         let jitter = self.cfg.restart_jitter.unwrap_or(0.75);
         let q = power / 2.0;
@@ -802,6 +884,8 @@ pub struct MinimaResult {
     /// Messages for the caller, e.g. that the saddle-rejection check was
     /// skipped because the problem is too large for it.
     pub warnings: Vec<String>,
+    /// Every candidate considered, when [`Hooks::trace`] was set.
+    pub trace: Vec<TraceEntry>,
 }
 
 /// [`find_minima`] could not start.
@@ -832,6 +916,17 @@ pub fn find_minima(
     base: &Rc<RefCell<dyn TNLP>>,
     solver: &mut dyn LocalSolve,
     cfg: &MinimaOptions,
+) -> Result<MinimaResult, MinimaError> {
+    find_minima_with(base, solver, cfg, Hooks::default())
+}
+
+/// [`find_minima`] with caller [`Hooks`]: an accept callback, a custom dedup
+/// metric, and a trace of every candidate.
+pub fn find_minima_with<'a>(
+    base: &Rc<RefCell<dyn TNLP>>,
+    solver: &'a mut dyn LocalSolve,
+    cfg: &'a MinimaOptions,
+    hooks: Hooks<'a>,
 ) -> Result<MinimaResult, MinimaError> {
     let info = base
         .borrow_mut()
@@ -897,10 +992,14 @@ pub fn find_minima(
     // terminates first; this guarantees `max_solves` bounds wall-clock even
     // when the clustering filter rejects everything (pounce#103).
     let batch = cfg.samples_per_round.unwrap_or(20).max(1);
-    let max_samples = max_solves.saturating_mul(batch);
+    let max_samples = cfg
+        .max_samples
+        .unwrap_or_else(|| max_solves.saturating_mul(batch));
 
     let mut driver = Driver {
         solver,
+        hooks,
+        trace: Vec::new(),
         base: Rc::clone(base),
         cfg,
         n,
@@ -945,6 +1044,7 @@ pub fn find_minima(
         n_kkt_rejected: driver.n_kkt_rejected,
         scale: l_scale,
         warnings: driver.warnings,
+        trace: driver.trace,
     })
 }
 

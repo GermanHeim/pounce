@@ -92,6 +92,20 @@ pub struct MinimaOptions {
     pub step: Option<f64>,
     pub temperature: Option<f64>,
     pub restart_jitter: Option<f64>,
+    // ---- library-only knobs (no CLI flag; `pounce.find_minima` passes them) ----
+    /// Per-dimension flooding widths; takes precedence over `sigma`.
+    pub sigma_per_dim: Option<Vec<f64>>,
+    /// Per-dimension deflation / tunneling lengths; takes precedence over
+    /// `length`.
+    pub length_per_dim: Option<Vec<f64>>,
+    /// MLSL sample cap (default `max_solves * samples_per_round`).
+    pub max_samples: Option<usize>,
+    /// Flooding: factor a basin's bump grows by on a failed escape (3).
+    pub amp_bump: Option<f64>,
+    /// Flooding: cap on that growth (1e3).
+    pub amp_bump_cap: Option<f64>,
+    /// Flooding: bump height when no Hessian gives a curvature-based one (2).
+    pub amp_fallback: Option<f64>,
 }
 
 impl MinimaOptions {
@@ -128,6 +142,12 @@ impl Default for MinimaOptions {
             step: None,
             temperature: None,
             restart_jitter: None,
+            sigma_per_dim: None,
+            length_per_dim: None,
+            max_samples: None,
+            amp_bump: None,
+            amp_bump_cap: None,
+            amp_fallback: None,
         }
     }
 }

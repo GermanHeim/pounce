@@ -21,4 +21,6 @@ pub mod search;
 
 pub use local_solve::{HessianMode, IpoptLocalSolve, LocalOutcome, LocalSolve, SolveQuality};
 pub use options::{Method, MinimaOptions};
-pub use search::{MinimaError, MinimaResult, Minimum, Stop, find_minima};
+pub use search::{
+    Hooks, MinimaError, MinimaResult, Minimum, Stop, TraceEntry, find_minima, find_minima_with,
+};

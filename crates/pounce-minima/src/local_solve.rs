@@ -57,7 +57,8 @@ pub struct LocalOutcome {
     /// and produced a point. The search applies its own acceptance tests on
     /// top of this; it is not a verdict that the point is a minimum.
     pub converged: bool,
-    /// The converged primal, full length. Empty when `converged` is false.
+    /// The returned primal, full length — a candidate only when `converged`;
+    /// otherwise whatever point the solve ended at, or empty if none.
     pub x: Vec<Number>,
     /// Constraint duals in the user's `∇f + λ·∇g + z = 0` convention, length
     /// `m` (empty if the solve path cannot report them).
@@ -129,13 +130,13 @@ impl LocalSolve for IpoptLocalSolve<'_> {
             start_obj_grad_max: stats.start_obj_grad_max,
         };
         match slot.borrow_mut().take() {
-            Some((x, lambda)) if succeeded => LocalOutcome {
-                converged: true,
+            Some((x, lambda)) => LocalOutcome {
+                converged: succeeded,
                 x,
                 lambda,
                 quality,
             },
-            _ => LocalOutcome {
+            None => LocalOutcome {
                 converged: false,
                 x: Vec::new(),
                 lambda: Vec::new(),
