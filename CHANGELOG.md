@@ -96,6 +96,30 @@ changes.
   `docs/src/troubleshooting.md` now says which rung moves the start.
 
 ### Fixed
+- **LPs with duplicated, round-off-conflicting cuts solve again on both convex
+  engines (gh#1023).** An outer-approximation master LP (67 columns, 426 rows)
+  repeats its cuts with right-hand sides that differ by `~1e-14`, so no point
+  satisfies every copy exactly. On the interior-point arm the true-slack stop
+  read the conflict-forced `slack·z` as a complementarity error that could
+  never shrink, and the solve hit `IterationLimit` at 200 (0.12.0: 23
+  iterations). The stop and the verdict now excuse, per row, the slack forced
+  by a conflicting parallel duplicate (`parallel_row_conflict`); rows with no
+  such duplicate are read as before. It now reaches `Optimal` in 33 iterations
+  with no downgrade to `OptimalInaccurate`. On `method="active-set"` the same
+  LP ran 12004 iterations (about 270 s). Its rows reach `6e8`, and five
+  absolute `1e-9` tests stood in the way, each hiding the next: the simplex
+  phase-1 seed stalling on a `3.2e-9` basis-solve residual (now removed by
+  iterative refinement before the stall is read as infeasibility); the seed's
+  feasibility check; `pounce-qp`'s warm-start pre-check; a recession-ray
+  certificate fired by a tiny drift step at a vertex (blockers are now
+  re-asked per unit of the step only where that certificate would fire); and
+  the verdict's primal term (now the per-row floor). It now reaches `Optimal`
+  in 36 iterations and 54 ms. The fixture sweep is empty at the default
+  routing. Forced onto the active-set engine (`solver_selection=qp-active-set`),
+  only iteration counts fall: `scaled_feasible_a` 5 → 1 and
+  `feasible_x0_sentinel_bound` 9 → 6 on both legs, because their start now
+  passes the scaled check. Maros-Mészáros on that engine is unchanged in
+  status, iterations and objective.
 - **Limited-memory arm no longer spends `max_iter` on a dense convex quadratic
   (gh#1016).** `min ½xᵀQx − bᵀx` with a dense `Q` of condition `1e3`–`8e3` and
   `n = 10…40` ran 3000 iterations and, at `n = 40`, returned
