@@ -104,7 +104,8 @@ pub trait LocalSolve {
 ///
 /// Holding the application mutably for its lifetime also keeps the caller's
 /// own on-converged callback, if any, out of the search's solves; it is put
-/// back when this is dropped.
+/// back when this is dropped, and so are the options the solves wrote
+/// (`hessian_approximation`, and `mu_strategy` below).
 ///
 /// A quasi-Newton solve also pins `mu_strategy = monotone`, unless the caller
 /// set `mu_strategy` themselves: the search, not the caller, chose L-BFGS for
@@ -122,6 +123,9 @@ pub struct IpoptLocalSolve<'a> {
     previous_hook: Option<ConvergedCallback>,
     /// The caller left `mu_strategy` unset, so the quasi-Newton solves pin it.
     pin_mu: bool,
+    /// The caller's own `hessian_approximation`, if they set one; every solve
+    /// overwrites it, and `Drop` puts it back (or unsets it again).
+    caller_hessian: Option<String>,
 }
 
 impl<'a> IpoptLocalSolve<'a> {
@@ -131,10 +135,15 @@ impl<'a> IpoptLocalSolve<'a> {
             app.options().get_string_value("mu_strategy", ""),
             Ok((_, false))
         );
+        let caller_hessian = match app.options().get_string_value("hessian_approximation", "") {
+            Ok((v, true)) => Some(v),
+            _ => None,
+        };
         Self {
             app,
             previous_hook,
             pin_mu,
+            caller_hessian,
         }
     }
 }
@@ -191,9 +200,19 @@ impl LocalSolve for IpoptLocalSolve<'_> {
 
 impl Drop for IpoptLocalSolve<'_> {
     fn drop(&mut self) {
-        // Leave the caller's options as they were.
+        // Leave the caller's options as they were: every solve wrote
+        // `hessian_approximation`, and quasi-Newton ones `mu_strategy`.
+        let opts = self.app.options_mut();
         if self.pin_mu {
-            self.app.options_mut().unset_value("mu_strategy");
+            opts.unset_value("mu_strategy");
+        }
+        match self.caller_hessian.take() {
+            Some(v) => {
+                let _ = opts.set_string_value("hessian_approximation", &v, true, true);
+            }
+            None => {
+                opts.unset_value("hessian_approximation");
+            }
         }
         // Put back whatever the caller had registered.
         if let Some(cb) = self.previous_hook.take() {

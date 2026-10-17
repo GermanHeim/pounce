@@ -267,6 +267,13 @@ changes.
   rows violated by `3e-9` at multipliers near `8e7` down to `3e-15`. The
   fixture sweep (both legs) and Maros-Mészáros at the default routing are
   unchanged.
+- **`pounce --minima` no longer panics on a bounded model with more than 256
+  variables (gh#966).** The Sobol' sampler (`sobol_burley`) has 256
+  dimensions and asserted past them on the first sampled start. Dimension
+  `j` now reuses `j mod 256` under its own scramble seed per block of 256, as
+  the crate documents; a model with 256 variables or fewer draws exactly the
+  starts it did. `pounce.find_minima`, which used scipy's sampler until this
+  release, would otherwise have inherited the panic. Reported by @GermanHeim.
 - **`pounce --minima` honours `honor_original_bounds`, and reports the answer
   the status describes (gh#966).** Each local solve's point and duals were
   read from the application's on-converged hook, which sees the algorithm's

@@ -20,7 +20,8 @@
 //! | `on_accept_sees_every_minimum_and_can_abort` | `Hooks::on_accept`, both `ControlFlow` arms |
 //! | `a_custom_distance_decides_dedup` | `Hooks::distance` |
 //! | `the_trace_records_every_candidate` | `Hooks::trace`, on and off |
-//! | `ipopt_local_solve_leaves_the_callers_mu_strategy_alone` | the quasi-Newton `mu_strategy` pin, unset and caller-set |
+//! | `ipopt_local_solve_leaves_the_callers_options_alone` | the adapter's `hessian_approximation` / `mu_strategy` writes, unset and caller-set |
+//! | `a_bounded_search_above_256_variables_samples` | box sampling past `sobol_burley`'s 256 dimensions |
 
 use pounce_algorithm::application::IpoptApplication;
 use pounce_common::types::Number;
@@ -620,15 +621,18 @@ fn the_trace_records_every_candidate() {
     }
 }
 
-/// The quasi-Newton `mu_strategy` pin is the adapter's own: the caller's
-/// option table reads the same afterwards, unset or set.
+/// The adapter's per-solve option writes are its own: the caller's option
+/// table reads the same afterwards — `hessian_approximation`, which every
+/// solve sets, and `mu_strategy`, which quasi-Newton solves pin — whether the
+/// caller had left each unset or set it.
 #[test]
-fn ipopt_local_solve_leaves_the_callers_mu_strategy_alone() {
-    for preset in [None, Some("adaptive")] {
+fn ipopt_local_solve_leaves_the_callers_options_alone() {
+    for preset in [None, Some(("adaptive", "limited-memory"))] {
         let mut app = quiet_app();
-        if let Some(v) = preset {
-            app.options_mut()
-                .set_string_value("mu_strategy", v, true, true)
+        if let Some((mu, hess)) = preset {
+            let o = app.options_mut();
+            o.set_string_value("mu_strategy", mu, true, true).unwrap();
+            o.set_string_value("hessian_approximation", hess, true, true)
                 .unwrap();
         }
         {
@@ -637,10 +641,125 @@ fn ipopt_local_solve_leaves_the_callers_mu_strategy_alone() {
             let cfg = opts(Method::Tunneling, 3, 8);
             let _ = find_minima(&camel(), &mut solver, &cfg).unwrap();
         }
-        let (v, set) = app.options().get_string_value("mu_strategy", "").unwrap();
-        match preset {
-            None => assert!(!set, "left pinned at {v}"),
-            Some(p) => assert!(set && v == p, "caller's {p} became {v}"),
+        for (key, want) in [
+            ("mu_strategy", preset.map(|p| p.0)),
+            ("hessian_approximation", preset.map(|p| p.1)),
+        ] {
+            let (v, set) = app.options().get_string_value(key, "").unwrap();
+            match want {
+                None => assert!(!set, "{key} left set to {v}"),
+                Some(w) => assert!(set && v == w, "caller's {key} {w} became {v}"),
+            }
+        }
+    }
+}
+
+/// A box of more than 256 variables — `sobol_burley`'s dimension count —
+/// samples without panicking (it panicked on the first sampled start).
+#[test]
+fn a_bounded_search_above_256_variables_samples() {
+    let n = 300;
+    let base: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Wide { n }));
+    let cfg = MinimaOptions {
+        kkt_tol: None,
+        ..opts(Method::Multistart, 3, 3)
+    };
+    let mut solver = ScriptedN { n };
+    let r = find_minima(&base, &mut solver, &cfg).unwrap();
+    assert_eq!(r.n_solves, 3);
+    // Every start the sampler drew is inside the box.
+    assert!(
+        r.minima
+            .iter()
+            .all(|m| m.x.iter().all(|v| (-1.0..=1.0).contains(v)))
+    );
+}
+
+/// sum (x_i - 0.1)^2 on [-1, 1]^n.
+struct Wide {
+    n: usize,
+}
+
+impl TNLP for Wide {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: self.n as i32,
+            m: 0,
+            nnz_jac_g: 0,
+            nnz_h_lag: self.n as i32,
+            index_style: IndexStyle::C,
+        })
+    }
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        b.x_l.fill(-1.0);
+        b.x_u.fill(1.0);
+        true
+    }
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        sp.x.fill(0.0);
+        true
+    }
+    fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+        Some(x.iter().map(|v| (v - 0.1).powi(2)).sum())
+    }
+    fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        for (gi, xi) in g.iter_mut().zip(x) {
+            *gi = 2.0 * (xi - 0.1);
+        }
+        true
+    }
+    fn eval_g(&mut self, _x: &[Number], _new_x: bool, _g: &mut [Number]) -> bool {
+        true
+    }
+    fn eval_jac_g(&mut self, _x: Option<&[Number]>, _new_x: bool, _m: SparsityRequest<'_>) -> bool {
+        true
+    }
+    fn eval_h(
+        &mut self,
+        _x: Option<&[Number]>,
+        _new_x: bool,
+        of: Number,
+        _l: Option<&[Number]>,
+        _nl: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                for i in 0..self.n {
+                    irow[i] = i as i32;
+                    jcol[i] = i as i32;
+                }
+            }
+            SparsityRequest::Values { values } => values.fill(2.0 * of),
+        }
+        true
+    }
+    fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+}
+
+/// `Scripted` for any `n`: converges at the start it is handed.
+struct ScriptedN {
+    n: usize,
+}
+
+impl LocalSolve for ScriptedN {
+    fn solve(&mut self, problem: Rc<RefCell<dyn TNLP>>, _mode: HessianMode) -> LocalOutcome {
+        let mut x = vec![0.0; self.n];
+        let (mut zl, mut zu, mut lam) = (vec![0.0; self.n], vec![0.0; self.n], vec![]);
+        problem.borrow_mut().get_starting_point(StartingPoint {
+            init_x: true,
+            x: &mut x,
+            init_z: false,
+            z_l: &mut zl,
+            z_u: &mut zu,
+            init_lambda: false,
+            lambda: &mut lam,
+        });
+        LocalOutcome {
+            converged: true,
+            x,
+            lambda: Vec::new(),
+            quality: SolveQuality::default(),
         }
     }
 }
