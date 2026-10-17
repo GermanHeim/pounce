@@ -268,13 +268,26 @@ pounce-observability = { path = "crates/pounce-observability", version = "0.12.0
 # carries `n_threshold_fail_accepts` and `n_cascade_break_nodes` beside
 # `n_tiny`.
 #
-# 0.19.0 is the current pin. If you ever need to develop against an unreleased
+# 0.20.0 (feral#219) is 0.19.0 plus one change: a warm `Solver::factor` on an
+# unchanged pattern reuses the previous factor's per-supernode output buffers
+# instead of reallocating them, which is the refactor path `pounce-feral` takes
+# every iteration. Results are bit-identical: the fixture sweep, both legs,
+# against 0.19.0 on `b27bdbdd` moves 0 of 220 lines. Measured on macOS arm64,
+# 3 interleaved rounds over 22 Mittelmann / large-scale / convex-QP models:
+# factorization time geomean 0.956 (faster on 19/22), total 0.972. The gain
+# is largest where fronts are small (camshape_6400 0.86, sparseqp 0.87) and
+# flat on large-front models (bearing_400, CVXQP1_L ~1.00). The gh#1020
+# hanging chain gains 0.89 / 0.92 / 0.94 at N = 3k / 10k / 30k, so gh#1020
+# stays open. The one breaking change, a pub `out` field on `FactorScratch`,
+# touches nothing in pounce.
+#
+# 0.20.0 is the current pin. If you ever need to develop against an unreleased
 # feral again, add an UNCOMMITTED `[patch.crates-io]` redirecting feral to the
 # git rev — e.g.
 #   [patch.crates-io]
 #   feral = { git = "https://github.com/jkitchin/feral.git", rev = "<sha>" }
 # Do NOT commit that patch (it re-introduces the publish blocker).
-feral = { version = "0.19.0" }
+feral = { version = "0.20.0" }
 # Dense linear algebra for the debugger's numerical rank diagnosis
 # (SVD of the active-constraint Jacobian). Pure-Rust, MIT; we pull only
 # the dense `std` core — no rayon/sparse/rand/npy.

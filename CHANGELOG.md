@@ -1175,6 +1175,17 @@ changes.
 
 ### Changed
 
+- **FERAL 0.20.0: warm refactorizations reuse their output buffers
+  (feral#219).** Each interior-point iteration refactors a KKT matrix with
+  the same pattern, and feral used to allocate about six new buffers per
+  supernode every time. It now reuses the previous factor's buffers. Results
+  are bit-identical (the fixture sweep moves 0 of 220 lines). On macOS arm64
+  across 22 Mittelmann, large-scale and convex-QP models, factorization time
+  falls by a geometric mean of 4.4% (faster on 19 of 22) and total solve time
+  by 2.8%. Models with many small fronts gain most (camshape_6400 −14%,
+  sparseqp −13%), and the gh#1020 hanging chain gains 6–12%. Linux with glibc
+  is expected to gain more, since that is where the allocation cost was
+  measured. This does not resolve gh#1020.
 - **`line_search_method=cg-penalty` is refused (gh#981).** It used to run
   the plain penalty acceptor under the `cg-penalty` name — identical
   iterations and step characters — while `options.md` said the CG-penalty
