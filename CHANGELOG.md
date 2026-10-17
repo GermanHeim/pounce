@@ -103,7 +103,8 @@ changes.
   read the conflict-forced `slack·z` as a complementarity error that could
   never shrink, and the solve hit `IterationLimit` at 200 (0.12.0: 23
   iterations). The stop and the verdict now excuse, per row, the slack forced
-  by a conflicting parallel duplicate (`parallel_row_conflict`); rows with no
+  by a conflicting parallel duplicate (`ParallelRows`, as revised for gh#1026
+  below); rows with no
   such duplicate are read as before. It now reaches `Optimal` in 33 iterations
   with no downgrade to `OptimalInaccurate`. On `method="active-set"` the same
   LP ran 12004 iterations (about 270 s). Its rows reach `6e8`, and five
@@ -120,6 +121,29 @@ changes.
   `feasible_x0_sentinel_bound` 9 → 6 on both legs, because their start now
   passes the scaled check. Maros-Mészáros on that engine is unchanged in
   status, iterations and objective.
+- **Node LPs with duplicated rows and a pinned column solve to `Optimal`
+  again (gh#1026).** Two node LPs from the same discopt branch-and-bound as
+  gh#1023 still failed on the interior-point arm after that fix: one hit
+  `IterationLimit` at 200, the other ended `OptimalInaccurate` (0.12.0: both
+  `optimal` in about 24). Their rows repeat one another up to sign and
+  round-off, so only each class's summed multiplier is determined, and the
+  solve drifted along the dual ray to `z ≈ 1e8`–`1e9` on both rows of an
+  opposed pair and on both bounds of a column branched to `lb = ub = 0`.
+  From iteration 29 every residual sat at round-off, but the true-slack stop
+  read that column's `1.6e-17` drift times `9e8` as complementarity `1.4e-8`
+  against `tol = 1e-8`. The verdict already exempted a pinned column; the
+  loop, which sees one as two bound rows, did not. Both now read rows that
+  coincide up to the verdict's round-off floor at their summed multiplier,
+  and an equality among them (a pinned column, an equality written as two
+  rows, gh#1023's conflicting cuts) not at all, since a point off it is a
+  primal residual and is read as one. Rows that do not coincide, including
+  both sides of a range of real width, keep their own multipliers. A first
+  version netted every opposed pair and hid a real complementarity error of
+  `1.4e2` on `scaled_feasible_a`'s `1e6`-wide boxes, which the fixture sweep
+  caught as a reroute to the NLP arm. The two LPs now reach `Optimal` in 35
+  and 32 iterations at the HiGHS objective (0.12.0 was `4e-8` and `1e-7`
+  relative off). The fixture sweep (both legs) and Maros-Mészáros at the
+  default routing are unchanged.
 - **Limited-memory arm no longer spends `max_iter` on a dense convex quadratic
   (gh#1016).** `min ½xᵀQx − bᵀx` with a dense `Q` of condition `1e3`–`8e3` and
   `n = 10…40` ran 3000 iterations and, at `n = 40`, returned
