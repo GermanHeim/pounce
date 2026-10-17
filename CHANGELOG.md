@@ -10,6 +10,21 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **`pounce-minima`, a new workspace crate for the multistart / find-minima
+  search (gh#966, step 1 of 3).** The archive, the start sampler, the
+  penalty / tunnel TNLP wrappers and the search options (`Method`,
+  `MinimaOptions`, formerly `pounce_cli::cli::{MinimaMethod, MinimaArgs}`)
+  move out of `pounce-cli` unchanged, so the search can be shared by the CLI,
+  `pounce-rs` and the Python frontend instead of being re-implemented in each.
+  Every old path still resolves through re-exports, and `rand`, `rand_chacha`
+  and `sobol_burley` move with the sampler, so `pounce-cli` no longer depends
+  on them directly. crates.io now receives 22 crates; `pounce-minima` is a new
+  name, one under the new-crate burst limit. The search driver moves next.
+  `scripts/sweep-minima.sh` is new: it runs each of the six methods over a
+  small fixture set and records status, solve count, every minimum found and
+  the best point's duals, so a change to the search can be diffed the way
+  `scripts/sweep-fixtures.sh` diffs a single solve (which never passes
+  `--minima`). Across this move it diffs empty on all 54 lines.
 - **`intermediate_callback` and `GetIpoptCurrentIterate` on the active-set SQP
   arm (gh#1015).** `algorithm = active-set-sqp` never invoked the user's
   intermediate callback, so a C-API caller supplying the Lagrangian Hessian

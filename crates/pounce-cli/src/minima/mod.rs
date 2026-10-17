@@ -19,9 +19,9 @@
 //! within `kkt_tol` (gh#983) ∧ finite ∧ in-bounds ∧ (Hessian PSD within
 //! `psd_tol`) ∧ not already in the archive.
 
-pub mod archive;
-pub mod penalty_tnlp;
-pub mod sampling;
+// Moved to `pounce-minima` (gh#966); re-exported so `minima::archive` etc.
+// keep resolving.
+pub use pounce_minima::{archive, penalty_tnlp, sampling};
 
 use crate::cli::{Args, MinimaArgs, MinimaMethod, ProblemSource};
 use crate::seeded_tnlp::SeededTnlp;
