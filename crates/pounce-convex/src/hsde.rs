@@ -217,12 +217,26 @@ pub(crate) const REL_FLOOR_KAPPA: f64 = 64.0;
 /// [`crate::qp::ParallelRows::complementarity_multipliers`], as the verdict
 /// reads it: rows that repeat one another up to sign and round-off at their
 /// summed multiplier, an equality among them not at all (gh#1023, gh#1026).
+///
+/// `obj_ulp` is one rounding unit of the objective's terms,
+/// `ε·(½|x̂ᵀPx̂| + Σ|c_j x̂_j|)`, and is taken off every product: a product
+/// below it cannot move the objective it is a component of, so no amount of
+/// iterating makes it mean anything (gh#1029). That is the case when the
+/// multipliers are large because `x̂` is: the fac2 node LPs carry `x̂` to
+/// `2e9` against `c = e₆₇`, multipliers to `1.5e8`, and a bound row at
+/// `x̂_j = 3e-16` -- the linear solve's residual on a row whose own terms are
+/// all zero, so the slack quantum above cannot see it -- reads `4.8e-8`
+/// against `tol = 1e-8` while the objective's ulp is `4.3e-7`. The loop ran
+/// to `max_iter` with `κ` at `1e-169`. One ulp, not `REL_FLOOR_KAPPA` of
+/// them: the gh#984 item-3 shift (a product of `1.08e-5` on an objective of
+/// `~1e9`, genuinely reducible) sits fifty ulps above it.
 pub(crate) fn true_slack_complementarity(
     h: &[f64],
     gx: &[f64],
     gabs: &[f64],
     z: &[f64],
     tau: f64,
+    obj_ulp: f64,
 ) -> f64 {
     if !(tau > 0.0) {
         return f64::INFINITY;
@@ -232,7 +246,7 @@ pub(crate) fn true_slack_complementarity(
         let gxh = gxi / tau;
         let slack = hi - gxh;
         if slack.abs() > REL_FLOOR_KAPPA * f64::EPSILON * hi.abs().max(gai / tau) {
-            worst = worst.max((slack * zi / tau).abs());
+            worst = worst.max(((slack * zi / tau).abs() - obj_ulp).max(0.0));
         }
     }
     worst
@@ -870,6 +884,17 @@ where
                 .sum::<f64>())
             / tau;
         let gap_noise = REL_FLOOR_KAPPA * f64::EPSILON * gap_terms.max(scale_g_raw);
+        // One rounding unit of the objective's terms (gh#1029); see
+        // `true_slack_complementarity`.
+        let obj_ulp = f64::EPSILON
+            * (0.5 * xpx.abs() / tau
+                + prob
+                    .c
+                    .iter()
+                    .zip(&x)
+                    .map(|(a, b)| (a * b).abs())
+                    .sum::<f64>())
+            / tau;
         let rel_ok =
             large_scale && pres_rel < opts.tol && dres_rel < opts.tol && gap_rel < opts.tol;
         // gh#984 item 4: the gap is a *sum* of objective-sized terms, so its
@@ -914,7 +939,8 @@ where
         let gap_excused = !gap_strict
             && gap < gap_noise
             && orthant_only
-            && true_slack_complementarity(&prob.h, &nrm_gx, &nrm_gabs, &z_comp, tau) <= tol_gap;
+            && true_slack_complementarity(&prob.h, &nrm_gx, &nrm_gabs, &z_comp, tau, obj_ulp)
+                <= tol_gap;
         // gh#1000 (I.8): the dual residual likewise cannot be asked to read
         // below the rounding noise of its own terms. `tol_cost` shrinks with
         // the cost unit and that noise does not -- the blend LP at costs
@@ -928,7 +954,8 @@ where
         let dres_excused = dres >= tol_cost
             && orthant_only
             && dual_excess_above_floor(prob, &x, &y, &z, &rho_x, tau) < tol_cost
-            && true_slack_complementarity(&prob.h, &nrm_gx, &nrm_gabs, &z_comp, tau) <= tol_gap;
+            && true_slack_complementarity(&prob.h, &nrm_gx, &nrm_gabs, &z_comp, tau, obj_ulp)
+                <= tol_gap;
         let abs_ok =
             pres < opts.tol && (dres < tol_cost || dres_excused) && (gap_strict || gap_excused);
         let rel_in_floor = rel_ok && pres <= cap_p && dres <= cap_d && gap <= cap_g;
@@ -962,7 +989,7 @@ where
         // read below `1e-7`, so the loop ran to 196 iterations on a point the
         // verdict accepts.
         let true_comp = if orthant_only {
-            true_slack_complementarity(&prob.h, &nrm_gx, &nrm_gabs, &z_comp, tau)
+            true_slack_complementarity(&prob.h, &nrm_gx, &nrm_gabs, &z_comp, tau, obj_ulp)
         } else {
             0.0
         };
@@ -1718,24 +1745,37 @@ mod tests {
         let h = [1e5, 1e9];
         let gx = [(1e5 - 5e-3) * tau, (1e9 + 1e-7) * tau];
         let z = [1.0 * tau, 1e3 * tau];
-        let c = true_slack_complementarity(&h, &gx, &gx.map(f64::abs), &z, tau);
+        let c = true_slack_complementarity(&h, &gx, &gx.map(f64::abs), &z, tau, 0.0);
         assert!((c - 5e-3).abs() < 1e-9, "{c:e}");
         // Both inside the quantum: nothing to count.
         let gx_tight = [1e5 * tau, 1e9 * tau];
         assert_eq!(
-            true_slack_complementarity(&h, &gx_tight, &gx_tight, &z, tau),
+            true_slack_complementarity(&h, &gx_tight, &gx_tight, &z, tau, 0.0),
             0.0
         );
         // A collapsed tau cannot certify anything.
-        assert!(true_slack_complementarity(&h, &gx, &gx, &z, 0.0).is_infinite());
+        assert!(true_slack_complementarity(&h, &gx, &gx, &z, 0.0, 0.0).is_infinite());
         // gh#1000 (I.8): `h = 0`, `Gx` a cancellation of `1e3`-sized terms
         // that left `2e-13`. The terms, not `|Gx|`, set the quantum.
         let (h0, gx0, z0) = ([0.0], [-2e-13 * tau], [1.6e6 * tau]);
-        assert!(true_slack_complementarity(&h0, &gx0, &gx0.map(f64::abs), &z0, tau) > 0.0);
+        assert!(true_slack_complementarity(&h0, &gx0, &gx0.map(f64::abs), &z0, tau, 0.0) > 0.0);
         assert_eq!(
-            true_slack_complementarity(&h0, &gx0, &[2e3 * tau], &z0, tau),
+            true_slack_complementarity(&h0, &gx0, &[2e3 * tau], &z0, tau, 0.0),
             0.0
         );
+        // gh#1029: m1's bound row, `x̂_j = 3e-16` on a row whose terms are
+        // all zero, times `ẑ = 1.5e8` reads `4.8e-8`; one ulp of a `2e9`
+        // objective (`4.3e-7`) takes it off, and only that much: the
+        // gh#1000 row above still reads its `3.2e-7` less a `1e-7` ulp.
+        let (h1, gx1, z1) = ([0.0], [-3e-16 * tau], [1.5e8 * tau]);
+        let ulp = f64::EPSILON * 2e9;
+        assert!(true_slack_complementarity(&h1, &gx1, &gx1.map(f64::abs), &z1, tau, 0.0) > 4e-8);
+        assert_eq!(
+            true_slack_complementarity(&h1, &gx1, &gx1.map(f64::abs), &z1, tau, ulp),
+            0.0
+        );
+        let c0 = true_slack_complementarity(&h0, &gx0, &gx0.map(f64::abs), &z0, tau, 1e-7);
+        assert!((c0 - (3.2e-7 - 1e-7)).abs() < 1e-12, "{c0:e}");
     }
 
     /// gh#1023 / gh#1026: rows repeating one another up to sign and
