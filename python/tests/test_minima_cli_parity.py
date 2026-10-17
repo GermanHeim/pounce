@@ -201,22 +201,13 @@ def _assert_all_six(py, cli):
     assert py.n_kkt_rejected == cli.get("n_kkt_rejected", 0) == 0
 
 
-@pytest.mark.parametrize("method", ["multistart", "mlsl"])
+# deflation was a strict xfail here until the CLI's penalty solves took the
+# exact augmented Hessian on an unconstrained problem, as find_minima(hess=)
+# always did: measured over seeds 0-5 at this budget, all six minima in 6/6
+# runs for Python with hess=, 3/6 without it, and 2/6 for the CLI (gh#966).
+@pytest.mark.parametrize("method", ["multistart", "mlsl", "deflation"])
 def test_camel_both_find_the_same_six_minima(tmp_path, method):
     py, _, cli, _ = _both(_camel(), tmp_path, method, n_minima=6,
-                          max_solves=80, patience=20, dedup=1e-3)
-    _assert_all_six(py, cli)
-
-
-@pytest.mark.xfail(strict=True, reason=(
-    "known divergence (gh#966): the CLI's penalty solves decline the "
-    "augmented Hessian and run L-BFGS (penalty_tnlp.rs), where find_minima "
-    "with hess= passes the analytic one. Measured over seeds 0-5 at this "
-    "budget: all six minima in 6/6 runs for Python with hess=, 3/6 for "
-    "Python without it, 2/6 for the CLI. Remove the marker when the two "
-    "share one penalty-solve path."))
-def test_camel_deflation_both_find_the_same_six_minima(tmp_path):
-    py, _, cli, _ = _both(_camel(), tmp_path, "deflation", n_minima=6,
                           max_solves=80, patience=20, dedup=1e-3)
     _assert_all_six(py, cli)
 

@@ -119,6 +119,22 @@ changes.
   `dev-notes/wiki-recovering-from-a-bad-start.md`, ready to paste, and
   `docs/src/troubleshooting.md` now says which rung moves the start.
 
+### Changed
+- **`--minima` flooding and deflation solve their penalty subproblems on the
+  exact Hessian when the model is unconstrained or bound-only (gh#966).** They
+  declined the augmented Hessian and ran L-BFGS; `pounce.find_minima(hess=...)`
+  always passed the analytic one, and the gap showed. Over seeds 0–9
+  (`--n-minima 6 --max-solves 30`), runs that found all six six-hump-camel
+  minima: deflation 1 → 10, in 232 solves against 255; flooding 7 → 9. The
+  base problem's Hessian plus the kernel's, as a dense lower triangle, is used
+  when the model has a Hessian and `n <= 256` (the saddle check's cap). A
+  model **with constraints keeps the quasi-Newton solve**, because there the
+  measurement went the other way: `circle_parabola_t0p5` deflation found both
+  its minima on 8 of 10 seeds under L-BFGS and 3 of 10 exact
+  (`haverly_multistart_t3_brf0` unchanged). `scripts/sweep-minima.sh` moves 5
+  of 54 lines, all unconstrained flooding / deflation ones. The CLI/Python
+  parity test's strict `xfail` on camel deflation is now a pass.
+
 ### Fixed
 - **LPs with duplicated, round-off-conflicting cuts solve again on both convex
   engines (gh#1023).** An outer-approximation master LP (67 columns, 426 rows)

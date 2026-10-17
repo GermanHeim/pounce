@@ -15,6 +15,8 @@
 //! | `failed_solves_exhaust_patience` | a non-converged solve → reject → patience |
 //! | `ipopt_local_solve_puts_the_callers_hook_back` | `IpoptLocalSolve`'s `Drop` |
 //! | `honor_original_bounds_is_honoured` | the answer read from `finalize_solution`, projected |
+//! | `penalty_solves_take_the_exact_hessian_only_when_unconstrained` | the exact-penalty-Hessian gate, all three branches |
+//! | `camel_deflation_finds_all_six_on_every_seed` | the exact penalty Hessian, through the IPM |
 
 use pounce_algorithm::application::IpoptApplication;
 use pounce_common::types::Number;
@@ -374,4 +376,152 @@ fn honor_original_bounds_is_honoured() {
     assert!(relaxed < 0.0 && relaxed > -1e-6, "relaxed x = {relaxed:e}");
     let projected = bound_active_x("honor_original_bounds yes\n");
     assert_eq!(projected, 0.0);
+}
+
+/// Records the Hessian mode of every *penalty* solve — one whose objective
+/// differs from the base problem's at a probe point — and converges at the
+/// start.
+struct ModeRecorder {
+    base: Rc<RefCell<dyn TNLP>>,
+    modes: Vec<HessianMode>,
+}
+
+impl LocalSolve for ModeRecorder {
+    fn solve(&mut self, problem: Rc<RefCell<dyn TNLP>>, mode: HessianMode) -> LocalOutcome {
+        let probe = [0.37, -0.21];
+        let f = problem.borrow_mut().eval_f(&probe, true);
+        if f != self.base.borrow_mut().eval_f(&probe, true) {
+            self.modes.push(mode);
+        }
+        let mut inner = Scripted {
+            converged: true,
+            dual_inf: 0.0,
+            calls: 0,
+        };
+        inner.solve(problem, mode)
+    }
+}
+
+/// `inner` with one extra, slack linear row `-100 <= x0 + x1 <= 100`, or
+/// with its Hessian hidden (`nnz_h_lag = 0`).
+struct Variant {
+    inner: Box2,
+    with_row: bool,
+    hide_hessian: bool,
+}
+
+impl TNLP for Variant {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        let mut i = self.inner.get_nlp_info()?;
+        if self.with_row {
+            i.m = 1;
+            i.nnz_jac_g = 2;
+        }
+        if self.hide_hessian {
+            i.nnz_h_lag = 0;
+        }
+        Some(i)
+    }
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        b.x_l.copy_from_slice(&self.inner.lo);
+        b.x_u.copy_from_slice(&self.inner.hi);
+        if self.with_row {
+            b.g_l[0] = -100.0;
+            b.g_u[0] = 100.0;
+        }
+        true
+    }
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        self.inner.get_starting_point(sp)
+    }
+    fn eval_f(&mut self, x: &[Number], new_x: bool) -> Option<Number> {
+        self.inner.eval_f(x, new_x)
+    }
+    fn eval_grad_f(&mut self, x: &[Number], new_x: bool, g: &mut [Number]) -> bool {
+        self.inner.eval_grad_f(x, new_x, g)
+    }
+    fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        if self.with_row {
+            g[0] = x[0] + x[1];
+        }
+        true
+    }
+    fn eval_jac_g(&mut self, _x: Option<&[Number]>, _new_x: bool, m: SparsityRequest<'_>) -> bool {
+        match m {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow.copy_from_slice(&[0, 0][..irow.len()]);
+                jcol.copy_from_slice(&[0, 1][..jcol.len()]);
+            }
+            SparsityRequest::Values { values } => values.fill(1.0),
+        }
+        true
+    }
+    fn eval_h(
+        &mut self,
+        x: Option<&[Number]>,
+        new_x: bool,
+        of: Number,
+        l: Option<&[Number]>,
+        nl: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        self.inner.eval_h(x, new_x, of, l, nl, mode)
+    }
+    fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+}
+
+fn bowl_box2() -> Box2 {
+    Box2 {
+        f: |z| (z[0] - 1.0).powi(2) + (z[1] + 0.5).powi(2),
+        g: |z| [2.0 * (z[0] - 1.0), 2.0 * (z[1] + 0.5)],
+        h: |_| [2.0, 0.0, 2.0],
+        lo: [-2.0, -2.0],
+        hi: [2.0, 2.0],
+        x0: [0.0, 0.0],
+    }
+}
+
+/// The modes deflation's penalty solves asked for.
+fn penalty_modes(with_row: bool, hide_hessian: bool) -> Vec<HessianMode> {
+    let base: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(Variant {
+        inner: bowl_box2(),
+        with_row,
+        hide_hessian,
+    }));
+    let cfg = MinimaOptions {
+        kkt_tol: None,
+        ..opts(Method::Deflation, 3, 5)
+    };
+    let mut rec = ModeRecorder {
+        base: Rc::clone(&base),
+        modes: Vec::new(),
+    };
+    let _ = find_minima(&base, &mut rec, &cfg).unwrap();
+    assert!(!rec.modes.is_empty(), "no penalty solve was reached");
+    rec.modes
+}
+
+/// The exact augmented Hessian is used exactly when the problem is
+/// unconstrained (or bound-only) and has a Hessian — one fixture per branch.
+#[test]
+fn penalty_solves_take_the_exact_hessian_only_when_unconstrained() {
+    let all = |modes: Vec<HessianMode>, want| modes.iter().all(|&m| m == want);
+    assert!(all(penalty_modes(false, false), HessianMode::Exact));
+    assert!(all(penalty_modes(true, false), HessianMode::QuasiNewton));
+    assert!(all(penalty_modes(false, true), HessianMode::QuasiNewton));
+}
+
+/// The measurement behind that rule, pinned: camel deflation finds all six
+/// minima on every seed 0-9 with the exact penalty Hessian (1 of 10 under
+/// L-BFGS).
+#[test]
+fn camel_deflation_finds_all_six_on_every_seed() {
+    for seed in 0..10 {
+        let cfg = MinimaOptions {
+            seed,
+            ..opts(Method::Deflation, 6, 30)
+        };
+        let r = run(camel(), &cfg);
+        assert_eq!(r.minima.len(), 6, "seed {seed}: {:?}", r.stop);
+    }
 }

@@ -259,13 +259,32 @@ impl<'a> Driver<'a> {
         self.run_solve(t, exact)
     }
 
+    /// One flooding / deflation solve on the augmented objective.
+    ///
+    /// On an unconstrained or bound-only problem with a Hessian, and `n` small
+    /// enough for a dense block ([`PSD_MAX_N`], the saddle check's cap), it
+    /// runs on the exact augmented Hessian; otherwise quasi-Newton. Measured
+    /// over seeds 0–9 (`n_minima` 6, 30 solves, gh#966), runs that found all
+    /// six minima, L-BFGS → exact: camel deflation 1 → 10 (255 → 232 solves
+    /// in total), camel flooding 7 → 9, wavy unchanged at 10/10 both ways.
+    /// With constraints it went the other way: `circle_parabola_t0p5`
+    /// deflation found both its minima in 8/10 seeds under L-BFGS and 3/10
+    /// exact (`haverly_multistart_t3_brf0` unchanged at 10/10), so a
+    /// constrained problem keeps the quasi-Newton solve.
     fn solve_penalty(&mut self, seed_x: &[Number], kernel: Kernel) -> Result<SolveOut, Stop> {
-        let pen: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(PenaltyTnlp::new(
-            Rc::clone(&self.base),
-            kernel,
-        )));
+        let base = Rc::clone(&self.base);
+        let exact = if self.m == 0 && self.nnz_h > 0 && self.n <= PSD_MAX_N {
+            PenaltyTnlp::with_exact_hessian(Rc::clone(&base), kernel.clone())
+        } else {
+            None
+        };
+        let use_exact = exact.is_some();
+        let pen: Rc<RefCell<dyn TNLP>> = match exact {
+            Some(p) => Rc::new(RefCell::new(p)),
+            None => Rc::new(RefCell::new(PenaltyTnlp::new(base, kernel))),
+        };
         let t: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(SeededTnlp::new(pen, seed_x.to_vec())));
-        self.run_solve(t, false)
+        self.run_solve(t, use_exact)
     }
 
     fn solve_tunnel(
