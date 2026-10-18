@@ -267,6 +267,31 @@ changes.
   rows violated by `3e-9` at multipliers near `8e7` down to `3e-15`. The
   fixture sweep (both legs) and Maros-Mészáros at the default routing are
   unchanged.
+- **The active-set engine proves infeasible node LPs infeasible (gh#1031).**
+  Three fac2 node LPs (the gh#1029 LPs with columns 54–65 fixed) are
+  infeasible; the IPM certifies them in 21–22 iterations. On
+  `method="active-set"` two ended `IterationLimit` after 2,422 and 4,280
+  iterations, and the third ran to its time limit and reported 0 iterations.
+  The simplex phase-1 that seeds the engine for an LP (gh#974) stopped at its
+  own optimum with infeasibility left, which is a Farkas certificate. The driver
+  read that as "no seed" and handed the LP to the engine's cold l1-elastic
+  phase-1, which does not terminate on these LPs. Phase-1's multipliers
+  (`y = −π_eq`, `z = −π_ineq`) are now checked with
+  `certifies_primal_infeasible`. When they pass, the solve returns
+  `PrimalInfeasible` with them as the certificate. When they fail, the
+  cold start runs as before. All three LPs now return `PrimalInfeasible` in
+  about 0 s. Separately, `pounce-qp`'s `time_limit_solution` hard-coded
+  `n_working_set_changes: 0`, so a deadline discarded the iterations its caller
+  had counted. It now reports them: the third LP, forced down the old path,
+  reports 3,336. Pinned by
+  `pounce-convex/tests/issue1031_active_set_infeasible.rs`, which re-checks the
+  certificate with its own arithmetic. The fixture sweep (both legs) is
+  unchanged, both at the default routing and forced onto the active-set engine
+  (`solver_selection=qp-active-set`). Maros-Mészáros on that engine (60 s cap) is unchanged
+  in status on all 138 problems, and none reaches the new certificate. The
+  lines that move all ended at the wall-time cap in both runs. Most of those
+  now report their iteration count instead of 0 (`CONT-100` 0 → 2,092,
+  `HUESTIS` 3 → 3,115). Their objective at the cap moves with timing.
 - **`pounce --minima` no longer panics on a bounded model with more than 256
   variables (gh#966).** The Sobol' sampler (`sobol_burley`) has 256
   dimensions and asserted past them on the first sampled start. Dimension

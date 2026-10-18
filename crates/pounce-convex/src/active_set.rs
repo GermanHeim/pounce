@@ -56,7 +56,7 @@
 //!   l1-elastic phase-1 does not terminate on the degenerate netlib-derived
 //!   QPs in the Maros-Mészáros set, and handing `solve` a feasible primal
 //!   routes it straight to phase-2, which is the part of the method that is
-//!   strong. See `crate::simplex::simplex_feasible_vertex`.
+//!   strong. See `crate::simplex::simplex_seed`.
 //! * Every terminal status is mapped, not just `Optimal` — this is the primary
 //!   driver, so it must report `MaxIter` / `NumericalError` / `Infeasible` /
 //!   `Unbounded` honestly rather than falling back to a previous solution.
@@ -898,7 +898,7 @@ where
     // `QpSolver::solve` routes a warm start whose primal is feasible directly
     // into phase-2 and never enters l1-elastic mode — which is the point, since
     // that phase-1 does not terminate on the degenerate netlib-derived QPs here
-    // (see `simplex::simplex_feasible_vertex`). Phase-2 from a feasible vertex
+    // (see `simplex::simplex_seed`). Phase-2 from a feasible vertex
     // is the part of this method that works well.
     //
     // The working set must come from the simplex **basis**, not from
@@ -919,68 +919,95 @@ where
     // whole path). Computing one anyway would both pay for a phase-1 solve that
     // is no longer needed and suppress the homotopy, whose hook in
     // `QpSolver::solve` only fires on a genuinely cold call.
-    let seed = if qopts.use_homotopy {
+    //
+    // A phase-1 that stops infeasible is not a missing seed but an answer
+    // (gh#1031): its multipliers are a Farkas candidate, and once
+    // [`certifies_primal_infeasible`] has checked them against `prob` the solve
+    // is over. Falling through to a cold engine instead is what this used to
+    // do, and the engine's l1-elastic phase-1 never proves infeasibility on
+    // these problems — fac2 node LPs ran to `iteration_limit` after 2,422 and
+    // 4,280 iterations, or to the time limit, where the IPM needs 21. A
+    // candidate that fails the check is dropped and the solve proceeds as
+    // before, so nothing that used to solve can change.
+    let vertex = if qopts.use_homotopy {
         None
     } else {
-        crate::simplex::simplex_feasible_vertex(prob).map(|v| {
-            use crate::simplex::AtBound;
-            let mut working = WorkingSet::cold(n, m);
-            for (i, st) in working.bounds.iter_mut().enumerate() {
-                // A variable fixed by equal bounds is `Fixed` regardless of which
-                // side the basis parked it on.
-                let (l, u) = (native.xl()[i], native.xu()[i]);
-                let fixed = l > NLP_LOWER_BOUND_INF && u < NLP_UPPER_BOUND_INF && l == u;
-                *st = match (fixed, v.struct_at[i]) {
-                    (true, _) => BoundStatus::Fixed,
-                    (false, AtBound::Lower) => BoundStatus::AtLower,
-                    (false, AtBound::Upper) => BoundStatus::AtUpper,
-                    (false, AtBound::Free) => BoundStatus::Inactive,
-                };
+        match crate::simplex::simplex_seed(prob) {
+            crate::simplex::SeedOutcome::Vertex(v) => Some(v),
+            crate::simplex::SeedOutcome::Infeasible { y, z } => {
+                let certified = certifies_primal_infeasible(prob, &y, &z, opts);
+                debug_trace(|| {
+                    format!("simplex phase-1 stopped infeasible; certified={certified}")
+                });
+                if certified {
+                    let mut sol = empty_solution(n, m_eq, m_ineq, QpStatus::PrimalInfeasible);
+                    sol.y = y;
+                    sol.z = z;
+                    return Attempt::opaque(sol);
+                }
+                None
             }
-            // Row order matches: the translation above stacks `[A_eq ; G]` in the
-            // same order the simplex builds its rows, so index `i` is the same row.
-            for (i, st) in working.constraints.iter_mut().enumerate() {
-                // Equality rows are ALWAYS active — they are equations, not
-                // one-sided constraints that may or may not bind.
-                //
-                // Deriving their activity from the basis instead (leaving a row
-                // inactive when its logical is basic) is tempting: it makes the
-                // active count come out at exactly `n` and so avoids the
-                // `KKT inertia mismatch: expected 105 …, got 102` that `CVXQP3_S`
-                // otherwise hits. But the premise is false. An equality's logical
-                // is boxed to `[0, 0]`; a *basic* one is simply a degenerate basic
-                // variable sitting at zero, which says nothing about whether the row
-                // is a linear combination of the others. Dropping such a row drops a
-                // real constraint — the ratio test skips `bl == bu` rows, so it
-                // never comes back — and the engine is then free to move in a
-                // direction that violates it. On NETLIB `afiro` that produced a
-                // phantom `Unbounded` verdict on an LP with a finite optimum of
-                // −464.75 (issue #133's regression test caught it).
-                //
-                // More active rows than variables *is* legitimate at a degenerate
-                // vertex; the dependence among them is a rank problem, and
-                // `schur_reset_rank_repaired` in `pounce-qp` is what resolves it —
-                // by pruning to a maximal independent subset with the algebra to
-                // justify each drop, rather than guessing from basis status here.
-                *st = if i < m_eq {
-                    ConsStatus::Equality
-                } else {
-                    match v.row_at[i] {
-                        // Slack `s = h − Gx` nonbasic at its lower bound 0 means
-                        // `Gx = h`: the row sits at its upper bound `bu = h`.
-                        AtBound::Lower | AtBound::Upper => ConsStatus::AtUpper,
-                        AtBound::Free => ConsStatus::Inactive,
-                    }
-                };
-            }
-            QpWarmStart {
-                x: v.x,
-                lambda_g: vec![0.0; m],
-                lambda_x: vec![0.0; n],
-                working,
-            }
-        })
+            crate::simplex::SeedOutcome::NoSeed => None,
+        }
     };
+    let seed = vertex.map(|v| {
+        use crate::simplex::AtBound;
+        let mut working = WorkingSet::cold(n, m);
+        for (i, st) in working.bounds.iter_mut().enumerate() {
+            // A variable fixed by equal bounds is `Fixed` regardless of which
+            // side the basis parked it on.
+            let (l, u) = (native.xl()[i], native.xu()[i]);
+            let fixed = l > NLP_LOWER_BOUND_INF && u < NLP_UPPER_BOUND_INF && l == u;
+            *st = match (fixed, v.struct_at[i]) {
+                (true, _) => BoundStatus::Fixed,
+                (false, AtBound::Lower) => BoundStatus::AtLower,
+                (false, AtBound::Upper) => BoundStatus::AtUpper,
+                (false, AtBound::Free) => BoundStatus::Inactive,
+            };
+        }
+        // Row order matches: the translation above stacks `[A_eq ; G]` in the
+        // same order the simplex builds its rows, so index `i` is the same row.
+        for (i, st) in working.constraints.iter_mut().enumerate() {
+            // Equality rows are ALWAYS active — they are equations, not
+            // one-sided constraints that may or may not bind.
+            //
+            // Deriving their activity from the basis instead (leaving a row
+            // inactive when its logical is basic) is tempting: it makes the
+            // active count come out at exactly `n` and so avoids the
+            // `KKT inertia mismatch: expected 105 …, got 102` that `CVXQP3_S`
+            // otherwise hits. But the premise is false. An equality's logical
+            // is boxed to `[0, 0]`; a *basic* one is simply a degenerate basic
+            // variable sitting at zero, which says nothing about whether the row
+            // is a linear combination of the others. Dropping such a row drops a
+            // real constraint — the ratio test skips `bl == bu` rows, so it
+            // never comes back — and the engine is then free to move in a
+            // direction that violates it. On NETLIB `afiro` that produced a
+            // phantom `Unbounded` verdict on an LP with a finite optimum of
+            // −464.75 (issue #133's regression test caught it).
+            //
+            // More active rows than variables *is* legitimate at a degenerate
+            // vertex; the dependence among them is a rank problem, and
+            // `schur_reset_rank_repaired` in `pounce-qp` is what resolves it —
+            // by pruning to a maximal independent subset with the algebra to
+            // justify each drop, rather than guessing from basis status here.
+            *st = if i < m_eq {
+                ConsStatus::Equality
+            } else {
+                match v.row_at[i] {
+                    // Slack `s = h − Gx` nonbasic at its lower bound 0 means
+                    // `Gx = h`: the row sits at its upper bound `bu = h`.
+                    AtBound::Lower | AtBound::Upper => ConsStatus::AtUpper,
+                    AtBound::Free => ConsStatus::Inactive,
+                }
+            };
+        }
+        QpWarmStart {
+            x: v.x,
+            lambda_g: vec![0.0; m],
+            lambda_x: vec![0.0; n],
+            working,
+        }
+    });
 
     debug_trace(|| {
         format!(
