@@ -574,7 +574,7 @@ impl ParametricActiveSetSolver {
 
         for _iter in 0..opts.max_iter {
             if crate::deadline::expired() {
-                return Ok(time_limit_solution(qp, Some(&x), n_refactor));
+                return Ok(time_limit_solution(qp, Some(&x), n_refactor, n_changes));
             }
             // Build active-bound index list (ascending = problem
             // order) and assemble the KKT.
@@ -597,7 +597,7 @@ impl ParametricActiveSetSolver {
             let delta = self.factorize_with_inertia_control(kkt, &mut rhs, k as i32, qp.n, opts)?;
             n_refactor += 1;
             if crate::deadline::expired() {
-                return Ok(time_limit_solution(qp, Some(&x), n_refactor));
+                return Ok(time_limit_solution(qp, Some(&x), n_refactor, n_changes));
             }
 
             // ---- 3. Check ‖p‖ ----
@@ -854,7 +854,7 @@ impl ParametricActiveSetSolver {
         // ---- 4. Active-set inner loop ----
         for _iter in 0..opts.max_iter {
             if crate::deadline::expired() {
-                return Ok(time_limit_solution(qp, Some(&x), n_refactor));
+                return Ok(time_limit_solution(qp, Some(&x), n_refactor, n_changes));
             }
             let active: Vec<usize> = (0..n).filter(|&i| working.bounds[i].is_active()).collect();
             let k = active.len();
@@ -872,7 +872,7 @@ impl ParametricActiveSetSolver {
                 self.factorize_with_inertia_control(kkt, &mut rhs, (m + k) as i32, qp.n, opts)?;
             n_refactor += 1;
             if crate::deadline::expired() {
-                return Ok(time_limit_solution(qp, Some(&x), n_refactor));
+                return Ok(time_limit_solution(qp, Some(&x), n_refactor, n_changes));
             }
 
             let p_inf = rhs[..n].iter().map(|pi| pi.abs()).fold(0.0, f64::max);
@@ -1332,7 +1332,7 @@ impl ParametricActiveSetSolver {
 
         for _iter in 0..opts.max_iter {
             if crate::deadline::expired() {
-                return Ok(time_limit_solution(qp, Some(&x), n_refactor));
+                return Ok(time_limit_solution(qp, Some(&x), n_refactor, n_changes));
             }
             let active_cons: Vec<usize> = (0..m)
                 .filter(|&i| working.constraints[i].is_active())
@@ -1406,7 +1406,7 @@ impl ParametricActiveSetSolver {
             };
             n_refactor += 1;
             if crate::deadline::expired() {
-                return Ok(time_limit_solution(qp, Some(&x), n_refactor));
+                return Ok(time_limit_solution(qp, Some(&x), n_refactor, n_changes));
             }
 
             let p_inf = rhs[..n].iter().map(|pi| pi.abs()).fold(0.0, f64::max);
@@ -2337,7 +2337,12 @@ impl ParametricActiveSetSolver {
             .copy_from_slice(&sol_aug.working.constraints);
         working.bounds.copy_from_slice(&sol_aug.working.bounds[..n]);
         if sol_aug.status == QpStatus::TimeLimit || crate::deadline::expired() {
-            return Ok(time_limit_solution(qp, Some(&x), sol_aug.stats.n_refactor));
+            return Ok(time_limit_solution(
+                qp,
+                Some(&x),
+                sol_aug.stats.n_refactor,
+                sol_aug.stats.n_working_set_changes,
+            ));
         }
 
         let feasible = reform.is_feasible(&sol_aug.x, opts.feas_tol);
@@ -2457,7 +2462,8 @@ impl ParametricActiveSetSolver {
             return Ok(time_limit_solution(
                 qp,
                 p1_point.as_deref().or(Some(x.as_slice())),
-                0,
+                sol_aug.stats.n_refactor,
+                sol_aug.stats.n_working_set_changes,
             ));
         }
         if let Some(seed) = p1_point {
@@ -2510,7 +2516,12 @@ impl ParametricActiveSetSolver {
                 Err(_) => continue,
             };
             if rec.status == QpStatus::TimeLimit || crate::deadline::expired() {
-                return Ok(time_limit_solution(qp, Some(&rec.x), rec.stats.n_refactor));
+                return Ok(time_limit_solution(
+                    qp,
+                    Some(&rec.x),
+                    rec.stats.n_refactor,
+                    rec.stats.n_working_set_changes,
+                ));
             }
             if rec.status == QpStatus::Optimal
                 && self.original_qp_feasible(qp, &rec.x, opts.feas_tol)
@@ -2582,7 +2593,12 @@ impl ParametricActiveSetSolver {
             other => other,
         };
         if crate::deadline::expired() {
-            return Ok(time_limit_solution(qp, Some(&x), sol_aug.stats.n_refactor));
+            return Ok(time_limit_solution(
+                qp,
+                Some(&x),
+                sol_aug.stats.n_refactor,
+                sol_aug.stats.n_working_set_changes,
+            ));
         }
 
         Ok(QpSolution {
@@ -3388,7 +3404,7 @@ impl ParametricActiveSetSolver {
         let trace = std::env::var("POUNCE_QP_TRACE").is_ok();
         for _iter in 0..opts.max_iter {
             if crate::deadline::expired() {
-                return Ok(time_limit_solution(qp, Some(&x), n_refactor));
+                return Ok(time_limit_solution(qp, Some(&x), n_refactor, n_changes));
             }
             let hx = h_times_x(qp.h, &x);
             let mut rhs = vec![0.0; n + m_total];
@@ -3513,7 +3529,7 @@ impl ParametricActiveSetSolver {
                 schur.solve(&mut self.linsol, &mut rhs)?;
             }
             if crate::deadline::expired() {
-                return Ok(time_limit_solution(qp, Some(&x), n_refactor));
+                return Ok(time_limit_solution(qp, Some(&x), n_refactor, n_changes));
             }
 
             let p: Vec<Number> = rhs[..n].to_vec();
@@ -5102,10 +5118,10 @@ fn soften_deadline(
     out: Result<QpSolution, QpError>,
 ) -> Result<QpSolution, QpError> {
     match out {
-        // `n_refactor = 0`: the cancelled inner solve's counter died with the
+        // Zero work counts: the cancelled inner solve's counters died with the
         // `Err`, and inventing a number here would be worse than reporting
         // none. `stats.time` still reflects the real budget spent.
-        Err(QpError::DeadlineExpired) => Ok(time_limit_solution(qp, hint, 0)),
+        Err(QpError::DeadlineExpired) => Ok(time_limit_solution(qp, hint, 0, 0)),
         other => other,
     }
 }
@@ -5119,7 +5135,7 @@ impl ParametricActiveSetSolver {
     ) -> Result<QpSolution, QpError> {
         qp.validate()?;
         if crate::deadline::expired() {
-            return Ok(time_limit_solution(qp, ws.map(|w| w.x.as_slice()), 0));
+            return Ok(time_limit_solution(qp, ws.map(|w| w.x.as_slice()), 0, 0));
         }
         if let Some(w) = ws {
             w.working.validate_dims(qp.n, qp.m)?;
@@ -5250,7 +5266,7 @@ impl ParametricActiveSetSolver {
     ) -> Result<QpSolution, QpError> {
         if crate::deadline::expired() {
             return Ok(stamp(
-                time_limit_solution(qp_new, Some(&sol_prev.x), 0),
+                time_limit_solution(qp_new, Some(&sol_prev.x), 0, 0),
                 ParametricSource::Cold,
             ));
         }
@@ -5410,7 +5426,7 @@ impl ParametricActiveSetSolver {
         qp.validate()?;
         working.validate_dims(qp.n, qp.m)?;
         if crate::deadline::expired() {
-            return Ok(time_limit_solution(qp, None, 0));
+            return Ok(time_limit_solution(qp, None, 0, 0));
         }
 
         // Make the hint well-formed for `qp` before anything trusts it.
@@ -5786,10 +5802,17 @@ fn feasible_step_along(
 /// into the box so it is at least a usable starting iterate, with
 /// `QpStatus::TimeLimit`.
 ///
-/// `n_refactor` is the work done before the deadline hit, and `time` comes
-/// from the enclosing deadline scope — a solve that spent the whole budget
-/// must not be recorded as having taken no time.
-fn time_limit_solution(qp: &QpProblem, hint: Option<&[Number]>, n_refactor: u32) -> QpSolution {
+/// `n_refactor` and `n_changes` are the work done before the deadline hit, and
+/// `time` comes from the enclosing deadline scope — a solve that spent the
+/// whole budget must not be recorded as having taken no time, nor as having
+/// taken no iterations. `n_changes` used to be dropped here, so a solve that
+/// ran 60 s of active-set iterations reported zero of them (gh#1031).
+fn time_limit_solution(
+    qp: &QpProblem,
+    hint: Option<&[Number]>,
+    n_refactor: u32,
+    n_changes: u32,
+) -> QpSolution {
     let mut x = hint.map_or_else(|| vec![0.0; qp.n], ToOwned::to_owned);
     x.resize(qp.n, 0.0);
     for (xi, (&l, &u)) in x.iter_mut().zip(qp.xl.iter().zip(qp.xu.iter())) {
@@ -5806,7 +5829,7 @@ fn time_limit_solution(qp: &QpProblem, hint: Option<&[Number]>, n_refactor: u32)
         working: WorkingSet::cold(qp.n, qp.m),
         status: QpStatus::TimeLimit,
         stats: QpStats {
-            n_working_set_changes: 0,
+            n_working_set_changes: n_changes,
             n_refactor,
             n_schur_updates: 0,
             used_phase1: false,

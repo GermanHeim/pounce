@@ -188,6 +188,31 @@ pub(crate) struct FeasibleVertex {
     pub row_at: Vec<AtBound>,
 }
 
+/// What a cold simplex phase-1 found: a feasible vertex, a candidate proof
+/// that there is none, or nothing usable.
+pub(crate) enum SeedOutcome {
+    /// A basic feasible solution — see [`FeasibleVertex`].
+    Vertex(FeasibleVertex),
+    /// Phase-1 reached its own optimum with bound infeasibility left over:
+    /// no entering variable can reduce it. The phase-1 multipliers, read back
+    /// in the convex convention (`y = −π_eq`, `z = −π_ineq`, the same map the
+    /// module header gives for duals), are then a Farkas certificate.
+    ///
+    /// Why: at that optimum every basic `π·m_k` is its phase-1 cost (`±1` on a
+    /// violated bound, `0` otherwise) and every nonbasic `π·m_j = −d_j` has
+    /// the sign its bound allows, so for any `w` inside the bounds,
+    /// `(πᵀM)w ≤ πᵀrhs − (phase-1 infeasibility)`. Every feasible point has
+    /// `Mw = rhs`, so none exists. In `x`-space that is
+    /// `max_box (π[A;G])x < πᵀrhs` with `π_ineq ≤ 0` — exactly what
+    /// `active_set::certifies_primal_infeasible` tests, and the caller must run
+    /// that test: this is a candidate, read off a floating-point basis, not a
+    /// verdict.
+    Infeasible { y: Vec<f64>, z: Vec<f64> },
+    /// A breakdown, the iteration cap, or the deadline. Says nothing about
+    /// feasibility.
+    NoSeed,
+}
+
 /// Find a **feasible vertex** of `prob`'s linear constraints from a cold start,
 /// running this engine's phase-1 only — phase-2 would optimize the *linear*
 /// objective, which is the wrong objective for a QP (any feasible vertex is an
@@ -204,11 +229,13 @@ pub(crate) struct FeasibleVertex {
 /// crossover already prefers it over the active-set bridge for the NETLIB GEN
 /// vertices.
 ///
-/// Returns `None` on any breakdown (factorization failure, iteration cap, or a
-/// phase-1 that cannot reach feasibility). The caller must treat that as "no
-/// seed available" and fall back, **not** as an infeasibility verdict: a
-/// phase-1 that gives up is not a certificate.
-pub(crate) fn simplex_feasible_vertex(prob: &QpProblem) -> Option<FeasibleVertex> {
+/// A breakdown, the iteration cap or the deadline returns
+/// [`SeedOutcome::NoSeed`]. The caller must treat that as "no seed available"
+/// and fall back, **not** as an infeasibility verdict: a phase-1 that gives up
+/// is not a certificate. A phase-1 that *stops* infeasible returns
+/// [`SeedOutcome::Infeasible`], a candidate certificate the caller verifies
+/// before it means anything (gh#1031).
+pub(crate) fn simplex_seed(prob: &QpProblem) -> SeedOutcome {
     let mut s = Simplex::new(prob);
     // `warm_start` only reads `sol.x`, clamping each structural into its box and
     // snapping to a bound, so a zero vector is a valid *cold* seed: every
@@ -234,7 +261,13 @@ pub(crate) fn simplex_feasible_vertex(prob: &QpProblem) -> Option<FeasibleVertex
                     if dbg {
                         eprintln!("[seed] failed at {}", $name);
                     }
-                    return None;
+                    return match s.phase1_stuck_pi.take() {
+                        Some(pi) => SeedOutcome::Infeasible {
+                            y: pi[..s.m_eq].iter().map(|v| -v).collect(),
+                            z: pi[s.m_eq..].iter().map(|v| -v).collect(),
+                        },
+                        None => SeedOutcome::NoSeed,
+                    };
                 }
             }
         };
@@ -252,7 +285,7 @@ pub(crate) fn simplex_feasible_vertex(prob: &QpProblem) -> Option<FeasibleVertex
         if dbg {
             eprintln!("[seed] run_phase1 returned but point is INFEASIBLE");
         }
-        return None;
+        return SeedOutcome::NoSeed;
     }
 
     let at = |v: usize| -> AtBound {
@@ -268,7 +301,7 @@ pub(crate) fn simplex_feasible_vertex(prob: &QpProblem) -> Option<FeasibleVertex
         }
     };
 
-    Some(FeasibleVertex {
+    SeedOutcome::Vertex(FeasibleVertex {
         struct_at: (0..s.n).map(at).collect(),
         row_at: (0..s.m).map(|i| at(s.n + i)).collect(),
         x,
@@ -361,6 +394,11 @@ struct Simplex {
     /// Pivot census and the stage (1 or 2) the pricing loop is in.
     stats: SimplexStats,
     phase: u8,
+    /// The phase-1 multipliers `π` at a phase-1 optimum with infeasibility
+    /// still positive — set only on that exit of [`Self::run_phase1`], so a
+    /// `None` from it can be told apart from a breakdown. See
+    /// [`SeedOutcome::Infeasible`] for what they prove.
+    phase1_stuck_pi: Option<Vec<f64>>,
 }
 
 impl Simplex {
@@ -438,6 +476,7 @@ impl Simplex {
             stall: 0,
             stats: SimplexStats::default(),
             phase: 0,
+            phase1_stuck_pi: None,
         }
     }
 
@@ -836,7 +875,11 @@ impl Simplex {
                     return if self.primal_infeasibility() <= 1e-7 {
                         Some(())
                     } else {
-                        None // primal infeasible — bail to never-regress
+                        // Primal infeasible as far as this basis can tell.
+                        // Keep the multipliers: they are a Farkas candidate
+                        // (gh#1031), which the caller verifies independently.
+                        self.phase1_stuck_pi = Some(pi);
+                        None
                     };
                 }
             };
