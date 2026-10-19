@@ -202,15 +202,26 @@ fn library_presolve_off_preserves_unwrapped_solution_and_callback_shape() {
         "postsolve restores the dropped dual"
     );
     assert!((on_final.g[0] - 2.0).abs() < 1e-5);
+    // M24: the singleton row `x >= 2` became the bound presolve tightened,
+    // and its multiplier is handed back to the row, so the duals match an
+    // unwrapped solve: the row carries it, the model's own `x >= 0` (slack 2)
+    // carries none. Before, the row read 0 and `z_L` held the row's dual.
     assert!(
-        on_final.lambda[0].abs() < 1e-10,
-        "dropped row dual = {}",
-        on_final.lambda[0]
+        off_final.lambda[0].abs() > 1.0,
+        "presolve=no: the active row carries the dual, got {}",
+        off_final.lambda[0]
     );
     assert!(
-        on_final.z_l[0] > 1.0,
-        "tightened lower-bound dual = {}",
-        on_final.z_l[0]
+        (on_final.lambda[0] - off_final.lambda[0]).abs() < 1e-5,
+        "dropped row dual = {}, presolve=no {}",
+        on_final.lambda[0],
+        off_final.lambda[0]
+    );
+    assert!(
+        (on_final.z_l[0] - off_final.z_l[0]).abs() < 1e-5,
+        "lower-bound dual = {}, presolve=no {}",
+        on_final.z_l[0],
+        off_final.z_l[0]
     );
 }
 
@@ -224,7 +235,15 @@ fn library_presolve_warm_started_solve_restores_original_payload() {
     let final_payload = problem.final_payload.expect("finalize_solution");
     assert_eq!(final_payload.g.len(), 2);
     assert_eq!(final_payload.lambda.len(), 2);
-    assert!(final_payload.lambda[0].abs() < 1e-10);
+    // M24: the dropped singleton row gets its dual back (see the test above).
+    let (_, off) = solve(false, true, None, false);
+    let off = off.final_payload.expect("presolve=no finalize_solution");
+    assert!(
+        (final_payload.lambda[0] - off.lambda[0]).abs() < 1e-5,
+        "dropped row dual = {}, presolve=no {}",
+        final_payload.lambda[0],
+        off.lambda[0]
+    );
 }
 
 #[test]
