@@ -1059,8 +1059,18 @@ impl TNLP for LinearEqElimTnlp {
             (s.plan.n_full, s.plan.m_full)
         };
         let mut x_full = vec![0.0; n_in];
-        let mut z_l_full = vec![0.0; n_in];
-        let mut z_u_full = vec![0.0; n_in];
+        // Seeded with the caller's values (NaN = "unseeded", gh#622) on the
+        // kept columns and NaN on the eliminated ones, so an inner TNLP that
+        // supplies no bound multipliers does not read as one supplying zero.
+        let mut z_l_full = vec![Number::NAN; n_in];
+        let mut z_u_full = vec![Number::NAN; n_in];
+        {
+            let s = self.state.as_ref().expect("inited");
+            for (red, &full) in s.plan.vars_kept.iter().enumerate() {
+                z_l_full[full] = sp.z_l[red];
+                z_u_full[full] = sp.z_u[red];
+            }
+        }
         let mut lambda_full = vec![0.0; m_in];
         if !self.inner.borrow_mut().get_starting_point(StartingPoint {
             init_x: sp.init_x,

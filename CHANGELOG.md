@@ -228,6 +228,13 @@ changes.
   the CLI backfilled an SQP solve's `x` / `lambda` for the `.sol` but not its
   bound multipliers, so the file had no `ipopt_zL_out` / `ipopt_zU_out`
   entries. Both now match the NLP arm.
+- **Presolve keeps a warm start's "unseeded" bound-multiplier marker.**
+  `PresolveTnlp` and `LinearEqElimTnlp` copied zero-filled buffers over the
+  NaN `OrigIpoptNlp` passes to mean "not supplied" (gh#622), so with
+  `presolve=yes` a primal-only warm start read as one supplying `z = 0` and
+  was floored at `warm_start_mult_bound_push` instead of taking
+  `bound_mult_init_val`. Masked under the default
+  `warm_start_recentering=residual`, which treats the two alike.
 - **GAMS C link: the active-set-SQP warm start reads maximize marginals with
   the right sign.** The working-set reconstruction classified persisted
   marginals without `obj_sign`, so every active side of a maximize model came

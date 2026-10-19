@@ -1769,8 +1769,12 @@ impl TNLP for PresolveTnlp {
         // and project lambda down. Most users don't warm-start
         // duals, so this hits the no-op path.
         let m_in = self.state.as_ref().expect("inited").info_inner.m as usize;
-        let mut z_l_full = vec![0.0; sp.z_l.len()];
-        let mut z_u_full = vec![0.0; sp.z_u.len()];
+        // Start from the caller's buffers, not zeros: `OrigIpoptNlp` fills
+        // them with NaN to mean "unseeded" (gh#622), and an inner TNLP that
+        // supplies no bound multipliers must leave that marker standing. A
+        // zero fill turned a primal-only warm start into "z = 0 supplied".
+        let mut z_l_full = sp.z_l.to_vec();
+        let mut z_u_full = sp.z_u.to_vec();
         let mut lambda_full = vec![0.0; m_in];
         let ok = self.inner.borrow_mut().get_starting_point(StartingPoint {
             init_x: sp.init_x,
