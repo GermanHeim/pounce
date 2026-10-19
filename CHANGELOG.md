@@ -197,6 +197,27 @@ changes.
   parity test's strict `xfail` on camel deflation is now a pass.
 
 ### Fixed
+- **The intermediate callback fires under per-variable `user-scaling`, and
+  the iterate it reads is unscaled.** Non-unit `x` factors install a
+  `ScalingTnlp` (`x̃ = d ⊙ x`, gh#486), which did not forward
+  `intermediate_callback` / `wants_intermediate_callback`, so the user's
+  callback never fired on either arm (and could not request a stop). It
+  also dropped `get_number_of_nonlinear_variables` /
+  `get_list_of_nonlinear_variables` (a declared L-BFGS subset was ignored)
+  and `presolve_infeasibility_proof`; all five are forwarded now. The SQP
+  arm's user iterate (`with_current_user_iterate`, `GetIpoptCurrentIterate`
+  there) reported `x̃` / `z̃`; it now applies `finalize_solution`'s rule,
+  `x = x̃ ⊘ d`, `z = d ⊙ z̃` (new `scaling_tnlp::unscale_iterate`). The
+  interior-point `GetIpoptCurrentIterate` did the same, and also read its
+  multipliers through `pack_*_for_user`, which leaves `obj_scale_factor` in
+  (so under any objective scaling, user or gradient-based, `z` and `λ` were
+  off by that factor); it now uses the `finalize_solution_*` lifts. Reading
+  the factors from inside the callback panicked across the C boundary
+  (the TNLP is mutably borrowed there), so `OrigIpoptNlp` now snapshots
+  them at construction. At the last fire both arms now read exactly what
+  `IpoptSolve` writes back. Tests:
+  `pounce-algorithm/tests/user_x_scaling_intermediate_callback.rs`,
+  `pounce-cinterface/tests/user_x_scaling_current_iterate.rs`.
 - **The SQP working set is published and taken in user row and variable
   order.** `IpoptApplication::last_sqp_working_set` (and so pounce-py's
   `info["working_set"]` / `get_working_set()` and pounce-rs) reported

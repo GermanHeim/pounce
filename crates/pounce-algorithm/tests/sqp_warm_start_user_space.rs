@@ -260,11 +260,11 @@ fn objective_and_gradient_scaled_seed_is_the_iteration_zero_iterate() {
     );
 }
 
-/// Per-variable (`x`) scaling sits below the NLP in a `ScalingTnlp`, which
-/// does not forward `intermediate_callback`, so this leg reads the seed back
-/// through `finalize_solution` instead: with `sqp_max_iter = 0` the loop
-/// never runs and the reported point is the staged one, mapped in and back
-/// out. (A full warm solve is no evidence here: on this QP one exact-Hessian
+/// Per-variable (`x`) scaling sits below the NLP in a `ScalingTnlp`. This
+/// leg reads the seed back through `finalize_solution` (written when that
+/// wrapper did not yet forward `intermediate_callback`): with
+/// `sqp_max_iter = 0` the loop never runs and the reported point is the
+/// staged one, mapped in and back out. (A full warm solve is no evidence here: on this QP one exact-Hessian
 /// step from a wrong multiplier still lands on the optimum.)
 #[test]
 fn per_variable_scaled_seed_round_trips_through_a_zero_iteration_solve() {

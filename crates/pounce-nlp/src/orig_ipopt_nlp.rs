@@ -263,6 +263,14 @@ pub struct OrigIpoptNlp {
     /// still sat up to `min(bound_relax_factor·max(1,|b|), constr_viol_tol)`
     /// outside the box the user declared.
     honor_original_bounds: Cell<bool>,
+    /// The per-variable factors of the `ScalingTnlp` the adapter wraps
+    /// (`TNLP::scaling_factors`), read once at construction. Served from
+    /// here because [`IpoptNlp::variable_scaling`] is needed *inside* the
+    /// user's intermediate callback (`GetIpoptCurrentIterate` unscales the
+    /// iterate with it), where the TNLP is already mutably borrowed by
+    /// the callback dispatch: asking the TNLP again panicked
+    /// ("RefCell already mutably borrowed") across the C boundary.
+    variable_scaling: Option<Vec<Number>>,
     /// Set by [`Self::scale_user_supplied`] when the TNLP asked for
     /// **non-trivial** per-variable scaling (`use_x_scaling` with at
     /// least one factor `!= 1.0`). pounce models objective and
@@ -463,6 +471,7 @@ impl OrigIpoptNlp {
             let a = adapter.borrow();
             (*a.nlp_info(), a.classification().clone())
         };
+        let variable_scaling = adapter.borrow().tnlp().borrow().scaling_factors();
 
         // ---- Vector spaces ----
         let n_x_var = classification.n_x_var();
@@ -729,6 +738,7 @@ impl OrigIpoptNlp {
             declared_x_l: RefCell::new(None),
             declared_x_u: RefCell::new(None),
             honor_original_bounds: Cell::new(false),
+            variable_scaling,
             x_scaling_rejected: Cell::new(false),
             x_space,
             c_space,
@@ -2839,12 +2849,12 @@ impl IpoptNlp for OrigIpoptNlp {
     }
 
     fn variable_scaling(&self) -> Option<Vec<Number>> {
-        // Forwarded, not stored: the substitution lives in the
-        // `ScalingTnlp` the adapter wraps, and `TNLP::scaling_factors`
-        // is the channel it reports through (gh#486). A transparent
-        // decorator between the two forwards the inner answer, so one
-        // hop off the adapter reaches whichever wrapper applied it.
-        self.adapter.borrow().tnlp().borrow().scaling_factors()
+        // The substitution lives in the `ScalingTnlp` the adapter wraps,
+        // and `TNLP::scaling_factors` is the channel it reports through
+        // (gh#486). A transparent decorator between the two forwards the
+        // inner answer, so one hop off the adapter reaches whichever
+        // wrapper applied it. Read once, at construction — see the field.
+        self.variable_scaling.clone()
     }
 
     fn full_x_to_var_x(&self, full_idx: Index) -> Option<Index> {

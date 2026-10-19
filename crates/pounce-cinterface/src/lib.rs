@@ -859,9 +859,10 @@ pub unsafe extern "C" fn SetIntermediateCallback(
 /// sizes cause the function to return `FALSE` without writing.
 ///
 /// `scaled` is currently ignored — quantities are reported in the
-/// user TNLP's unscaled space (matching upstream Ipopt's default
-/// caller behavior when scaling is unused). Honoring `scaled` for the
-/// `gradient-based` scaler is a follow-up.
+/// user TNLP's unscaled space, the units `IpoptSolve` writes back:
+/// objective, constraint and per-variable (`SetIpoptProblemScaling`
+/// `x_scaling`) scaling all undone, on both the interior-point and the
+/// active-set SQP arm. Honoring `scaled` is a follow-up.
 ///
 /// Returns `FALSE` when called outside an active intermediate
 /// callback (no live iterate to inspect).
@@ -932,25 +933,40 @@ pub unsafe extern "C" fn GetIpoptCurrentIterate(
             };
             let n_us = n as usize;
             let m_us = m as usize;
+            // Per-variable `user-scaling` substitutes `x̃ = d ⊙ x` in a
+            // `ScalingTnlp` below the NLP, so the iterate lifted here is
+            // `x̃` / `z̃`. `finalize_solution` undoes that on the way out;
+            // so must this, or the callback reads coordinates the user's
+            // model never had. The multipliers go through the
+            // `finalize_solution_*` lifts, not `pack_*_for_user`, for the
+            // same reason: only those divide out `obj_scale_factor`, so a
+            // solve with objective scaling (user or gradient-based) read
+            // `z` and `λ` that many times too large here — the same
+            // convention the SQP arm's iterate and `IpoptSolve` use.
+            let d = ctx.nlp.borrow().variable_scaling();
+            let d = d.as_deref();
             if !x.is_null() && n_us > 0 {
-                let full_x = ctx.nlp.borrow().lift_x_to_full(&*curr.x);
+                let mut full_x = ctx.nlp.borrow().lift_x_to_full(&*curr.x);
                 if full_x.len() != n_us {
                     return false;
                 }
+                pounce_nlp::scaling_tnlp::unscale_iterate(d, &mut full_x, &mut [], &mut []);
                 std::ptr::copy_nonoverlapping(full_x.as_ptr(), x, n_us);
             }
             if !z_l.is_null() && n_us > 0 {
-                let full = ctx.nlp.borrow().pack_z_l_for_user(&*curr.z_l);
+                let mut full = ctx.nlp.borrow().finalize_solution_z_l(&*curr.z_l);
                 if full.len() != n_us {
                     return false;
                 }
+                pounce_nlp::scaling_tnlp::unscale_iterate(d, &mut [], &mut full, &mut []);
                 std::ptr::copy_nonoverlapping(full.as_ptr(), z_l, n_us);
             }
             if !z_u.is_null() && n_us > 0 {
-                let full = ctx.nlp.borrow().pack_z_u_for_user(&*curr.z_u);
+                let mut full = ctx.nlp.borrow().finalize_solution_z_u(&*curr.z_u);
                 if full.len() != n_us {
                     return false;
                 }
+                pounce_nlp::scaling_tnlp::unscale_iterate(d, &mut [], &mut [], &mut full);
                 std::ptr::copy_nonoverlapping(full.as_ptr(), z_u, n_us);
             }
             if !g.is_null() && m_us > 0 {
@@ -970,7 +986,7 @@ pub unsafe extern "C" fn GetIpoptCurrentIterate(
                 let full = ctx
                     .nlp
                     .borrow()
-                    .pack_lambda_for_user(&*curr.y_c, &*curr.y_d);
+                    .finalize_solution_lambda(&*curr.y_c, &*curr.y_d);
                 if full.len() != m_us {
                     return false;
                 }
