@@ -703,6 +703,8 @@ pub struct PresolveTnlp {
 
     /// What the derived-bound recovery did at the last `finalize_solution`.
     derived_bound_recovery: Option<dual_recovery::Outcome>,
+    /// The inner evaluations the iteration made, for the live-iterate lift.
+    live_record: live_lift::EvalRecord,
 
     /// The duals the last `get_starting_point` was handed and served, when
     /// it served any: `finalize_solution` returns the handed ones when the
@@ -906,6 +908,7 @@ impl PresolveTnlp {
             duals_rewritten: false,
             derived_bound_recovery: None,
             served_warm_start: None,
+            live_record: live_lift::EvalRecord::default(),
             starting_point_projection_report: WarmProjectionReport::default(),
         }
     }
@@ -954,6 +957,7 @@ impl PresolveTnlp {
             duals_rewritten: false,
             derived_bound_recovery: None,
             served_warm_start: None,
+            live_record: live_lift::EvalRecord::default(),
             starting_point_projection_report: WarmProjectionReport::default(),
         }
     }
@@ -2469,7 +2473,11 @@ impl TNLP for PresolveTnlp {
     }
 
     fn eval_grad_f(&mut self, x: &[Number], new_x: bool, grad_f: &mut [Number]) -> bool {
-        self.inner.borrow_mut().eval_grad_f(x, new_x, grad_f)
+        let ok = self.inner.borrow_mut().eval_grad_f(x, new_x, grad_f);
+        if ok && self.live_record.enabled(&self.inner) {
+            self.live_record.grad_f(x, grad_f);
+        }
+        ok
     }
 
     fn eval_g(&mut self, x: &[Number], new_x: bool, g: &mut [Number]) -> bool {
@@ -2479,6 +2487,9 @@ impl TNLP for PresolveTnlp {
         let s = self.state.as_mut().expect("inited");
         if !self.inner.borrow_mut().eval_g(x, new_x, &mut s.scratch_g) {
             return false;
+        }
+        if self.live_record.enabled(&self.inner) {
+            self.live_record.g(x, &s.scratch_g);
         }
         for (outer, &i_inner) in s.rows_kept.iter().enumerate() {
             g[outer] = s.scratch_g[i_inner];
@@ -2507,6 +2518,11 @@ impl TNLP for PresolveTnlp {
                     },
                 ) {
                     return false;
+                }
+                if let Some(x) = x
+                    && self.live_record.enabled(&self.inner)
+                {
+                    self.live_record.jac(x, &s.scratch_jac);
                 }
                 for (outer_k, &inner_k) in s.jac_kept_idx.iter().enumerate() {
                     values[outer_k] = s.scratch_jac[inner_k];
@@ -2930,6 +2946,7 @@ impl TNLP for PresolveTnlp {
                         rows: &rows,
                         declared_x_l: &[],
                         declared_x_u: &[],
+                        record: self.live_record.clone(),
                     },
                 );
                 (

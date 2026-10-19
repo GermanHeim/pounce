@@ -119,6 +119,11 @@ impl TNLP for Model {
         }
         true
     }
+    // The SQP arm, like the interior-point one, materialises the live
+    // iterate only for a TNLP that reads it.
+    fn wants_current_iterate(&self) -> bool {
+        true
+    }
     fn intermediate_callback(&mut self, _st: IterStats, _d: &IpoptData, _q: &IpoptCq) -> bool {
         self.fires += 1;
         self.last = with_current_user_iterate(|u| Point {

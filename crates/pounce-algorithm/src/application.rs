@@ -3406,15 +3406,20 @@ impl IpoptApplication {
             let hook_tnlp = Rc::clone(&tnlp);
             let fixed_var_duals = self.reports_fixed_var_duals();
             alg.set_iteration_hook(Box::new(move |info| {
-                let snapshot = sqp_user_iterate(
-                    &hook_nlp,
-                    info.x,
-                    info.lambda_g,
-                    info.lambda_x,
-                    info.c_vals,
-                    fixed_var_duals,
-                );
-                let _guard = crate::intermediate::UserIterateGuard::install(snapshot);
+                // Built only for a TNLP that reads it, as on the
+                // interior-point arm: the fixed-variable recovery is not
+                // free, and most callbacks read only the stats.
+                let _guard = hook_tnlp.borrow().wants_current_iterate().then(|| {
+                    crate::intermediate::UserIterateGuard::install(sqp_user_iterate(
+                        &hook_nlp,
+                        info.x,
+                        info.lambda_g,
+                        info.lambda_x,
+                        info.c_vals,
+                        info.grad_lag_x,
+                        fixed_var_duals,
+                    ))
+                });
                 let stats = pounce_nlp::tnlp::IterStats {
                     mode: pounce_nlp::return_codes::AlgorithmMode::RegularMode,
                     iter: info.iter as Index,
@@ -9275,6 +9280,7 @@ fn sqp_user_iterate(
     lambda_g: &[Number],
     lambda_x: &[Number],
     c_vals: &[Number],
+    grad_lag_x: &[Number],
     fixed_var_duals: bool,
 ) -> crate::intermediate::UserIterate {
     use pounce_linalg::dense_vector::DenseVectorSpace;
@@ -9337,6 +9343,7 @@ fn sqp_user_iterate(
         scaling: Some(crate::intermediate::iterate_scaling(&*nlp)),
         x_l_alg,
         x_u_alg,
+        grad_lag_x: crate::intermediate::user_grad_lag(&*nlp, grad_lag_x),
     }
 }
 

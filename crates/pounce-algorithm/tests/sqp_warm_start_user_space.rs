@@ -138,6 +138,9 @@ impl TNLP for Model {
         }
         true
     }
+    fn wants_current_iterate(&self) -> bool {
+        true
+    }
     fn intermediate_callback(&mut self, st: IterStats, _d: &IpoptData, _q: &IpoptCq) -> bool {
         if st.iter == 0 {
             self.iter0 = with_current_user_iterate(|u| Point {

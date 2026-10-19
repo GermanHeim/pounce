@@ -89,6 +89,10 @@ unsafe fn violations(p: IpoptProblem, scaled: Bool) -> Option<Viol> {
 thread_local! {
     static FIRES: RefCell<Vec<It>> = const { RefCell::new(Vec::new()) };
     static K: Cell<Number> = const { Cell::new(1.0) };
+    /// `(eval_grad_f, eval_jac_g values)` calls, and whether the callback
+    /// reads `GetIpoptCurrentViolations`.
+    static EVALS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
+    static READ_VIOLATIONS: Cell<bool> = const { Cell::new(true) };
     /// `bound_relax_factor` for the next solve, when positive.
     static RELAX: Cell<Number> = const { Cell::new(0.0) };
 }
@@ -125,6 +129,7 @@ unsafe extern "C" fn ev_grad_f(
     unsafe {
         let x = std::slice::from_raw_parts(x, N);
         let g = std::slice::from_raw_parts_mut(grad, N);
+        EVALS.with(|e| e.set((e.get().0 + 1, e.get().1)));
         g[0] = 2.0 * k() * (x[0] - 3.0);
         g[1] = 2.0 * k() * (x[1] - 3.0);
         g[2] = 2.0 * k() * (x[2] - 1.0);
@@ -171,6 +176,7 @@ unsafe extern "C" fn ev_jac_g(
             std::slice::from_raw_parts_mut(i_row, NNZ).copy_from_slice(&JAC_ROW);
             std::slice::from_raw_parts_mut(j_col, NNZ).copy_from_slice(&JAC_COL);
         } else {
+            EVALS.with(|e| e.set((e.get().0, e.get().1 + 1)));
             std::slice::from_raw_parts_mut(values, NNZ).copy_from_slice(&JAC_VAL);
         }
         1
@@ -221,8 +227,10 @@ unsafe extern "C" fn on_iter(
     unsafe {
         let mut it = iterate(user_data as IpoptProblem, 0);
         it.scaled = Some(Box::new(iterate(user_data as IpoptProblem, 1)));
-        it.viol = violations(user_data as IpoptProblem, 0);
-        it.viol_scaled = violations(user_data as IpoptProblem, 1);
+        if READ_VIOLATIONS.with(|r| r.get()) {
+            it.viol = violations(user_data as IpoptProblem, 0);
+            it.viol_scaled = violations(user_data as IpoptProblem, 1);
+        }
         FIRES.with(|f| f.borrow_mut().push(it));
         1
     }
@@ -697,4 +705,32 @@ fn ipm_scaled_iterate_is_the_algorithms_space_in_the_tnlps_shape() {
 #[test]
 fn sqp_scaled_iterate_is_the_algorithms_space_in_the_tnlps_shape() {
     check_scaled_iterate("active-set-sqp");
+}
+
+/// `grad_lag_x` comes from the `∇f` and `J` the algorithm evaluated at the
+/// iterate (its own `∇L`), not from calling the user's `eval_grad_f` /
+/// `eval_jac_g` again: a callback reading every violation at every fire
+/// costs exactly the evaluations of one that reads only the iterate. It
+/// used to cost one `eval_grad_f` and one `eval_jac_g` per call (two per
+/// fire here: scaled and unscaled).
+#[test]
+fn reading_violations_costs_no_evaluation() {
+    for algorithm in ["interior-point", "active-set-sqp"] {
+        for cfg in [Cfg::GradientBased, Cfg::UserX] {
+            let run = |read: bool| {
+                READ_VIOLATIONS.with(|r| r.set(read));
+                EVALS.with(|e| e.set((0, 0)));
+                let (out, fires) = solve(algorithm, cfg);
+                READ_VIOLATIONS.with(|r| r.set(true));
+                (EVALS.with(|e| e.get()), out.x, fires.len())
+            };
+            let (quiet, x0, n0) = run(false);
+            let (read, x1, n1) = run(true);
+            assert_eq!((n0, x0), (n1, x1), "{algorithm} {cfg:?}: the solve moved");
+            assert_eq!(
+                quiet, read,
+                "{algorithm} {cfg:?}: (grad_f, jac) evaluations, {n1} fires"
+            );
+        }
+    }
 }

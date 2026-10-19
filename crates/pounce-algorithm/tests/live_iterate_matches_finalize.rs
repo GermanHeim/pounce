@@ -61,6 +61,11 @@ struct Model {
     unscaled: Vec<Point>,
     /// `current_violations(…, scaled)` at every fire: `(FALSE, TRUE)`.
     violations: Vec<(Violations, Violations)>,
+    /// Every fire's `UserIterate::grad_lag_x` (what `GetIpoptCurrentViolations`
+    /// reports, built from the algorithm's own evaluations) against the
+    /// model's `∇f + Jᵀλ − z_L + z_U` recomputed here, at the free columns:
+    /// `(fires that carried one, max |difference| / (1 + |value|))`.
+    grad_lag_check: (usize, Number),
     /// The interior-point algorithm's own iterate at every fire, scattered
     /// to the TNLP's shape by hand (`NaN` at a column / row it does not
     /// hold), with its objective factor.
@@ -207,13 +212,14 @@ impl TNLP for Model {
                 lower_inf: -1e19,
                 upper_inf: 1e19,
             };
-            // The model's own ∇f and J at the iterate (K = 1 here).
+            // The model's own ∇f and J at the iterate.
             let x = &u.x;
+            let k = self.k;
             let gf = [
-                2.0 * (x[0] - 3.0),
-                2.0 * (x[1] - 3.0),
-                2.0 * (x[2] - 1.0),
-                2.0 * (x[3] - 4.0),
+                2.0 * k * (x[0] - 3.0),
+                2.0 * k * (x[1] - 3.0),
+                2.0 * k * (x[2] - 1.0),
+                2.0 * k * (x[3] - 4.0),
             ];
             let gl = lagrangian_gradient(
                 u,
@@ -222,12 +228,22 @@ impl TNLP for Model {
                 &[0, 1, 3, 0, 2, 1, 3],
                 &[1.0, 1.0, 1.0, 1.0, -1.0, 1.0, 1.0],
             );
+            let err = (u.grad_lag_x.len() == 4).then(|| {
+                (0..3)
+                    .map(|j| (u.grad_lag_x[j] - gl[j]).abs() / (1.0 + gl[j].abs()))
+                    .fold(0.0, Number::max)
+            });
             (
                 current_violations(u, &b, Some(gl.clone()), true, false),
                 current_violations(u, &b, Some(gl), true, true),
+                err,
             )
         }) {
-            self.violations.push(v);
+            self.violations.push((v.0, v.1));
+            if let Some(e) = v.2 {
+                self.grad_lag_check.0 += 1;
+                self.grad_lag_check.1 = self.grad_lag_check.1.max(e);
+            }
         }
         if let Some(raw) = with_current(|c| {
             let curr = c.data.borrow().curr.clone()?;
@@ -401,6 +417,18 @@ fn check(algorithm: &str, scaling: Scaling) -> Model {
     assert_close("z_u", &last.z_u, &out.z_u);
     assert_close("g", &last.g, &out.g);
     assert_close("lambda", &last.lambda, &out.lambda);
+    // The Lagrangian gradient the iterate carries — the algorithm's own
+    // `∇L`, unscaled, or presolve's from the iteration's record — is the
+    // model's, at every fire.
+    assert_eq!(
+        m.grad_lag_check.0, m.fires,
+        "{algorithm} {scaling:?}: grad_lag_x missing"
+    );
+    assert!(
+        m.grad_lag_check.1 <= 1e-9,
+        "{algorithm} {scaling:?}: grad_lag_x off by {:e}",
+        m.grad_lag_check.1
+    );
     Model {
         last: Some(last),
         out: Some(out),

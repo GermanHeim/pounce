@@ -260,6 +260,8 @@ pub struct LinearEqElimTnlp {
     /// The full-space duals the last `get_starting_point` was handed and the
     /// reduced ones it served (`warm_echo`).
     served_warm_start: Option<ServedWarmStart>,
+    /// The inner evaluations the iteration made, for the live-iterate lift.
+    live_record: crate::live_lift::EvalRecord,
 }
 
 impl LinearEqElimTnlp {
@@ -271,6 +273,7 @@ impl LinearEqElimTnlp {
             finalized: None,
             starting_point_projection_report: WarmProjectionReport::default(),
             served_warm_start: None,
+            live_record: crate::live_lift::EvalRecord::default(),
         }
     }
 
@@ -1361,6 +1364,9 @@ impl TNLP for LinearEqElimTnlp {
         {
             return false;
         }
+        if self.live_record.enabled(&self.inner) {
+            self.live_record.grad_f(&s.scratch_x, &s.scratch_grad);
+        }
         s.grad_gather.apply(&s.scratch_grad, grad_f);
         true
     }
@@ -1379,6 +1385,9 @@ impl TNLP for LinearEqElimTnlp {
             .eval_g(&s.scratch_x, new_x, &mut s.scratch_g)
         {
             return false;
+        }
+        if self.live_record.enabled(&self.inner) {
+            self.live_record.g(&s.scratch_x, &s.scratch_g);
         }
         for (red, &full) in s.plan.rows_kept.iter().enumerate() {
             g[red] = s.scratch_g[full];
@@ -1418,6 +1427,9 @@ impl TNLP for LinearEqElimTnlp {
                     },
                 ) {
                     return false;
+                }
+                if x.is_some() && self.live_record.enabled(&self.inner) {
+                    self.live_record.jac(&s.scratch_x, &s.scratch_jac);
                 }
                 s.jac_gather.apply(&s.scratch_jac, values);
                 true
@@ -1862,6 +1874,7 @@ impl TNLP for LinearEqElimTnlp {
                         rows: &rows,
                         declared_x_l: &decl_l,
                         declared_x_u: &decl_u,
+                        record: self.live_record.clone(),
                     },
                 );
                 self.finalized = saved;

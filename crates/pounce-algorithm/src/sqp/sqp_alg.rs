@@ -113,6 +113,9 @@ pub struct SqpIterationInfo<'a> {
     pub lambda_x: &'a [Number],
     /// `[c(x); d(x)]` in algorithm space.
     pub c_vals: &'a [Number],
+    /// `∇f + Jᵀλ_g − λ_x` (the stationarity residual `check_kkt` measures)
+    /// in algorithm space, from this iterate's `∇f` and `J`.
+    pub grad_lag_x: &'a [Number],
 }
 
 /// Per-iteration hook. Returning `false` stops the solve.
@@ -405,6 +408,17 @@ impl SqpAlgorithm {
                 let (p_inf, alpha) = prev_step
                     .as_ref()
                     .map_or((0.0, 0.0), |s| (s.p_inf, s.alpha));
+                // `check_kkt`'s stationarity vector, from the same `∇f`, `J`.
+                let mut grad_lag_x = grad_f.clone();
+                for k in 0..jac_c.irow.len() {
+                    let (i, j) = ((jac_c.irow[k] - 1) as usize, (jac_c.jcol[k] - 1) as usize);
+                    if let (Some(g), Some(&l)) = (grad_lag_x.get_mut(j), iter.lambda_g.get(i)) {
+                        *g += jac_c.vals[k] * l;
+                    }
+                }
+                for (g, &lx) in grad_lag_x.iter_mut().zip(iter.lambda_x.iter()) {
+                    *g -= lx;
+                }
                 let keep_going = hook(&SqpIterationInfo {
                     iter: outer,
                     obj: f_curr,
@@ -416,6 +430,7 @@ impl SqpAlgorithm {
                     lambda_g: &iter.lambda_g,
                     lambda_x: &iter.lambda_x,
                     c_vals: &c_vals,
+                    grad_lag_x: &grad_lag_x,
                 });
                 if !keep_going {
                     self.iterates = Some(iter.clone());

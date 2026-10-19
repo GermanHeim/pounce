@@ -51,6 +51,13 @@ pub struct UserIterate {
     /// slack, not the algorithm's.
     pub x_l_alg: Vec<Number>,
     pub x_u_alg: Vec<Number>,
+    /// `∇f + Jᵀλ − z_L + z_U` at this iterate, unscaled, in this iterate's
+    /// shape, from evaluations the algorithm already made (its own
+    /// `∇L` on the interior-point and SQP arms; presolve layers evaluate the
+    /// inner problem from the iteration's record). `0` at a column the
+    /// algorithm does not hold (upstream `ResortX(…, usefixedvals=false)`).
+    /// Empty: not known (`GetIpoptCurrentViolations` then evaluates).
+    pub grad_lag_x: Vec<Number>,
 }
 
 /// Per-entry factors taking a [`UserIterate`] (and the violations measured
@@ -120,6 +127,7 @@ pub fn scaled_iterate(it: &UserIterate) -> UserIterate {
         // The algorithm's bounds are scaled like `x`.
         x_l_alg: it.x_l_alg.iter().zip(&s.x).map(|(v, d)| v * d).collect(),
         x_u_alg: it.x_u_alg.iter().zip(&s.x).map(|(v, d)| v * d).collect(),
+        grad_lag_x: Vec::new(),
     };
     for j in 0..n.min(it.z_l.len()).min(it.z_u.len()) {
         let f = s.obj / s.x[j];

@@ -76,9 +76,9 @@ pub fn ipm_user_iterate(
     let curr = data.borrow().curr.clone()?;
     // `curr_c` / `curr_d` evaluate through the NLP when not cached; no NLP
     // borrow may be alive across them.
-    let (c, d) = {
+    let (c, d, glx) = {
         let cq = cq.borrow();
-        (cq.curr_c(), cq.curr_d())
+        (cq.curr_c(), cq.curr_d(), cq.curr_grad_lag_x())
     };
     let nlp = nlp.borrow();
     let n = nlp.n_full_x() as usize;
@@ -102,6 +102,7 @@ pub fn ipm_user_iterate(
     let g = nlp.pack_g_for_user(&*c, &*d);
     let scaling = Some(iterate_scaling(&*nlp));
     let (x_l_alg, x_u_alg) = algorithm_x_bounds(&*nlp, &x);
+    let grad_lag_x = user_grad_lag(&*nlp, &dense_values(&*glx));
     Some(UserIterate {
         x,
         z_l,
@@ -111,7 +112,33 @@ pub fn ipm_user_iterate(
         scaling,
         x_l_alg,
         x_u_alg,
+        grad_lag_x,
     })
+}
+
+fn dense_values(v: &dyn pounce_linalg::Vector) -> Vec<Number> {
+    v.as_any()
+        .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
+        .map(|d| d.expanded_values())
+        .unwrap_or_default()
+}
+
+/// The algorithm's own `∇L` (var-x, scaled: `obj·∇f + J̃ᵀỹ − z̃_L + z̃_U`,
+/// upstream `curr_grad_lag_x`) as the unscaled `∇f + Jᵀλ − z_L + z_U` of the
+/// TNLP `nlp` wraps — `÷ obj`, the row factors cancelling in `J̃ᵀỹ` — at
+/// full x, `0` at a column the algorithm does not hold (upstream
+/// `ResortX(…, usefixedvals=false)`). Its `∇f` and `J` are the ones the
+/// algorithm evaluated at the iterate, so this costs no evaluation.
+pub fn user_grad_lag(nlp: &dyn IpoptNlp, glx: &[Number]) -> Vec<Number> {
+    let n = nlp.n_full_x() as usize;
+    let obj = nlp.obj_scaling_factor();
+    let inv = if obj == 0.0 { 1.0 } else { 1.0 / obj };
+    (0..n)
+        .map(|j| match nlp.full_x_to_var_x(j as Index) {
+            Some(k) => glx.get(k as usize).map_or(Number::NAN, |g| g * inv),
+            None => 0.0,
+        })
+        .collect()
 }
 
 /// The variable bounds `nlp` iterates against — its live `x_L` / `x_U`,

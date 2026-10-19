@@ -419,6 +419,18 @@ struct FixedVarReach {
     /// entry is there: a row without one cannot change character.
     /// Indexed by the model's own row order, like `DerivativeProofs::jac`.
     g_row_touches_fixed: Vec<bool>,
+    /// The Jacobian entries in fixed-variable columns, `(k, row, col)`
+    /// 0-based into the TNLP's `eval_jac_g` order — upstream's
+    /// `jac_fixed_idx_map_` / `jac_fixed_iRow_` / `jac_fixed_jCol_`, all the
+    /// fixed-variable bound-multiplier recovery reads of `J`.
+    jac_fixed_entries: Vec<(usize, usize, usize)>,
+    /// The TNLP's last `eval_grad_f` / `eval_jac_g` values with the full-x
+    /// they were taken at, recorded only when a variable is fixed: the
+    /// fixed-variable recovery reads the gradient's and the Jacobian's
+    /// fixed columns, which the compressed caches drop, and at the
+    /// iterate the algorithm just evaluated they are these.
+    last_full_grad_f: RefCell<Option<(Vec<Number>, Rc<Vec<Number>>)>>,
+    last_full_jac_g: RefCell<Option<(Vec<Number>, Rc<Vec<Number>>)>>,
     /// Whether a fixed variable is reachable in *second* order — set when
     /// the declared Hessian has an entry whose row or column is fixed, and
     /// (conservatively) whenever the TNLP declines to declare a Hessian at
@@ -619,12 +631,14 @@ impl OrigIpoptNlp {
         // fixed variable" — see `FixedVarReach`. Recording it costs one
         // byte per row and no extra query.
         let mut g_row_touches_fixed = vec![false; info.m as usize];
+        let mut jac_fixed_entries = Vec::new();
         for k in 0..info.nnz_jac_g as usize {
             let g_row_0 = (full_irow[k] - style_offset) as usize;
             let x_col_0 = (full_jcol[k] - style_offset) as usize;
             let var_col = full_to_var[x_col_0];
             if var_col < 0 {
                 g_row_touches_fixed[g_row_0] = true;
+                jac_fixed_entries.push((k, g_row_0, x_col_0));
                 continue;
             }
             // Triplet output is 1-based (matches `GenTMatrix` convention).
@@ -790,6 +804,9 @@ impl OrigIpoptNlp {
             const_deriv: ConstantDerivatives::default(),
             fixed_reach: FixedVarReach {
                 g_row_touches_fixed,
+                jac_fixed_entries,
+                last_full_grad_f: RefCell::new(None),
+                last_full_jac_g: RefCell::new(None),
                 second_order_touches_fixed,
             },
         })
@@ -1657,7 +1674,10 @@ impl OrigIpoptNlp {
         if fixed.is_empty() {
             return;
         }
-        let Some(s) = lagrangian_gradient_full(&tnlp, x, lambda) else {
+        let Some(s) = self
+            .recorded_fixed_lagrangian(x, lambda)
+            .or_else(|| lagrangian_gradient_full(&tnlp, x, lambda))
+        else {
             return;
         };
         for j in fixed {
@@ -1667,6 +1687,43 @@ impl OrigIpoptNlp {
                 *u = (-sj).max(0.0);
             }
         }
+    }
+
+    /// `∇f + Jᵀλ` at the fixed-variable columns (other entries hold `∇f`
+    /// alone), from the TNLP's own last evaluations when they were taken at
+    /// `x` — which, for the iterate the algorithm is on, they were: it
+    /// evaluated `∇f` and `J` there for its convergence test. Upstream's
+    /// recovery calls `eval_grad_f` with `new_x = false` and reuses the
+    /// Jacobian the adapter holds for the iterate (`internal_eval_jac_g(false)`,
+    /// `IpTNLPAdapter.cpp` `ResortBoundMultipliers`) for the same reason. A
+    /// constant derivative is valid at every point. `None` when a record is
+    /// missing or is for another point: the caller evaluates.
+    fn recorded_fixed_lagrangian(&self, x: &[Number], lambda: &[Number]) -> Option<Vec<Number>> {
+        let grad = self
+            .fixed_reach
+            .last_full_grad_f
+            .borrow()
+            .as_ref()
+            .and_then(|(at, g)| {
+                (self.const_deriv.grad_f || at.as_slice() == x).then(|| g.as_ref().clone())
+            })?;
+        let mut s = grad;
+        if !self.fixed_reach.jac_fixed_entries.is_empty() {
+            let jac_constant = self.const_deriv.jac_c && self.const_deriv.jac_d;
+            let rec = self.fixed_reach.last_full_jac_g.borrow();
+            let (at, vals) = rec.as_ref()?;
+            if !(jac_constant || at.as_slice() == x) {
+                return None;
+            }
+            for &(k, row, col) in &self.fixed_reach.jac_fixed_entries {
+                if let (Some(&v), Some(&l), Some(sc)) =
+                    (vals.get(k), lambda.get(row), s.get_mut(col))
+                {
+                    *sc += v * l;
+                }
+            }
+        }
+        Some(s)
     }
 
     /// Mirror of [`Self::finalize_solution_z_l`] for the upper-bound
@@ -1936,6 +1993,10 @@ impl OrigIpoptNlp {
         }
         // Compress full_g → grad in x_var-space, scale by obj_scal.
         let cls = self.adapter.borrow().classification().clone();
+        if ok && !cls.x_fixed_map.is_empty() {
+            *self.fixed_reach.last_full_grad_f.borrow_mut() =
+                Some((full_x.clone(), Rc::new(full_g.clone())));
+        }
         let mut g_compressed = self.x_space.make_new_dense();
         let obj_scal = self.obj_scale_factor.get();
         {
@@ -2014,6 +2075,9 @@ impl OrigIpoptNlp {
             full_vals.fill(f64::NAN);
         }
         let result = Rc::new(full_vals);
+        if ok && !self.fixed_reach.jac_fixed_entries.is_empty() {
+            *self.fixed_reach.last_full_jac_g.borrow_mut() = Some((full_x, Rc::clone(&result)));
+        }
         self.full_jac_g_cache
             .borrow_mut()
             .add_1dep(Rc::clone(&result), x.as_tagged());

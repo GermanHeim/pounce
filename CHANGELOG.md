@@ -204,6 +204,25 @@ changes.
   so a `d` entry of 5 came back as 0 after zero SQP iterations where the
   interior-point arm gives 5. They now arrive through the same projections the
   IPM's warm initializer reads, already in algorithm space.
+- **The live iterate costs no user evaluation.** For a TNLP that reads it,
+  every fire re-evaluated `∇f` and `J` for the fixed-variable bound
+  multipliers, each presolve layer re-ran `eval_g` / `eval_grad_f` /
+  `eval_jac_g` in its lift, and `GetIpoptCurrentViolations` evaluated `∇f`
+  and `J` through the user's callbacks for `grad_lag_x` — all at the point
+  the algorithm had just evaluated. Now: the fixed-variable recovery reads
+  `OrigIpoptNlp`'s record of its last `eval_grad_f` / `eval_jac_g` at that
+  full-x (fixed columns only, upstream's `jac_fixed_idx_map_`; evaluated as
+  before when the record is for another point); presolve layers answer
+  their lift from a record of the inner evaluations the iteration made
+  through them; `grad_lag_x` is the algorithm's own `∇L` unscaled
+  (`UserIterate::grad_lag_x`; presolve recomputes it from the record); the
+  SQP arm builds its iterate only for a TNLP that asks, as the
+  interior-point arm does. Measured (`grad_f/g/jac` evaluations, 8 fires,
+  identical iterations and final `x`): interior-point with a fixed
+  variable `19/9/18 → 10/9/9`, with presolve `28/28/29 → 12/12/13` (also
+  without fixed variables); SQP with a fixed variable `5/3/5 → 2/3/2`, with
+  presolve `5/10/7 → 3/6/5` — each now equal to the same solve with no
+  iterate read (`pounce-algorithm/tests/live_iterate_eval_cost.rs`).
 - **`GetIpoptCurrentIterate` honours `scaled`, on both arms and under
   presolve; with presolve and per-variable scaling the live iterate is no
   longer `x̃`.** `scaled` was ignored (always the unscaled iterate). `TRUE`

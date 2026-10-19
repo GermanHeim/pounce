@@ -1105,6 +1105,10 @@ pub unsafe extern "C" fn GetIpoptCurrentViolations(
         }
         let grad_lag = if grad_lag_x.is_null() || n_us == 0 {
             None
+        } else if it.grad_lag_x.len() == n_us {
+            // The algorithm's own, from the evaluations it made: no
+            // `eval_grad_f` / `eval_jac_g` call for it.
+            Some(it.grad_lag_x.clone())
         } else {
             match bridge.user_grad_lag(&it) {
                 Some(g) => Some(g),
