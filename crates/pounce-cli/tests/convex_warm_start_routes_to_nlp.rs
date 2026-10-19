@@ -71,11 +71,23 @@ S4 1 ipopt_zL_in
 2 0.25
 ";
 
+/// The same model with nothing to start from: no `x` or `d` segment, no
+/// `ipopt_zL_in` suffix.
+fn nl_without_start() -> String {
+    NL.replace("d1\n0 -1.5\n", "")
+        .replace("x3\n0 0.3\n1 0.7\n2 0.4\n", "")
+        .replace("S4 1 ipopt_zL_in\n2 0.25\n", "")
+}
+
 fn run(tag: &str, opts: &[&str]) -> (Output, String) {
+    run_model(tag, NL, opts)
+}
+
+fn run_model(tag: &str, model: &str, opts: &[&str]) -> (Output, String) {
     let dir = std::env::temp_dir().join(format!("pounce_convex_warm_{tag}"));
     std::fs::create_dir_all(&dir).expect("mkdir");
     let nl = dir.join("q.nl");
-    std::fs::write(&nl, NL).expect("write nl");
+    std::fs::write(&nl, model).expect("write nl");
     let sol = dir.join("q.sol");
     let _ = std::fs::remove_file(&sol);
     let out = Command::new(PathBuf::from(env!("CARGO_BIN_EXE_pounce")))
@@ -162,4 +174,21 @@ fn a_forced_convex_engine_says_it_ignores_the_warm_start() {
             "{sel}: {stderr}"
         );
     }
+}
+
+/// `warm_start_init_point=yes` on a model that supplies no start is not a
+/// reason to leave the convex arm: there is nothing for the NLP path to honor
+/// that the convex engines' cold start does not already use. Pyomo users set
+/// the option globally, and `lp_israel` went 29 -> 210 iterations without
+/// this gate.
+#[test]
+fn a_warm_start_with_nothing_to_read_keeps_the_convex_arm() {
+    let model = nl_without_start();
+    assert!(!model.contains("\nd1\n") && !model.contains("\nx3\n") && !model.contains("S4"));
+    let (out, _) = run_model("nostart", &model, &[WARM[0]]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Selected solver: convex QP interior-point"),
+        "nothing supplied, no reroute: {stdout}"
+    );
 }

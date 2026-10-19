@@ -9071,36 +9071,6 @@ fn apply_qp_subproblem_options(options: &OptionsList, opts: &mut pounce_qp::QpOp
     }
 }
 
-/// Map a staged SQP warm start from the caller's space into the algorithm's:
-/// the exact inverse of what [`finalize_via_sqp`] / [`sqp_user_iterate`] do on
-/// the way out, so that the multipliers a solve reports, fed back unchanged,
-/// are the iterate the next solve starts from.
-///
-/// | field | user space (what callers stage) | algorithm space |
-/// |---|---|---|
-/// | `x` | full `n`, model units | fixed columns dropped, `x̃ = d ⊙ x` |
-/// | `lambda_x` | full `n`, `z_L − z_U` | fixed dropped, `· obj_scal ⊘ d` |
-/// | `lambda_g` | `m`, in `g` order | `[y_c; y_d]`, `y = λ · obj_scal / {c,d}_scale` |
-/// | `working.constraints` | `m`, in `g` order | `[c; d]` order |
-///
-/// (`working.bounds` goes from full `n` to the reduced columns in the
-/// caller, which also knows which elimination an already-reduced set came
-/// from.)
-///
-/// `d` is the per-variable factor of a `ScalingTnlp` below the NLP (gh#486;
-/// `z̃ = z ⊘ d`, its `get_starting_point` rule) and `obj_scal` includes the
-/// sign of a maximize. The `λ` rule is `OrigIpoptNlp::initialize_starting_point`'s,
-/// the IPM's inbound half of the same inverse.
-///
-/// Every frontend stages user space — the C API and `pounce-py` pass the
-/// caller's `x` / `mult_g` / `z_L − z_U` through untouched. Before this they
-/// went in as-is: on a model whose equality is not the first row, the two
-/// constraint multipliers landed on each other's rows, and any
-/// `obj_scaling_factor` ≠ 1 left them off by that factor.
-///
-/// An `x` / `lambda_x` already of the reduced length (a problem with fixed
-/// variables) is taken as user-unit values of the surviving columns, in
-/// order; any other length is left alone for the dimension check to reject.
 /// The TNLP's own starting point as an SQP warm start, in algorithm space,
 /// through the projections the IPM's warm initializer reads
 /// (`prepare_warm_start`, `get_starting_x/y/z`). `None` when the NLP
@@ -9159,6 +9129,36 @@ fn sqp_tnlp_warm_start(nlp_rc: &Rc<RefCell<dyn IpoptNlp>>) -> Option<crate::sqp:
     })
 }
 
+/// Map a staged SQP warm start from the caller's space into the algorithm's:
+/// the exact inverse of what [`finalize_via_sqp`] / [`sqp_user_iterate`] do on
+/// the way out, so that the multipliers a solve reports, fed back unchanged,
+/// are the iterate the next solve starts from.
+///
+/// | field | user space (what callers stage) | algorithm space |
+/// |---|---|---|
+/// | `x` | full `n`, model units | fixed columns dropped, `x̃ = d ⊙ x` |
+/// | `lambda_x` | full `n`, `z_L − z_U` | fixed dropped, `· obj_scal ⊘ d` |
+/// | `lambda_g` | `m`, in `g` order | `[y_c; y_d]`, `y = λ · obj_scal / {c,d}_scale` |
+/// | `working.constraints` | `m`, in `g` order | `[c; d]` order |
+///
+/// (`working.bounds` goes from full `n` to the reduced columns in the
+/// caller, which also knows which elimination an already-reduced set came
+/// from.)
+///
+/// `d` is the per-variable factor of a `ScalingTnlp` below the NLP (gh#486;
+/// `z̃ = z ⊘ d`, its `get_starting_point` rule) and `obj_scal` includes the
+/// sign of a maximize. The `λ` rule is `OrigIpoptNlp::initialize_starting_point`'s,
+/// the IPM's inbound half of the same inverse.
+///
+/// Every frontend stages user space — the C API and `pounce-py` pass the
+/// caller's `x` / `mult_g` / `z_L − z_U` through untouched. Before this they
+/// went in as-is: on a model whose equality is not the first row, the two
+/// constraint multipliers landed on each other's rows, and any
+/// `obj_scaling_factor` ≠ 1 left them off by that factor.
+///
+/// An `x` / `lambda_x` already of the reduced length (a problem with fixed
+/// variables) is taken as user-unit values of the surviving columns, in
+/// order; any other length is left alone for the dimension check to reject.
 fn sqp_warm_start_to_algorithm(nlp: &dyn IpoptNlp, w: &mut crate::sqp::SqpIterates) {
     let n_alg = nlp.n() as usize;
     let n_full = nlp.n_full_x() as usize;

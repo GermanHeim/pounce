@@ -3178,11 +3178,23 @@ fn two_sum(a: f64, b: f64) -> (f64, f64) {
 /// off-diagonal mirroring of the stored lower triangle, so the two cannot
 /// disagree about what `P` is.
 fn residual_compensated(prob: &QpProblem, x: &[f64]) -> Vec<f64> {
-    let n = prob.n;
+    let mut start = prob.c.clone();
+    start.resize(prob.n, 0.0);
+    p_mul_add_compensated(prob, x, start)
+        .into_iter()
+        .map(|v| -v)
+        .collect()
+}
+
+/// `start + Px` accumulated as [`residual_compensated`] describes: every
+/// product split exactly by one FMA, every sum by [`two_sum`], the dropped
+/// parts folded back at the end. Shared with the active-set driver's runaway
+/// certificate, which evaluates `uᵀPu` on a direction whose true curvature
+/// sits fifteen orders below what an ordinary sum can resolve (gh#1034).
+pub(crate) fn p_mul_add_compensated(prob: &QpProblem, x: &[f64], start: Vec<f64>) -> Vec<f64> {
     // `hi` carries the running sum, `lo` the accumulated dropped bits.
-    let mut hi = prob.c.clone();
-    hi.resize(n, 0.0);
-    let mut lo = vec![0.0_f64; n];
+    let mut hi = start;
+    let mut lo = vec![0.0_f64; prob.n];
     let accumulate = |i: usize, a: f64, b: f64, hi: &mut [f64], lo: &mut [f64]| {
         let prod = a * b;
         // Exact product error; zero when the product is exact.
@@ -3197,7 +3209,20 @@ fn residual_compensated(prob: &QpProblem, x: &[f64]) -> Vec<f64> {
             accumulate(t.col, t.val, x[t.row], &mut hi, &mut lo);
         }
     }
-    hi.iter().zip(&lo).map(|(h, l)| -(h + l)).collect()
+    hi.iter().zip(&lo).map(|(h, l)| h + l).collect()
+}
+
+/// `aᵀb` with the same two-term accumulator as [`p_mul_add_compensated`].
+pub(crate) fn dot_compensated(a: &[f64], b: &[f64]) -> f64 {
+    let (mut hi, mut lo) = (0.0_f64, 0.0_f64);
+    for (&ai, &bi) in a.iter().zip(b) {
+        let prod = ai * bi;
+        let perr = ai.mul_add(bi, -prod);
+        let (s, serr) = two_sum(hi, prod);
+        hi = s;
+        lo += serr + perr;
+    }
+    hi + lo
 }
 
 /// The `σ` path's genuineness test asked as a **forward error bound** — how far
