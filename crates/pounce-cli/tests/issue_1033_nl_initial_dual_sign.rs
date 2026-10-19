@@ -186,3 +186,40 @@ fn warm_start_round_trips_the_bound_multiplier_suffixes() {
         );
     }
 }
+
+#[test]
+fn the_sqp_arm_takes_the_nl_starting_multipliers_too() {
+    // The active-set SQP arm read only the primal from the TNLP's starting
+    // point: under `warm_start_init_point=yes` a `d` entry of 5 came back as
+    // 0 after zero SQP iterations, where the interior-point arm gives 5. It
+    // now takes the multipliers through the same projections the IPM's warm
+    // initializer reads, so the round trip is the identity on both arms.
+    let sqp = [
+        "solver_selection=nlp",
+        "algorithm=active-set-sqp",
+        "warm_start_init_point=yes",
+        "sqp_max_iter=0",
+    ];
+    for (tag, d, sense, want) in [
+        ("sqp_pos", "5.0", 0, 5.0),
+        ("sqp_neg", "-5.0", 0, -5.0),
+        ("sqp_max_pos", "5.0", 1, 5.0),
+        ("sqp_max_neg", "-5.0", 1, -5.0),
+    ] {
+        let got = sol_dual(tag, d, sense, &sqp);
+        assert!(
+            (got - want).abs() < 1e-12,
+            "{tag}: SQP .sol dual after zero iterations is {got}, expected {want}"
+        );
+    }
+    // A bound multiplier through `ipopt_zL_in`, in each sense's .sol sign.
+    for (tag, sense, zl_in) in [("sqp_z_min", 0, 7.0), ("sqp_z_max", 1, -7.0)] {
+        let sfx = format!("S4 1 ipopt_zL_in\n0 {zl_in}\n");
+        let text = solve_sol(tag, &nl_text_with("0.0", sense, &sfx), &sqp);
+        let zl = sol_suffix_x0(&text, "ipopt_zL_out");
+        assert!(
+            (zl - zl_in).abs() < 1e-12,
+            "{tag}: SQP ipopt_zL_out {zl}, expected {zl_in}"
+        );
+    }
+}

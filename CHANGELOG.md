@@ -197,6 +197,13 @@ changes.
   parity test's strict `xfail` on camel deflation is now a pass.
 
 ### Fixed
+- **The active-set SQP arm takes the model's starting multipliers under
+  `warm_start_init_point=yes`.** Only a warm start staged through
+  `set_sqp_warm_start` reached it; the TNLP's own starting duals (a `.nl` `d`
+  segment, `ipopt_zL_in` / `ipopt_zU_in`, a `lagrange=` start) were dropped,
+  so a `d` entry of 5 came back as 0 after zero SQP iterations where the
+  interior-point arm gives 5. They now arrive through the same projections the
+  IPM's warm initializer reads, already in algorithm space.
 - **Presolve reported multipliers on bounds the model does not have when a
   bound it derived from rows was active (M24).** Phase 1 / FBBT derive
   variable bounds from multi-variable rows (`x0 = 2·x1, x0 ≥ 4` ⇒ `x1 ≥ 2`),

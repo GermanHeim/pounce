@@ -3351,6 +3351,21 @@ impl IpoptApplication {
                 }
             }
         }
+        // `warm_start_init_point=yes` with nothing staged: take the TNLP's
+        // own starting multipliers, as the interior-point arm does. They
+        // arrive through the same `IpoptNlp` projections the IPM's warm
+        // initializer uses, so they are already in algorithm space (scaled,
+        // compressed, `[y_c; y_d]`). Without this the SQP arm read only the
+        // primal: a `.nl` `d` segment or `ipopt_z*_in` suffix, or a Python
+        // `lagrange=` start, began from zero multipliers on this arm alone.
+        if warm.is_none()
+            && matches!(
+                self.options.get_bool_value("warm_start_init_point", ""),
+                Ok((true, _))
+            )
+        {
+            warm = sqp_tnlp_warm_start(&nlp_rc);
+        }
         // gh#986: a warm start recorded on one problem is dimensioned for
         // that problem. A child that fixes a variable (branching) reaches
         // here with a smaller reduced `n` (and possibly `m`), where the
@@ -9081,6 +9096,57 @@ fn apply_qp_subproblem_options(options: &OptionsList, opts: &mut pounce_qp::QpOp
 /// An `x` / `lambda_x` already of the reduced length (a problem with fixed
 /// variables) is taken as user-unit values of the surviving columns, in
 /// order; any other length is left alone for the dimension check to reject.
+/// The TNLP's own starting point as an SQP warm start, in algorithm space,
+/// through the projections the IPM's warm initializer reads
+/// (`prepare_warm_start`, `get_starting_x/y/z`). `None` when the NLP
+/// declines. An unseeded bound multiplier (NaN, gh#622) counts as zero: the
+/// SQP has no `bound_mult_init_val` of its own to resolve it to.
+fn sqp_tnlp_warm_start(nlp_rc: &Rc<RefCell<dyn IpoptNlp>>) -> Option<crate::sqp::SqpIterates> {
+    use pounce_linalg::dense_vector::DenseVectorSpace;
+    let dense = |v: &dyn pounce_linalg::Vector| -> Vec<Number> {
+        v.as_any()
+            .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
+            .map(|d| d.expanded_values().to_vec())
+            .unwrap_or_default()
+    };
+    let (z_l, z_u, x, lambda_g) = {
+        let mut nlp = nlp_rc.borrow_mut();
+        if !nlp.prepare_warm_start() {
+            return None;
+        }
+        let (n, m_eq, m_ineq) = (nlp.n(), nlp.m_eq(), nlp.m_ineq());
+        let (n_xl, n_xu) = (nlp.x_l().dim(), nlp.x_u().dim());
+        let (n_dl, n_du) = (nlp.d_l().dim(), nlp.d_u().dim());
+        let mut x = DenseVectorSpace::new(n).make_new_dense();
+        let mut y_c = DenseVectorSpace::new(m_eq).make_new_dense();
+        let mut y_d = DenseVectorSpace::new(m_ineq).make_new_dense();
+        let mut z_l = DenseVectorSpace::new(n_xl).make_new_dense();
+        let mut z_u = DenseVectorSpace::new(n_xu).make_new_dense();
+        let mut v_l = DenseVectorSpace::new(n_dl).make_new_dense();
+        let mut v_u = DenseVectorSpace::new(n_du).make_new_dense();
+        let ok = nlp.get_starting_x(&mut x)
+            && nlp.get_starting_y(&mut y_c, &mut y_d)
+            && nlp.get_starting_z(&mut z_l, &mut z_u, &mut v_l, &mut v_u);
+        nlp.finish_warm_start();
+        if !ok {
+            return None;
+        }
+        let finite = |v: Vec<Number>| -> Vec<Number> {
+            v.into_iter().map(|a| if a.is_finite() { a } else { 0.0 }).collect()
+        };
+        let mut lambda_g = finite(dense(&y_c));
+        lambda_g.extend(finite(dense(&y_d)));
+        (finite(dense(&z_l)), finite(dense(&z_u)), dense(&x), lambda_g)
+    };
+    let lambda_x = crate::sqp::ipopt_adapter::pack_bound_multipliers(nlp_rc, &z_l, &z_u);
+    Some(crate::sqp::SqpIterates {
+        x,
+        lambda_g,
+        lambda_x,
+        working: None,
+    })
+}
+
 fn sqp_warm_start_to_algorithm(nlp: &dyn IpoptNlp, w: &mut crate::sqp::SqpIterates) {
     let n_alg = nlp.n() as usize;
     let n_full = nlp.n_full_x() as usize;
