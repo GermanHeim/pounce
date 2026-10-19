@@ -702,6 +702,8 @@ pub unsafe extern "C" fn IpoptSolve(
                     });
             }
 
+            let (lower_inf, upper_inf, zero_fixed_grad_lag) =
+                bridge_violation_options(info.app.options());
             let bridge = Rc::new(RefCell::new(CCallbackTnlp {
                 n: info.n,
                 m: info.m,
@@ -725,6 +727,9 @@ pub unsafe extern "C" fn IpoptSolve(
                 intermediate_cb: info.intermediate_cb,
                 user_scaling: info.user_scaling.clone(),
                 nonlinear_vars: info.nonlinear_vars.clone(),
+                lower_inf,
+                upper_inf,
+                zero_fixed_grad_lag,
                 final_status: None,
                 final_x: vec![0.0; n_us],
                 final_z_l: vec![0.0; n_us],
@@ -1011,11 +1016,25 @@ pub unsafe extern "C" fn GetIpoptCurrentIterate(
 /// Same contract as [`GetIpoptCurrentIterate`]; returns `FALSE` when
 /// called outside an active intermediate callback.
 ///
-/// `scaled` is currently ignored — see [`GetIpoptCurrentIterate`].
-/// Violations and complementarities are reported in the compressed
-/// algorithm-side space scattered out to full-`n`/`m`; this is the
-/// shape upstream callers consume (zero-fill for free positions /
-/// no-bound positions).
+/// `scaled` keeps upstream's meaning (`TNLP::get_curr_violations`):
+///
+/// * `FALSE` — the user's problem, unscaled: objective, constraint and
+///   per-variable scaling undone, full `n` with fixed variables, rows in
+///   `g` order. Computed from the live iterate [`GetIpoptCurrentIterate`]
+///   reads (so with presolve on, the user's own rows and columns) against
+///   the declared bounds: `x_L_violation = max(0, x_L − x)`,
+///   `compl_x_L = (x − x_L)·z_L`, `grad_lag_x = ∇f + Jᵀλ − z_L + z_U`
+///   (`0` at fixed variables, as upstream's `ResortX` leaves them; `∇f` and
+///   `J` come from this problem's `eval_grad_f` / `eval_jac_g`, called only
+///   when `grad_lag_x` is requested), per-row violation `|g − g_L|` /
+///   `max(0, g_L − g, g − g_U)` and `compl_g` with upstream's signs. The one
+///   deliberate difference: upstream's `compl_x_*` multiply the algorithm's
+///   slack, measured to the bound `bound_relax_factor` widened, so the two
+///   differ by at most `bound_relax_factor·max(1,|x_L|)·z_L`. Both arms.
+/// * `TRUE` — the algorithm's own scaled quantities (interior-point arm
+///   only; `FALSE` on the SQP arm, which has no such space to report, and
+///   when the algorithm solves a presolve-reduced problem, whose rows and
+///   columns are not the user's).
 ///
 /// # Safety
 ///
@@ -1025,7 +1044,7 @@ pub unsafe extern "C" fn GetIpoptCurrentIterate(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GetIpoptCurrentViolations(
     ipopt_problem: IpoptProblem,
-    _scaled: Bool,
+    scaled: Bool,
     n: Index,
     x_l_violation: *mut Number,
     x_u_violation: *mut Number,
@@ -1044,102 +1063,82 @@ pub unsafe extern "C" fn GetIpoptCurrentViolations(
         if n != info.n || m != info.m {
             return FALSE;
         }
-        let result = ip_intermediate::with_current(|ctx| {
-            let data = ctx.data.borrow();
-            let Some(_curr) = data.curr.as_ref() else {
-                return false;
+        let n_us = n as usize;
+        let m_us = m as usize;
+        let violations = if scaled != FALSE {
+            ip_intermediate::with_current(|ctx| {
+                let fits = {
+                    let nlp = ctx.nlp.borrow();
+                    nlp.n_full_x() == n && nlp.n_full_g() == m
+                };
+                if fits {
+                    ip_intermediate::ipm_scaled_violations(ctx)
+                } else {
+                    None
+                }
+            })
+            .flatten()
+        } else {
+            let Some(it) = ip_intermediate::with_current_user_iterate(|it| it.clone()) else {
+                return FALSE;
             };
-            drop(data);
-            let cq = ctx.cq.borrow();
-            let n_us = n as usize;
-            let m_us = m as usize;
-            // No `nlp` borrow may be held across a `cq` accessor that
-            // evaluates through the NLP (`curr_grad_lag_x` reaches
-            // `curr_grad_f`, which takes `nlp.borrow_mut()`); each branch
-            // below therefore borrows `nlp` only to pack a value that has
-            // already been computed. See `GetIpoptCurrentIterate`.
-            // x_L / x_U violations: scatter the compressed slack-shortfalls
-            // up to full-`n`. Upstream defines `x_L_violation_i = max(0, x_L_i
-            // - x_i)`; the algorithm tracks `slack_x_l = P_L^T x - x_L`
-            // (always non-negative at feasible iterates), so reverse the
-            // sign and clamp.
-            if !x_l_violation.is_null() && n_us > 0 {
-                let slack = cq.curr_slack_x_l();
-                let z_l_full = ctx.nlp.borrow().pack_z_l_for_user(&*slack);
-                // Guard the scatter length exactly like the sibling branches
-                // below: an unexpected packed length would otherwise index
-                // `v[i]` out of bounds and panic across this `extern "C"`
-                // boundary (an abort, not a recoverable error).
-                if z_l_full.len() != n_us {
-                    return false;
-                }
-                // pack_z_l_for_user scatters by the same x_L mapping; the
-                // returned vector at full-x positions holds `slack_x_l[i]`
-                // which is `x_i - x_L_i`. Clamp the *negative* part to get
-                // the violation `max(0, x_L_i - x_i)`.
-                let mut v = vec![0.0; n_us];
-                for (i, s) in z_l_full.iter().enumerate() {
-                    v[i] = (-s).max(0.0);
-                }
-                std::ptr::copy_nonoverlapping(v.as_ptr(), x_l_violation, n_us);
+            let bridge = CURRENT_BRIDGE.with(|c| c.get());
+            if bridge.is_null() {
+                return FALSE;
             }
-            if !x_u_violation.is_null() && n_us > 0 {
-                let slack = cq.curr_slack_x_u();
-                let s_full = ctx.nlp.borrow().pack_z_u_for_user(&*slack);
-                if s_full.len() != n_us {
-                    return false;
+            let bridge = &*bridge;
+            if it.x.len() != n_us
+                || it.z_l.len() != n_us
+                || it.z_u.len() != n_us
+                || it.g.len() != m_us
+                || it.lambda.len() != m_us
+            {
+                return FALSE;
+            }
+            let grad_lag = if grad_lag_x.is_null() || n_us == 0 {
+                None
+            } else {
+                match bridge.user_grad_lag(&it) {
+                    Some(g) => Some(g),
+                    None => return FALSE,
                 }
-                let mut v = vec![0.0; n_us];
-                for (i, s) in s_full.iter().enumerate() {
-                    v[i] = (-s).max(0.0);
-                }
-                std::ptr::copy_nonoverlapping(v.as_ptr(), x_u_violation, n_us);
+            };
+            let bounds = pounce_nlp::live_iterate::DeclaredBounds {
+                x_l: &bridge.x_l,
+                x_u: &bridge.x_u,
+                g_l: &bridge.g_l,
+                g_u: &bridge.g_u,
+                lower_inf: bridge.lower_inf,
+                upper_inf: bridge.upper_inf,
+            };
+            Some(pounce_nlp::live_iterate::user_violations(
+                &it,
+                &bounds,
+                grad_lag,
+                bridge.zero_fixed_grad_lag,
+            ))
+        };
+        let Some(v) = violations else {
+            return FALSE;
+        };
+        let copy = |src: &[Number], dst: *mut Number, len: usize| -> bool {
+            if dst.is_null() || len == 0 {
+                return true;
             }
-            if !compl_x_l.is_null() && n_us > 0 {
-                let compl = cq.curr_compl_x_l();
-                let v = ctx.nlp.borrow().pack_z_l_for_user(&*compl);
-                if v.len() != n_us {
-                    return false;
-                }
-                std::ptr::copy_nonoverlapping(v.as_ptr(), compl_x_l, n_us);
+            if src.len() != len {
+                return false;
             }
-            if !compl_x_u.is_null() && n_us > 0 {
-                let compl = cq.curr_compl_x_u();
-                let v = ctx.nlp.borrow().pack_z_u_for_user(&*compl);
-                if v.len() != n_us {
-                    return false;
-                }
-                std::ptr::copy_nonoverlapping(v.as_ptr(), compl_x_u, n_us);
-            }
-            if !grad_lag_x.is_null() && n_us > 0 {
-                let glx = cq.curr_grad_lag_x();
-                // Scatter compressed x-var → full-x via lift_x_to_full
-                // (treats `glx` as if it were an x-vector). Fixed-variable
-                // slots remain zero.
-                let full = ctx.nlp.borrow().lift_x_to_full(&*glx);
-                if full.len() != n_us {
-                    return false;
-                }
-                std::ptr::copy_nonoverlapping(full.as_ptr(), grad_lag_x, n_us);
-            }
-            if !nlp_constraint_violation.is_null() && m_us > 0 {
-                // Per-row equality and range violation reconstruction in
-                // full-g coordinates is a follow-up. The scalar
-                // `curr_primal_infeasibility_max` (== `inf_pr` reported in
-                // `IterStats`) is the outer summary; populate per-row
-                // detail as a future refinement and zero-fill for now.
-                let zero = vec![0.0; m_us];
-                std::ptr::copy_nonoverlapping(zero.as_ptr(), nlp_constraint_violation, m_us);
-            }
-            if !compl_g.is_null() && m_us > 0 {
-                // Per-row constraint complementarity (`v_L .* s_L` /
-                // `v_U .* s_U` mapped back to full-g) is also a follow-up.
-                let zero = vec![0.0; m_us];
-                std::ptr::copy_nonoverlapping(zero.as_ptr(), compl_g, m_us);
-            }
+            std::ptr::copy_nonoverlapping(src.as_ptr(), dst, len);
             true
-        });
-        if result.unwrap_or(false) { TRUE } else { FALSE }
+        };
+        let ok = copy(&v.x_l_violation, x_l_violation, n_us)
+            && copy(&v.x_u_violation, x_u_violation, n_us)
+            && copy(&v.compl_x_l, compl_x_l, n_us)
+            && copy(&v.compl_x_u, compl_x_u, n_us)
+            && copy(&v.grad_lag_x, grad_lag_x, n_us)
+            && copy(&v.constraint_violation, nlp_constraint_violation, m_us)
+            && copy(&v.compl_g, compl_g, m_us);
+        if ok { TRUE } else { FALSE }
     }
 }
 
@@ -1930,6 +1929,117 @@ pub unsafe extern "C" fn IpoptSolveWarmStart(
     })
 }
 
+thread_local! {
+    /// The bridge whose `intermediate_callback` is running, for
+    /// [`GetIpoptCurrentViolations`]; null outside that window.
+    static CURRENT_BRIDGE: std::cell::Cell<*const CCallbackTnlp> =
+        const { std::cell::Cell::new(std::ptr::null()) };
+}
+
+/// `(nlp_lower_bound_inf, nlp_upper_bound_inf, zero_fixed_grad_lag)` for
+/// the bridge fields of the same names.
+pub(crate) fn bridge_violation_options(
+    o: &pounce_common::options_list::OptionsList,
+) -> (Number, Number, bool) {
+    let num = |k: &str, d: Number| {
+        o.get_numeric_value(k, "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(d)
+    };
+    let relax = matches!(
+        o.get_string_value("fixed_variable_treatment", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .as_deref(),
+        Some("relax_bounds")
+    );
+    (
+        num("nlp_lower_bound_inf", NLP_LOWER_BOUND_INF),
+        num("nlp_upper_bound_inf", NLP_UPPER_BOUND_INF),
+        !relax,
+    )
+}
+
+struct BridgeGuard {
+    prev: *const CCallbackTnlp,
+}
+
+impl BridgeGuard {
+    fn install(bridge: &CCallbackTnlp) -> Self {
+        let prev = CURRENT_BRIDGE.with(|c| c.replace(bridge as *const _));
+        Self { prev }
+    }
+}
+
+impl Drop for BridgeGuard {
+    fn drop(&mut self) {
+        CURRENT_BRIDGE.with(|c| c.set(self.prev));
+    }
+}
+
+impl CCallbackTnlp {
+    /// `∇f + Jᵀλ − z_L + z_U` at the user-space iterate `it`, through the
+    /// user's own C callbacks (called directly, not through the TNLP the
+    /// callback dispatch holds). `None` if a callback declines.
+    fn user_grad_lag(&self, it: &ip_intermediate::UserIterate) -> Option<Vec<Number>> {
+        let n = self.n as usize;
+        let cb = self.eval_grad_f?;
+        let mut grad = vec![0.0; n];
+        let x = it.x.as_ptr() as *mut Number;
+        if unsafe { cb(self.n, x, TRUE, grad.as_mut_ptr(), self.user_data) } == FALSE {
+            return None;
+        }
+        let nnz = self.nele_jac.max(0) as usize;
+        let (mut rows, mut cols, mut vals) = (vec![0; nnz], vec![0; nnz], vec![0.0; nnz]);
+        if self.m > 0 && nnz > 0 {
+            let jac = self.eval_jac_g?;
+            let structure = unsafe {
+                jac(
+                    self.n,
+                    x,
+                    FALSE,
+                    self.m,
+                    self.nele_jac,
+                    rows.as_mut_ptr(),
+                    cols.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                    self.user_data,
+                )
+            };
+            let values = unsafe {
+                jac(
+                    self.n,
+                    x,
+                    FALSE,
+                    self.m,
+                    self.nele_jac,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    vals.as_mut_ptr(),
+                    self.user_data,
+                )
+            };
+            if structure == FALSE || values == FALSE {
+                return None;
+            }
+        }
+        let off = if self.index_style == 1 { 1 } else { 0 };
+        let to_usize = |v: &[Index]| -> Vec<usize> {
+            v.iter()
+                .map(|&k| usize::try_from(k - off).unwrap_or(usize::MAX))
+                .collect()
+        };
+        Some(pounce_nlp::live_iterate::lagrangian_gradient(
+            it,
+            &grad,
+            &to_usize(&rows),
+            &to_usize(&cols),
+            &vals,
+        ))
+    }
+}
+
 /// Adapter that bridges the user-supplied C callback table to the
 /// in-crate [`TNLP`] trait. Mirrors `Interfaces/IpStdInterfaceTNLP.cpp`
 /// (`StdInterfaceTNLP`); each TNLP method forwards to the matching
@@ -1982,6 +2092,15 @@ pub(crate) struct CCallbackTnlp {
     /// Snapshot of the nonlinear-variable subset (gh#624), in the
     /// problem's index style.
     pub(crate) nonlinear_vars: Option<Vec<Index>>,
+    /// `nlp_lower_bound_inf` / `nlp_upper_bound_inf` of the solve, for the
+    /// violations `GetIpoptCurrentViolations` measures against `x_l` …
+    /// `g_u` (a side at or beyond these is absent).
+    pub(crate) lower_inf: Number,
+    pub(crate) upper_inf: Number,
+    /// Whether `grad_lag_x` reads `0` at fixed variables: true unless
+    /// `fixed_variable_treatment=relax_bounds`, which keeps them in the
+    /// problem (upstream: `ResortX(…, usefixedvals=false)`).
+    pub(crate) zero_fixed_grad_lag: bool,
     pub(crate) final_status: Option<pounce_nlp::alg_types::SolverReturn>,
     pub(crate) final_x: Vec<Number>,
     pub(crate) final_z_l: Vec<Number>,
@@ -2276,6 +2395,11 @@ impl TNLP for CCallbackTnlp {
         let Some(cb) = self.intermediate_cb else {
             return true;
         };
+        // `GetIpoptCurrentViolations` evaluates `∇f` and `J` through this
+        // bridge's C callbacks (the TNLP itself is mutably borrowed by the
+        // dispatch that called us), so it needs the callbacks, `user_data`
+        // and the declared bounds for exactly the duration of `cb`.
+        let _bridge = BridgeGuard::install(self);
         let ok = unsafe {
             cb(
                 stats.mode as Index,

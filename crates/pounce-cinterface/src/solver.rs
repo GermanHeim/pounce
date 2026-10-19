@@ -182,6 +182,8 @@ pub unsafe extern "C" fn IpoptSolverSolve(
                 Vec::new()
             };
 
+            let (lower_inf, upper_inf, zero_fixed_grad_lag) =
+                crate::bridge_violation_options(info.problem.app.options());
             let bridge = Rc::new(RefCell::new(CCallbackTnlp {
                 n,
                 m,
@@ -205,6 +207,9 @@ pub unsafe extern "C" fn IpoptSolverSolve(
                 intermediate_cb: info.problem.intermediate_cb,
                 user_scaling: info.problem.user_scaling.clone(),
                 nonlinear_vars: info.problem.nonlinear_vars.clone(),
+                lower_inf,
+                upper_inf,
+                zero_fixed_grad_lag,
                 final_status: None,
                 final_x: vec![0.0; n_us],
                 final_z_l: vec![0.0; n_us],

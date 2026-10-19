@@ -215,6 +215,23 @@ changes.
   on its bounds. A singleton row coincident with a declared bound keeps its
   multiplier on the bound (row dual 0) — a degenerate pair, now pinned.
   `presolve` is off by default; `presolve=no` output is unchanged.
+- **`GetIpoptCurrentViolations` reports the user's problem, and honours
+  `scaled`.** It scattered the algorithm's scaled internals — complementarity
+  carrying the objective factor, `grad_lag_x` in `x̃`-space with fixed
+  variables' *values* in their slots — and zero-filled
+  `nlp_constraint_violation` and `compl_g`; on the SQP arm it refused.
+  `scaled = FALSE` (what CasADi asks for) now follows upstream's
+  `get_curr_violations`: computed from the live user-space iterate against
+  the declared bounds, `grad_lag_x = ∇f + Jᵀλ − z_L + z_U` through the
+  problem's own `eval_grad_f` / `eval_jac_g` (`0` at fixed variables, as
+  upstream's `ResortX` leaves them), per-row violation and `compl_g` with
+  upstream's signs, on both arms. `scaled = TRUE` returns the algorithm's own
+  space (interior-point arm only). Before: `compl_x_L[1]` at the first fire
+  read `10.0` against the original problem's `200` under gradient-based
+  scaling (×20) and `5.0` against `1.67` under user scaling (×3). After:
+  equal to 1e-9 at every fire, both arms. `compl_x_*` use the slack to the
+  declared bound, not to the `bound_relax_factor`-widened one upstream's
+  internal slack measures (≤ `bound_relax_factor·max(1,|x_L|)·z_L` apart).
 - **With presolve on, the live iterate is lifted to the user's problem.**
   The algorithm solves the reduced problem and installed that problem's
   iterate, which reached the user's intermediate callback

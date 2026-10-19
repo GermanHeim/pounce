@@ -29,6 +29,41 @@ struct It {
     z_u: [Number; N],
     g: [Number; M],
     lambda: [Number; M],
+    /// `GetIpoptCurrentViolations(scaled = FALSE)` at the same fire.
+    viol: Option<Viol>,
+    /// `GetIpoptCurrentViolations(scaled = TRUE)` at the same fire.
+    viol_scaled: Option<Viol>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Viol {
+    x_l: [Number; N],
+    x_u: [Number; N],
+    compl_x_l: [Number; N],
+    compl_x_u: [Number; N],
+    grad_lag_x: [Number; N],
+    g: [Number; M],
+    compl_g: [Number; M],
+}
+
+unsafe fn violations(p: IpoptProblem, scaled: Bool) -> Option<Viol> {
+    let mut v = Viol::default();
+    let ok = unsafe {
+        GetIpoptCurrentViolations(
+            p,
+            scaled,
+            N as Index,
+            v.x_l.as_mut_ptr(),
+            v.x_u.as_mut_ptr(),
+            v.compl_x_l.as_mut_ptr(),
+            v.compl_x_u.as_mut_ptr(),
+            v.grad_lag_x.as_mut_ptr(),
+            M as Index,
+            v.g.as_mut_ptr(),
+            v.compl_g.as_mut_ptr(),
+        )
+    };
+    (ok != 0).then_some(v)
 }
 
 thread_local! {
@@ -174,6 +209,8 @@ unsafe extern "C" fn on_iter(
             it.g.as_mut_ptr(),
             it.lambda.as_mut_ptr(),
         ) != 0;
+        it.viol = violations(user_data as IpoptProblem, 0);
+        it.viol_scaled = violations(user_data as IpoptProblem, 1);
         FIRES.with(|f| f.borrow_mut().push(it));
         1
     }
@@ -312,4 +349,196 @@ fn sqp_iterate_is_the_solution_under_gradient_scaling_and_a_fixed_variable() {
 #[test]
 fn sqp_iterate_is_the_solution_under_user_x_scaling_and_a_fixed_variable() {
     check("active-set-sqp", Cfg::UserX);
+}
+
+// ---------------------------------------------------------------------
+// GetIpoptCurrentViolations
+// ---------------------------------------------------------------------
+
+const X_L: [Number; N] = [-2e19, -10.0, 0.0, 1.0];
+const X_U: [Number; N] = [2e19, 1.0, 2e19, 1.0];
+const G_L: [Number; M] = [-2e19, 0.0, -2e19];
+const G_U: [Number; M] = [3.5, 0.0, 10.0];
+
+/// Upstream `get_curr_violations(scaled = false)` recomputed by hand on the
+/// original problem from `(x, z_L, z_U, g, λ)` — none of it read from the
+/// solver: the model's own gradient and Jacobian, its declared bounds.
+fn recompute(x: &[Number; N], z_l: &[Number; N], z_u: &[Number; N], lambda: &[Number; M]) -> Viol {
+    let kk = k();
+    let c = [3.0, 3.0, 1.0, 4.0];
+    let g = [x[0] + x[1] + x[3], x[0] - x[2], x[1] + x[3]];
+    let mut v = Viol::default();
+    for j in 0..N {
+        let mut gl = 2.0 * kk * (x[j] - c[j]) - z_l[j] + z_u[j];
+        for k in 0..NNZ {
+            if JAC_COL[k] as usize == j {
+                gl += JAC_VAL[k] * lambda[JAC_ROW[k] as usize];
+            }
+        }
+        // Fixed under make_parameter: upstream reports 0 there.
+        v.grad_lag_x[j] = if X_L[j] == X_U[j] { 0.0 } else { gl };
+        if X_L[j] > -1e19 {
+            v.x_l[j] = (X_L[j] - x[j]).max(0.0);
+            v.compl_x_l[j] = (x[j] - X_L[j]) * z_l[j];
+        }
+        if X_U[j] < 1e19 {
+            v.x_u[j] = (x[j] - X_U[j]).max(0.0);
+            v.compl_x_u[j] = (X_U[j] - x[j]) * z_u[j];
+        }
+    }
+    for i in 0..M {
+        if G_L[i] == G_U[i] {
+            v.g[i] = (g[i] - G_L[i]).abs();
+            v.compl_g[i] = -(g[i] - G_L[i]) * lambda[i];
+            continue;
+        }
+        let mut viol: Number = 0.0;
+        if G_L[i] > -1e19 {
+            viol = viol.max(G_L[i] - g[i]);
+            v.compl_g[i] += lambda[i].min(0.0) * (G_L[i] - g[i]);
+        }
+        if G_U[i] < 1e19 {
+            viol = viol.max(g[i] - G_U[i]);
+            v.compl_g[i] -= lambda[i].max(0.0) * (g[i] - G_U[i]);
+        }
+        v.g[i] = viol;
+    }
+    v
+}
+
+fn close_abs(what: &str, got: &[Number], want: &[Number], scale: Number) {
+    for (i, (g, w)) in got.iter().zip(want).enumerate() {
+        assert!(
+            (g - w).abs() <= 1e-9 * (scale + w.abs()),
+            "{what}[{i}]: GetIpoptCurrentViolations {g:e}, recomputed {w:e} ({got:?} vs {want:?})"
+        );
+    }
+}
+
+fn close_viol(tag: &str, got: &Viol, want: &Viol) {
+    // Entries that vanish at the solution are compared on the problem's
+    // own scale (K), not on their own.
+    let s = k();
+    close_abs(&format!("{tag} x_L_violation"), &got.x_l, &want.x_l, s);
+    close_abs(&format!("{tag} x_U_violation"), &got.x_u, &want.x_u, s);
+    close_abs(
+        &format!("{tag} compl_x_L"),
+        &got.compl_x_l,
+        &want.compl_x_l,
+        s,
+    );
+    close_abs(
+        &format!("{tag} compl_x_U"),
+        &got.compl_x_u,
+        &want.compl_x_u,
+        s,
+    );
+    close_abs(
+        &format!("{tag} grad_lag_x"),
+        &got.grad_lag_x,
+        &want.grad_lag_x,
+        s,
+    );
+    close_abs(&format!("{tag} constraint violation"), &got.g, &want.g, s);
+    close_abs(&format!("{tag} compl_g"), &got.compl_g, &want.compl_g, s);
+}
+
+fn check_violations(algorithm: &str, cfg: Cfg) {
+    let (out, fires) = solve(algorithm, cfg);
+    assert!(!fires.is_empty(), "{algorithm} {cfg:?}");
+    // Every fire: what the inspector reports is the original problem's
+    // violation at the iterate `GetIpoptCurrentIterate` reports. The early
+    // fires are where the numbers are large and every scaling factor shows.
+    let mut moved = false;
+    for (k, f) in fires.iter().enumerate() {
+        let v = f.viol.as_ref().unwrap_or_else(|| {
+            panic!("{algorithm} {cfg:?}: GetIpoptCurrentViolations refused at fire {k}")
+        });
+        let want = recompute(&f.x, &f.z_l, &f.z_u, &f.lambda);
+        close_viol(&format!("{algorithm} {cfg:?} fire {k}"), v, &want);
+        moved |= want.grad_lag_x.iter().any(|g| g.abs() > 1e-2 * self::k())
+            && want.g.iter().any(|g| g.abs() > 1e-3);
+    }
+    assert!(
+        moved,
+        "{algorithm} {cfg:?}: no fire with a visible residual"
+    );
+    // The last fire, against the final x, λ, z IpoptSolve wrote back.
+    let last = fires.last().unwrap().viol.clone().unwrap();
+    let want = recompute(&out.x, &out.z_l, &out.z_u, &out.lambda);
+    close_viol(
+        &format!("{algorithm} {cfg:?} last fire vs IpoptSolve"),
+        &last,
+        &want,
+    );
+}
+
+#[test]
+fn ipm_violations_are_the_original_problems_under_gradient_scaling() {
+    check_violations("interior-point", Cfg::GradientBased);
+}
+
+#[test]
+fn ipm_violations_are_the_original_problems_under_user_x_scaling() {
+    check_violations("interior-point", Cfg::UserX);
+}
+
+#[test]
+fn sqp_violations_are_the_original_problems_under_gradient_scaling() {
+    check_violations("active-set-sqp", Cfg::GradientBased);
+}
+
+#[test]
+fn sqp_violations_are_the_original_problems_under_user_x_scaling() {
+    check_violations("active-set-sqp", Cfg::UserX);
+}
+
+/// `scaled = TRUE` keeps upstream's meaning: the algorithm's own space.
+/// Under user scaling (obj 3, x `d`, g `s`) every entry is a fixed factor
+/// of its unscaled counterpart: `∂L̃/∂x̃ = 3·∂L/∂x / d`, a row's violation
+/// `s·viol`, `compl_g = 3·compl_g` (`c̃ỹ = s c · 3λ/s`). Served on the
+/// interior-point arm only.
+#[test]
+fn scaled_violations_are_the_algorithms_own_space() {
+    let d = [2.0, 0.5, 4.0, 3.0];
+    let s = [0.01, 5.0, 1.0];
+    let (_, fires) = solve("interior-point", Cfg::UserX);
+    let f = &fires[1];
+    let (u, sc) = (
+        f.viol.clone().unwrap(),
+        f.viol_scaled.clone().expect("scaled refused"),
+    );
+    for j in 0..3 {
+        let want = 3.0 * u.grad_lag_x[j] / d[j];
+        assert!(
+            (sc.grad_lag_x[j] - want).abs() <= 1e-8 * (1.0 + want.abs()),
+            "grad_lag_x[{j}]: scaled {} vs 3·{}/{}",
+            sc.grad_lag_x[j],
+            u.grad_lag_x[j],
+            d[j]
+        );
+    }
+    assert_eq!(sc.grad_lag_x[3], 0.0, "fixed variable");
+    for i in 0..M {
+        let want = s[i] * u.g[i];
+        assert!(
+            (sc.g[i] - want).abs() <= 1e-8 * (1e-12 + want.abs()),
+            "constraint violation[{i}]: scaled {} vs {}·{}",
+            sc.g[i],
+            s[i],
+            u.g[i]
+        );
+        let want = 3.0 * u.compl_g[i];
+        assert!(
+            (sc.compl_g[i] - want).abs() <= 1e-8 * (1e-12 + want.abs()),
+            "compl_g[{i}]: scaled {} vs 3·{}",
+            sc.compl_g[i],
+            u.compl_g[i]
+        );
+    }
+    let (_, fires) = solve("active-set-sqp", Cfg::UserX);
+    assert!(
+        fires.iter().all(|f| f.viol_scaled.is_none()),
+        "SQP served scaled"
+    );
 }
