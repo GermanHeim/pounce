@@ -47,6 +47,31 @@ struct Model {
     /// `(n, m)` of the problem the interior-point algorithm solved.
     solved_dims: Option<(usize, usize)>,
     out: Option<Point>,
+    /// `scaled_iterate` of the live iterate at every fire.
+    scaled: Vec<Point>,
+    /// The unscaled live iterate at every fire.
+    unscaled: Vec<Point>,
+    /// The interior-point algorithm's own iterate at every fire, scattered
+    /// to the TNLP's shape by hand (`NaN` at a column / row it does not
+    /// hold), with its objective factor.
+    raw: Vec<(Point, Number)>,
+}
+
+fn point(u: &pounce_nlp::live_iterate::UserIterate) -> Point {
+    Point {
+        x: u.x.clone(),
+        z_l: u.z_l.clone(),
+        z_u: u.z_u.clone(),
+        g: u.g.clone(),
+        lambda: u.lambda.clone(),
+    }
+}
+
+fn dense(v: &dyn pounce_linalg::Vector) -> Vec<Number> {
+    v.as_any()
+        .downcast_ref::<pounce_linalg::DenseVector>()
+        .map(|d| d.expanded_values())
+        .unwrap_or_default()
 }
 
 impl TNLP for Model {
@@ -153,13 +178,54 @@ impl TNLP for Model {
         }) {
             self.solved_dims = Some(dims);
         }
-        self.last = with_current_user_iterate(|u| Point {
-            x: u.x.clone(),
-            z_l: u.z_l.clone(),
-            z_u: u.z_u.clone(),
-            g: u.g.clone(),
-            lambda: u.lambda.clone(),
-        });
+        self.last = with_current_user_iterate(point);
+        if let Some((u, sc)) = with_current_user_iterate(|u| {
+            (
+                point(u),
+                point(&pounce_nlp::live_iterate::scaled_iterate(u)),
+            )
+        }) {
+            self.unscaled.push(u);
+            self.scaled.push(sc);
+        }
+        if let Some(raw) = with_current(|c| {
+            let curr = c.data.borrow().curr.clone()?;
+            let nlp = c.nlp.borrow();
+            let (n, m) = (nlp.n_full_x() as usize, nlp.n_full_g() as usize);
+            let xv = dense(&*curr.x);
+            let x = (0..n)
+                .map(|j| match nlp.full_x_to_var_x(j as i32) {
+                    Some(k) => xv[k as usize],
+                    None => Number::NAN,
+                })
+                .collect();
+            let (yc, yd) = (dense(&*curr.y_c), dense(&*curr.y_d));
+            let lambda = (0..m)
+                .map(|i| {
+                    if let Some(k) = nlp.full_g_to_c_block(i as i32) {
+                        yc[k as usize]
+                    } else if let Some(k) = nlp.full_g_to_d_block(i as i32) {
+                        yd[k as usize]
+                    } else {
+                        Number::NAN
+                    }
+                })
+                .collect();
+            Some((
+                Point {
+                    x,
+                    z_l: nlp.pack_z_l_for_user(&*curr.z_l),
+                    z_u: nlp.pack_z_u_for_user(&*curr.z_u),
+                    g: Vec::new(),
+                    lambda,
+                },
+                nlp.obj_scaling_factor(),
+            ))
+        })
+        .flatten()
+        {
+            self.raw.push(raw);
+        }
         true
     }
     fn finalize_solution(&mut self, s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {
@@ -184,9 +250,15 @@ enum Scaling {
     /// implied by the box and dropped, `g1 = x0 − x2 = 0` eliminates a
     /// column, and the fixed `x3` leaves the problem.
     Presolve,
+    /// `Presolve` under `user-scaling` (obj 3, x `D`, g `[0.01, 5, 1]`).
+    PresolveUserX,
 }
 
 fn solve(algorithm: &str, scaling: Scaling) -> Model {
+    solve_with(algorithm, scaling, None)
+}
+
+fn solve_with(algorithm: &str, scaling: Scaling, obj_factor: Option<Number>) -> Model {
     let model = match scaling {
         Scaling::GradientBased => Model {
             k: 1000.0,
@@ -201,6 +273,11 @@ fn solve(algorithm: &str, scaling: Scaling) -> Model {
             k: 1.0,
             ..Default::default()
         },
+        Scaling::PresolveUserX => Model {
+            k: 1.0,
+            x_scaling: true,
+            ..Default::default()
+        },
     };
     let p = Rc::new(RefCell::new(model));
     let mut a = IpoptApplication::new();
@@ -209,6 +286,10 @@ fn solve(algorithm: &str, scaling: Scaling) -> Model {
     o.set_integer_value("print_level", 0, true, false).unwrap();
     o.set_string_value("algorithm", algorithm, true, false)
         .unwrap();
+    if let Some(f) = obj_factor {
+        o.set_numeric_value("obj_scaling_factor", f, true, false)
+            .unwrap();
+    }
     match scaling {
         Scaling::GradientBased => {
             o.set_string_value("nlp_scaling_method", "gradient-based", true, false)
@@ -220,10 +301,14 @@ fn solve(algorithm: &str, scaling: Scaling) -> Model {
             o.set_string_value("nlp_scaling_method", "user-scaling", true, false)
                 .unwrap();
         }
-        Scaling::Presolve => {
+        Scaling::Presolve | Scaling::PresolveUserX => {
             o.set_string_value("presolve", "yes", true, false).unwrap();
             o.set_string_value("presolve_linear_eq_reduction", "yes", true, false)
                 .unwrap();
+            if let Scaling::PresolveUserX = scaling {
+                o.set_string_value("nlp_scaling_method", "user-scaling", true, false)
+                    .unwrap();
+            }
         }
     }
     assert_eq!(
@@ -376,4 +461,191 @@ fn ipm_installs_no_iterate_for_a_tnlp_that_does_not_want_one() {
     let m = Rc::try_unwrap(p).ok().unwrap().into_inner().0;
     assert!(m.fires > 1);
     assert!(m.last.is_none(), "an iterate was installed: {:?}", m.last);
+}
+
+// ---------------------------------------------------------------------
+// The scaled iterate (`GetIpoptCurrentIterate(scaled = TRUE)`)
+// ---------------------------------------------------------------------
+
+fn assert_rel(what: &str, got: Number, want: Number) {
+    assert!(
+        (got - want).abs() <= 1e-9 * (1.0 + want.abs()),
+        "{what}: {got:e} vs {want:e}"
+    );
+}
+
+/// Upstream `get_curr_iterate(scaled = true)` is the algorithm's own
+/// iterate resorted into the TNLP's shape: `x` as it iterates, its `z` and
+/// `y` as they are. Checked against the interior-point iterate read
+/// straight out of `IpoptData` at the same fire, under gradient-based
+/// scaling (row factors and an objective factor `3·df`) — and at the fixed
+/// `x3`, which the algorithm does not hold, upstream's `ResortX` value and
+/// `obj·z` (its manual rescale of `ResortBoundMultipliers`' unscaled
+/// recovery).
+#[test]
+fn ipm_scaled_iterate_is_the_algorithms_own_iterate() {
+    let m = solve("interior-point", Scaling::GradientBased);
+    assert_eq!(m.raw.len(), m.scaled.len());
+    assert!(m.raw.len() > 1);
+    let mut obj_seen = 1.0;
+    for (k, ((raw, obj), (sc, un))) in m
+        .raw
+        .iter()
+        .zip(m.scaled.iter().zip(&m.unscaled))
+        .enumerate()
+    {
+        obj_seen = *obj;
+        for j in 0..4 {
+            if raw.x[j].is_nan() {
+                assert_rel(&format!("fire {k} fixed x[{j}]"), sc.x[j], un.x[j]);
+                assert_rel(
+                    &format!("fire {k} fixed z_u[{j}]"),
+                    sc.z_u[j],
+                    obj * un.z_u[j],
+                );
+                assert_rel(
+                    &format!("fire {k} fixed z_l[{j}]"),
+                    sc.z_l[j],
+                    obj * un.z_l[j],
+                );
+            } else {
+                assert_rel(&format!("fire {k} x[{j}]"), sc.x[j], raw.x[j]);
+                assert_rel(&format!("fire {k} z_l[{j}]"), sc.z_l[j], raw.z_l[j]);
+                assert_rel(&format!("fire {k} z_u[{j}]"), sc.z_u[j], raw.z_u[j]);
+            }
+        }
+        for i in 0..3 {
+            assert_rel(
+                &format!("fire {k} lambda[{i}]"),
+                sc.lambda[i],
+                raw.lambda[i],
+            );
+        }
+    }
+    // Informative only if the objective factor is not 1 and the fixed
+    // variable carries a multiplier.
+    assert!(
+        obj_seen > 3.0 * 1.01 || obj_seen < 3.0 * 0.99,
+        "df did not engage: {obj_seen}"
+    );
+    assert!(m.out.unwrap().z_u[3] > 1e-3);
+}
+
+/// Under presolve the scaled iterate is the scaled values of the problem
+/// the algorithm solved, lifted like the unscaled one: a removed column or
+/// row carries factor 1, a multiplier the objective factor. Here only
+/// `obj_scaling_factor = 3` scales (`K = 1`: gradient-based does not
+/// engage), so every entry is `(x, 3·z, g, 3·λ)` of the unscaled read —
+/// kept and removed alike — on both arms.
+fn check_presolve_scaled(algorithm: &str) {
+    let m = solve_with(algorithm, Scaling::Presolve, Some(3.0));
+    assert!(m.scaled.len() > 1);
+    for (k, (sc, un)) in m.scaled.iter().zip(&m.unscaled).enumerate() {
+        assert_eq!(sc.x.len(), 4);
+        assert_eq!(sc.g.len(), 3);
+        for j in 0..4 {
+            assert_rel(&format!("{algorithm} fire {k} x[{j}]"), sc.x[j], un.x[j]);
+            assert_rel(
+                &format!("{algorithm} fire {k} z_l[{j}]"),
+                sc.z_l[j],
+                3.0 * un.z_l[j],
+            );
+            assert_rel(
+                &format!("{algorithm} fire {k} z_u[{j}]"),
+                sc.z_u[j],
+                3.0 * un.z_u[j],
+            );
+        }
+        for i in 0..3 {
+            assert_rel(&format!("{algorithm} fire {k} g[{i}]"), sc.g[i], un.g[i]);
+            assert_rel(
+                &format!("{algorithm} fire {k} lambda[{i}]"),
+                sc.lambda[i],
+                3.0 * un.lambda[i],
+            );
+        }
+    }
+    let out = m.out.unwrap();
+    assert!(out.z_u[3] > 1e-3 && out.lambda.iter().any(|l| l.abs() > 1e-3));
+}
+
+#[test]
+fn ipm_scaled_iterate_under_presolve_is_lifted_with_the_algorithms_factors() {
+    check_presolve_scaled("interior-point");
+}
+
+#[test]
+fn sqp_scaled_iterate_under_presolve_is_lifted_with_the_algorithms_factors() {
+    check_presolve_scaled("active-set-sqp");
+}
+
+/// The same under user scaling, where the factors differ per entry: every
+/// column's `x̃/x` is `D_j` (the algorithm holds it) or `1` (presolve
+/// removed it, or it is the fixed `x3`), its `z̃/z` is `3/(x̃/x)`, every
+/// row's `g̃/g` is its own `s_i` or `1` and `λ̃/λ = 3/(g̃/g)` — and both
+/// kinds occur. A lift that misaligned the factors would put a neighbour's
+/// factor on an entry.
+#[test]
+fn ipm_scaled_iterate_under_presolve_carries_each_entrys_own_factor() {
+    let s = [0.01, 5.0, 1.0];
+    let m = solve("interior-point", Scaling::PresolveUserX);
+    let (sc, un) = (m.scaled.last().unwrap(), m.unscaled.last().unwrap());
+    let (mut kept_col, mut cut_col, mut kept_row, mut cut_row) = (false, false, false, false);
+    for j in 0..4 {
+        let f = sc.x[j] / un.x[j];
+        let kept = (f - D[j]).abs() <= 1e-9 * D[j];
+        assert!(kept || (f - 1.0).abs() <= 1e-9, "x[{j}] factor {f}");
+        if j < 3 {
+            kept_col |= kept;
+            cut_col |= !kept;
+        }
+        for (z, zu) in [(sc.z_l[j], un.z_l[j]), (sc.z_u[j], un.z_u[j])] {
+            assert_rel(
+                &format!("z[{j}]"),
+                z,
+                3.0 * zu / if kept { D[j] } else { 1.0 },
+            );
+        }
+    }
+    for i in 0..3 {
+        // An eliminated equality reads g = 0 exactly; its factor shows in λ.
+        let f = if un.g[i].abs() > 1e-12 {
+            let f = sc.g[i] / un.g[i];
+            assert_rel(
+                &format!("lambda[{i}]"),
+                sc.lambda[i],
+                3.0 * un.lambda[i] / f,
+            );
+            f
+        } else {
+            assert_eq!(sc.g[i], 0.0);
+            3.0 * un.lambda[i] / sc.lambda[i]
+        };
+        let kept = (f - s[i]).abs() <= 1e-9 * s[i] && s[i] != 1.0;
+        assert!(kept || (f - 1.0).abs() <= 1e-9, "g[{i}] factor {f}");
+        kept_row |= kept;
+        cut_row |= !kept && s[i] != 1.0;
+    }
+    assert!(
+        kept_col && cut_col,
+        "columns: kept {kept_col}, removed {cut_col}"
+    );
+    assert!(
+        kept_row && cut_row,
+        "rows: kept {kept_row}, removed {cut_row}"
+    );
+}
+
+/// Presolve *and* per-variable scaling: the `ScalingTnlp` sits outside
+/// the presolve layers, so the algorithm's NLP cannot see its factors and
+/// the live iterate reached the user in `x̃ = d ⊙ x` (`x0` read 3.0 against
+/// the solution's 1.5). The wrapper now lifts it, as it finalizes.
+#[test]
+fn ipm_live_iterate_equals_finalize_under_presolve_and_user_x_scaling() {
+    check("interior-point", Scaling::PresolveUserX);
+}
+
+#[test]
+fn sqp_live_iterate_equals_finalize_under_presolve_and_user_x_scaling() {
+    check("active-set-sqp", Scaling::PresolveUserX);
 }

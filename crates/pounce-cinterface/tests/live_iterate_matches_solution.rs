@@ -33,6 +33,26 @@ struct It {
     viol: Option<Viol>,
     /// `GetIpoptCurrentViolations(scaled = TRUE)` at the same fire.
     viol_scaled: Option<Viol>,
+    /// `GetIpoptCurrentIterate(scaled = TRUE)` at the same fire.
+    scaled: Option<Box<It>>,
+}
+
+unsafe fn iterate(p: IpoptProblem, scaled: Bool) -> It {
+    let mut it = It::default();
+    it.ok = unsafe {
+        GetIpoptCurrentIterate(
+            p,
+            scaled,
+            N as Index,
+            it.x.as_mut_ptr(),
+            it.z_l.as_mut_ptr(),
+            it.z_u.as_mut_ptr(),
+            M as Index,
+            it.g.as_mut_ptr(),
+            it.lambda.as_mut_ptr(),
+        )
+    } != 0;
+    it
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -197,18 +217,8 @@ unsafe extern "C" fn on_iter(
     user_data: *mut c_void,
 ) -> Bool {
     unsafe {
-        let mut it = It::default();
-        it.ok = GetIpoptCurrentIterate(
-            user_data as IpoptProblem,
-            0,
-            N as Index,
-            it.x.as_mut_ptr(),
-            it.z_l.as_mut_ptr(),
-            it.z_u.as_mut_ptr(),
-            M as Index,
-            it.g.as_mut_ptr(),
-            it.lambda.as_mut_ptr(),
-        ) != 0;
+        let mut it = iterate(user_data as IpoptProblem, 0);
+        it.scaled = Some(Box::new(iterate(user_data as IpoptProblem, 1)));
         it.viol = violations(user_data as IpoptProblem, 0);
         it.viol_scaled = violations(user_data as IpoptProblem, 1);
         FIRES.with(|f| f.borrow_mut().push(it));
@@ -541,4 +551,62 @@ fn scaled_violations_are_the_algorithms_own_space() {
         fires.iter().all(|f| f.viol_scaled.is_none()),
         "SQP served scaled"
     );
+}
+
+// ---------------------------------------------------------------------
+// GetIpoptCurrentIterate(scaled = TRUE)
+// ---------------------------------------------------------------------
+
+/// `scaled = TRUE` is upstream's `get_curr_iterate(scaled = true)`: the
+/// algorithm's iterate in the TNLP's shape. Under user scaling the factors
+/// are the ones this test set (obj 3, x `d`, g `s`), so every entry is
+/// recomputed from the unscaled read at the same fire: `x̃ = d·x`, `z̃ =
+/// 3·z/d`, `g̃ = s·g`, `λ̃ = 3·λ/s` — and at the fixed `x3`, which the
+/// algorithm does not hold, upstream's `ResortX` value `x3` and its manual
+/// rescale `3·z` (no `d`). It used to ignore `scaled` and return the
+/// unscaled iterate, on both arms.
+///
+/// The active-set SQP arm solves the problem with the per-variable
+/// substitution only (it runs neither user nor gradient-based objective /
+/// row scaling; only the `obj_scaling_factor` *option* reaches it), so its
+/// scaled space has obj 1 and unit rows here: `obj`, `s` are per arm.
+fn check_scaled_iterate(algorithm: &str) {
+    let d = [2.0, 0.5, 4.0, 3.0];
+    let (obj, s) = if algorithm == "interior-point" {
+        (3.0, [0.01, 5.0, 1.0])
+    } else {
+        (1.0, [1.0; M])
+    };
+    let (_, fires) = solve(algorithm, Cfg::UserX);
+    assert!(fires.len() > 1);
+    for (k, f) in fires.iter().enumerate() {
+        let sc = f.scaled.as_ref().expect("scaled read");
+        assert!(sc.ok, "{algorithm} fire {k}: scaled iterate refused");
+        let dx = |j: usize| if j == 3 { 1.0 } else { d[j] };
+        let want_x: Vec<Number> = (0..N).map(|j| dx(j) * f.x[j]).collect();
+        let want_zl: Vec<Number> = (0..N).map(|j| obj * f.z_l[j] / dx(j)).collect();
+        let want_zu: Vec<Number> = (0..N).map(|j| obj * f.z_u[j] / dx(j)).collect();
+        let want_g: Vec<Number> = (0..M).map(|i| s[i] * f.g[i]).collect();
+        let want_l: Vec<Number> = (0..M).map(|i| obj * f.lambda[i] / s[i]).collect();
+        let tag = format!("{algorithm} fire {k} scaled");
+        close_abs(&format!("{tag} x"), &sc.x, &want_x, 1e-6);
+        close_abs(&format!("{tag} z_l"), &sc.z_l, &want_zl, 1e-6);
+        close_abs(&format!("{tag} z_u"), &sc.z_u, &want_zu, 1e-6);
+        close_abs(&format!("{tag} g"), &sc.g, &want_g, 1e-6);
+        close_abs(&format!("{tag} lambda"), &sc.lambda, &want_l, 1e-6);
+    }
+    // Informative only if the factors show: x̃ ≠ x somewhere, and the fixed
+    // variable's multiplier is not zero.
+    let last = fires.last().unwrap();
+    assert!(last.z_u[3] > 1e-3 && (last.scaled.as_ref().unwrap().x[0] - last.x[0]).abs() > 1e-3);
+}
+
+#[test]
+fn ipm_scaled_iterate_is_the_algorithms_space_in_the_tnlps_shape() {
+    check_scaled_iterate("interior-point");
+}
+
+#[test]
+fn sqp_scaled_iterate_is_the_algorithms_space_in_the_tnlps_shape() {
+    check_scaled_iterate("active-set-sqp");
 }

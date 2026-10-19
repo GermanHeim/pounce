@@ -20,7 +20,7 @@ use std::rc::Rc;
 
 use pounce_common::types::Number;
 use pounce_nlp::alg_types::SolverReturn;
-use pounce_nlp::live_iterate::{self, UserIterate};
+use pounce_nlp::live_iterate::{self, IterateScaling, UserIterate};
 use pounce_nlp::tnlp::{
     BoundsInfo, IpoptCq, IpoptData, NlpInfo, Solution, SparsityRequest, StartingPoint, TNLP,
 };
@@ -74,8 +74,54 @@ impl TNLP for Capture {
             z_u: sol.z_u.to_vec(),
             g: sol.g.to_vec(),
             lambda: sol.lambda.to_vec(),
+            ..Default::default()
         });
     }
+}
+
+/// Where each entry of a presolve layer's (outer, reduced) problem sits in
+/// the problem it wraps: `cols[k]` is the inner column outer column `k`
+/// copies, `rows[k]` the inner row outer row `k` copies. Inner columns and
+/// rows absent from these are the ones the layer removed.
+pub(crate) struct LiftMaps<'a> {
+    pub cols: &'a [usize],
+    pub rows: &'a [usize],
+}
+
+/// The outer iterate's [`IterateScaling`] carried to the inner shape: a
+/// kept column or row keeps its factor, a removed one — which the
+/// algorithm never scaled — gets `1` (and is marked as not held by the
+/// algorithm). This is what defines the `scaled = TRUE` readers under
+/// presolve: the scaled values of the problem the algorithm solved where it
+/// has the entry, the unscaled lifted value (times the objective factor,
+/// for a multiplier) where it does not.
+fn lift_scaling(
+    s: &IterateScaling,
+    maps: &LiftMaps<'_>,
+    n_in: usize,
+    m_in: usize,
+) -> Option<IterateScaling> {
+    if s.x.len() != maps.cols.len() || s.g.len() != maps.rows.len() {
+        return None;
+    }
+    let mut out = IterateScaling {
+        obj: s.obj,
+        x: vec![1.0; n_in],
+        x_in_alg: vec![false; n_in],
+        g: vec![1.0; m_in],
+    };
+    for (k, &j) in maps.cols.iter().enumerate() {
+        if j < n_in {
+            out.x[j] = s.x[k];
+            out.x_in_alg[j] = s.x_in_alg.get(k).copied().unwrap_or(true);
+        }
+    }
+    for (k, &i) in maps.rows.iter().enumerate() {
+        if i < m_in {
+            out.g[i] = s.g[k];
+        }
+    }
+    Some(out)
 }
 
 /// The installed live iterate lifted through `this` — `this`'s own
@@ -90,6 +136,7 @@ pub(crate) fn lift<T: TNLP>(
     this: &mut T,
     slot: fn(&mut T) -> &mut Rc<RefCell<dyn TNLP>>,
     outer_dims: (usize, usize),
+    maps: LiftMaps<'_>,
 ) -> Option<UserIterate> {
     let it = live_iterate::current_user_iterate()?;
     let (n, m) = outer_dims;
@@ -123,5 +170,11 @@ pub(crate) fn lift<T: TNLP>(
         &IpoptCq::default(),
     );
     *slot(this) = original;
-    capture.borrow_mut().captured.take()
+    let mut lifted = capture.borrow_mut().captured.take()?;
+    let (n_in, m_in) = (lifted.x.len(), lifted.g.len());
+    lifted.scaling = it
+        .scaling
+        .as_ref()
+        .and_then(|s| lift_scaling(s, &maps, n_in, m_in));
+    Some(lifted)
 }

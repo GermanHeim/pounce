@@ -60,8 +60,9 @@ thread_local! {
 ///   `TNLPAdapter::ResortBoundMultipliers` for every treatment but
 ///   `make_parameter_nodual`. Left at `0` they were not a zero multiplier
 ///   but a missing one;
-/// * per-variable `user-scaling` (`x̃ = d ⊙ x` in a `ScalingTnlp` below the
-///   NLP) undone, `x = x̃ ⊘ d`, `z = d ⊙ z̃`;
+/// * per-variable `user-scaling` (`x̃ = d ⊙ x`) is *not* undone here: the
+///   `ScalingTnlp` that substitutes it undoes it on the iterate's way
+///   through its `intermediate_callback`, as its `finalize_solution` does;
 /// * `g` from the iterate's own `c` / `d` values, unscaled.
 ///
 /// The fixed-variable recovery evaluates the TNLP, so this must run before
@@ -82,7 +83,7 @@ pub fn ipm_user_iterate(
     let nlp = nlp.borrow();
     let n = nlp.n_full_x() as usize;
     let m = nlp.n_full_g() as usize;
-    let mut x = nlp.finalize_solution_x(&*curr.x);
+    let x = nlp.finalize_solution_x(&*curr.x);
     let mut z_l = nlp.finalize_solution_z_l(&*curr.z_l);
     if z_l.is_empty() {
         z_l = vec![0.0; n];
@@ -98,20 +99,56 @@ pub fn ipm_user_iterate(
     if fixed_var_duals {
         nlp.complete_fixed_var_bound_multipliers(&x, &lambda, &mut z_l, &mut z_u);
     }
-    pounce_nlp::scaling_tnlp::unscale_iterate(
-        nlp.variable_scaling().as_deref(),
-        &mut x,
-        &mut z_l,
-        &mut z_u,
-    );
     let g = nlp.pack_g_for_user(&*c, &*d);
+    let scaling = Some(iterate_scaling(&*nlp));
     Some(UserIterate {
         x,
         z_l,
         z_u,
         g,
         lambda,
+        scaling,
     })
+}
+
+/// The [`IterateScaling`](pounce_nlp::live_iterate::IterateScaling) of the
+/// problem `nlp` iterates on, in the shape of the TNLP it wraps — the
+/// objective factor and the per-row `c` / `d` factors, and which columns
+/// the algorithm holds (not a fixed variable, which upstream's `ResortX`
+/// reports at the TNLP's own value). The per-variable factor is `1` here:
+/// a `ScalingTnlp` substituting `x̃ = d ⊙ x` multiplies its `d` in when it
+/// lifts the iterate. Both arms solve through the same `OrigIpoptNlp`, so
+/// both read their scaling here.
+pub fn iterate_scaling(nlp: &dyn IpoptNlp) -> pounce_nlp::live_iterate::IterateScaling {
+    let n = nlp.n_full_x() as usize;
+    let m = nlp.n_full_g() as usize;
+    let x_in_alg: Vec<bool> = (0..n)
+        .map(|j| nlp.full_x_to_var_x(j as Index).is_some())
+        .collect();
+    let x = vec![1.0; n];
+    let cs = nlp.c_scale_vec();
+    let ds = nlp.d_scale_vec();
+    let g = (0..m)
+        .map(|i| {
+            if let Some(k) = nlp.full_g_to_c_block(i as Index) {
+                cs.as_ref()
+                    .and_then(|v| v.get(k as usize).copied())
+                    .unwrap_or(1.0)
+            } else if let Some(k) = nlp.full_g_to_d_block(i as Index) {
+                ds.as_ref()
+                    .and_then(|v| v.get(k as usize).copied())
+                    .unwrap_or(1.0)
+            } else {
+                1.0
+            }
+        })
+        .collect();
+    pounce_nlp::live_iterate::IterateScaling {
+        obj: nlp.obj_scaling_factor(),
+        x,
+        x_in_alg,
+        g,
+    }
 }
 
 fn dense_values(v: &dyn pounce_linalg::Vector) -> Vec<Number> {

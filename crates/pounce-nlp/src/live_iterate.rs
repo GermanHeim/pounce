@@ -32,6 +32,92 @@ pub struct UserIterate {
     pub z_u: Vec<Number>,
     pub g: Vec<Number>,
     pub lambda: Vec<Number>,
+    /// The scaling of the problem the algorithm solves, entry by entry in
+    /// this iterate's shape (see [`IterateScaling`]); what
+    /// `GetIpoptCurrentIterate` / `GetIpoptCurrentViolations` with
+    /// `scaled = TRUE` multiply by. `None`: not known (the scaled readers
+    /// then report the unscaled values, scale 1).
+    pub scaling: Option<IterateScaling>,
+}
+
+/// Per-entry factors taking a [`UserIterate`] (and the violations measured
+/// at it) to the space the algorithm iterates in — upstream's
+/// `NLP_scaling()` applied to the TNLP-shaped quantities
+/// `TNLP::get_curr_iterate(scaled = true)` returns:
+///
+/// * `x̃_j = x_scale_j · x_j`, `x_scale` the per-variable factor (`1` for a
+///   column the algorithm does not hold — a fixed variable `make_parameter`
+///   removed, a column presolve eliminated: upstream's `ResortX` writes the
+///   TNLP's own value there);
+/// * `z̃_j = obj · z_j / x_scale_j`, with `z_L` and `z_U` swapped (and
+///   negated) at a column the algorithm does not hold when `obj < 0`, as
+///   upstream does for fixed variables;
+/// * `g̃_i = g_scale_i · g_i`, `λ̃_i = obj · λ_i / g_scale_i` (`1` for a row
+///   the algorithm does not hold).
+#[derive(Clone, Debug, PartialEq)]
+pub struct IterateScaling {
+    /// Objective factor (`obj_scaling_factor`, gradient-based times user).
+    pub obj: Number,
+    /// Per-column factor; length `n`.
+    pub x: Vec<Number>,
+    /// Whether the algorithm holds column `j` (length `n`).
+    pub x_in_alg: Vec<bool>,
+    /// Per-row factor; length `m`.
+    pub g: Vec<Number>,
+}
+
+impl IterateScaling {
+    /// Unit scaling for an `n`-column, `m`-row problem whose columns the
+    /// algorithm all holds.
+    pub fn unit(obj: Number, n: usize, m: usize) -> Self {
+        Self {
+            obj,
+            x: vec![1.0; n],
+            x_in_alg: vec![true; n],
+            g: vec![1.0; m],
+        }
+    }
+
+    fn fits(&self, n: usize, m: usize) -> bool {
+        self.x.len() == n && self.x_in_alg.len() == n && self.g.len() == m
+    }
+}
+
+/// `it` in the algorithm's scaled space, by [`IterateScaling`]'s rule —
+/// upstream `TNLP::get_curr_iterate(scaled = true)`. Unit scaling when the
+/// iterate carries none.
+pub fn scaled_iterate(it: &UserIterate) -> UserIterate {
+    let (n, m) = (it.x.len(), it.g.len());
+    let s = match it.scaling.as_ref().filter(|s| s.fits(n, m)) {
+        Some(s) => s.clone(),
+        None => IterateScaling::unit(1.0, n, m),
+    };
+    let mut out = UserIterate {
+        x: it.x.iter().zip(&s.x).map(|(v, d)| v * d).collect(),
+        z_l: vec![0.0; it.z_l.len()],
+        z_u: vec![0.0; it.z_u.len()],
+        g: it.g.iter().zip(&s.g).map(|(v, d)| v * d).collect(),
+        lambda: it
+            .lambda
+            .iter()
+            .zip(&s.g)
+            .map(|(v, d)| s.obj * v / d)
+            .collect(),
+        scaling: Some(s.clone()),
+    };
+    for j in 0..n.min(it.z_l.len()).min(it.z_u.len()) {
+        let f = s.obj / s.x[j];
+        if !s.x_in_alg[j] && s.obj < 0.0 {
+            // Upstream `get_curr_iterate`: "need to swap between z_L and
+            // z_U in this case".
+            out.z_l[j] = -it.z_u[j] * s.obj;
+            out.z_u[j] = -it.z_l[j] * s.obj;
+        } else {
+            out.z_l[j] = it.z_l[j] * f;
+            out.z_u[j] = it.z_u[j] * f;
+        }
+    }
+    out
 }
 
 thread_local! {
@@ -211,6 +297,32 @@ mod tests {
             x: vec![x],
             ..Default::default()
         }
+    }
+
+    /// Upstream `get_curr_iterate(scaled = true)` at a fixed variable under
+    /// a negative objective factor: `z̃_L = −obj·z_U`, `z̃_U = −obj·z_L`;
+    /// at a column the algorithm holds, `obj·z/d` with no swap.
+    #[test]
+    fn a_negative_objective_factor_swaps_only_a_fixed_variables_multipliers() {
+        let it = UserIterate {
+            x: vec![2.0, 1.0],
+            z_l: vec![0.5, 0.0],
+            z_u: vec![0.25, 4.0],
+            g: vec![3.0],
+            lambda: vec![-1.0],
+            scaling: Some(IterateScaling {
+                obj: -2.0,
+                x: vec![4.0, 1.0],
+                x_in_alg: vec![true, false],
+                g: vec![10.0],
+            }),
+        };
+        let s = scaled_iterate(&it);
+        assert_eq!(s.x, vec![8.0, 1.0]);
+        assert_eq!(s.z_l, vec![-0.25, 8.0]);
+        assert_eq!(s.z_u, vec![-0.125, 0.0]);
+        assert_eq!(s.g, vec![30.0]);
+        assert_eq!(s.lambda, vec![0.2]);
     }
 
     #[test]

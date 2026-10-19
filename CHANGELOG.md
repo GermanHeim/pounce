@@ -204,6 +204,23 @@ changes.
   so a `d` entry of 5 came back as 0 after zero SQP iterations where the
   interior-point arm gives 5. They now arrive through the same projections the
   IPM's warm initializer reads, already in algorithm space.
+- **`GetIpoptCurrentIterate` honours `scaled`, on both arms and under
+  presolve; with presolve and per-variable scaling the live iterate is no
+  longer `x̃`.** `scaled` was ignored (always the unscaled iterate). `TRUE`
+  now follows upstream's `get_curr_iterate(scaled = true)`: the algorithm's
+  iterate in the TNLP's shape — `x̃ = d ⊙ x`, `z̃ = obj·z/d`, `g̃ = s ⊙ g`,
+  `λ̃ = obj·λ/s`, a fixed variable at its own value with `obj·z` (swapped
+  when `obj < 0`, upstream's manual rescale). The live iterate carries those
+  factors (`UserIterate::scaling`), each wrapper lifting them with the
+  iterate: presolve gives a removed column or row factor 1, and the
+  `ScalingTnlp` now unscales the iterate in its own `intermediate_callback`
+  (the algorithm did it before, which under presolve — the `ScalingTnlp`
+  sits outside the presolve layers — never happened: `x0` read `3.0` against
+  the solution's `1.5`). On the SQP arm the scaled space is the one it
+  solves in: `d` and the `obj_scaling_factor` option only (it runs no
+  user/gradient objective or row scaling). Tests:
+  `pounce-cinterface/tests/live_iterate_matches_solution.rs`,
+  `pounce-algorithm/tests/live_iterate_matches_finalize.rs`.
 - **Presolve reported multipliers on bounds the model does not have when a
   bound it derived from rows was active (M24).** Phase 1 / FBBT derive
   variable bounds from multi-variable rows (`x0 = 2·x1, x0 ≥ 4` ⇒ `x1 ≥ 2`),

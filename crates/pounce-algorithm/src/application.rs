@@ -9318,19 +9318,11 @@ fn sqp_user_iterate(
     if fixed_var_duals {
         nlp.complete_fixed_var_bound_multipliers(&x_full, &lambda, &mut z_l, &mut z_u);
     }
-    let mut x_full = x_full;
-    // Everything above is in the space of the TNLP the NLP wraps, which
+    // Everything here is in the space of the TNLP the NLP wraps, which
     // under per-variable `user-scaling` is a `ScalingTnlp` seeing
-    // `x̃ = d ⊙ x`. `finalize_via_sqp` reaches the user through that
-    // wrapper's `finalize_solution`, which undoes the substitution; this
-    // snapshot goes straight to the callback, so it undoes it here, by the
-    // same rule (`x = x̃ ⊘ d`, `z = d ⊙ z̃`). It handed the callback `x̃`.
-    pounce_nlp::scaling_tnlp::unscale_iterate(
-        nlp.variable_scaling().as_deref(),
-        &mut x_full,
-        &mut z_l,
-        &mut z_u,
-    );
+    // `x̃ = d ⊙ x`; that wrapper undoes the substitution on the iterate's
+    // way through its `intermediate_callback`, by its `finalize_solution`'s
+    // rule (`x = x̃ ⊘ d`, `z = d ⊙ z̃`).
     let (c, d) = c_vals.split_at(m_eq.min(c_vals.len()));
     let g = nlp.pack_g_for_user(&dv(&c_space, c), &dv(&d_space, d));
     crate::intermediate::UserIterate {
@@ -9339,6 +9331,7 @@ fn sqp_user_iterate(
         z_u,
         g,
         lambda,
+        scaling: Some(crate::intermediate::iterate_scaling(&*nlp)),
     }
 }
 

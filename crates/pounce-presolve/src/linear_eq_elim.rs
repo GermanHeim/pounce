@@ -1836,10 +1836,25 @@ impl TNLP for LinearEqElimTnlp {
         let lifted = match self.get_nlp_info() {
             Some(info) => {
                 let saved = self.finalized.take();
+                // Outer column/row `k` is inner `vars_kept[k]` /
+                // `rows_kept[k]`; a passthrough layer is the identity.
+                let (cols, rows): (Vec<usize>, Vec<usize>) = match self.state.as_ref() {
+                    Some(s) if !s.passthrough => {
+                        (s.plan.vars_kept.clone(), s.plan.rows_kept.clone())
+                    }
+                    _ => (
+                        (0..info.n as usize).collect(),
+                        (0..info.m as usize).collect(),
+                    ),
+                };
                 let lifted = crate::live_lift::lift(
                     self,
                     |s| &mut s.inner,
                     (info.n as usize, info.m as usize),
+                    crate::live_lift::LiftMaps {
+                        cols: &cols,
+                        rows: &rows,
+                    },
                 );
                 self.finalized = saved;
                 lifted

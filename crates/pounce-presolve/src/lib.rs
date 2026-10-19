@@ -2912,8 +2912,23 @@ impl TNLP for PresolveTnlp {
                     self.duals_rewritten,
                     self.derived_bound_recovery.take(),
                 );
-                let lifted =
-                    live_lift::lift(self, |s| &mut s.inner, (info.n as usize, info.m as usize));
+                // Columns are the inner ones; outer row `k` is inner
+                // `rows_kept[k]`.
+                let cols: Vec<usize> = (0..info.n as usize).collect();
+                let rows: Vec<usize> = self
+                    .state
+                    .as_ref()
+                    .map(|s| s.rows_kept.clone())
+                    .unwrap_or_else(|| (0..info.m as usize).collect());
+                let lifted = live_lift::lift(
+                    self,
+                    |s| &mut s.inner,
+                    (info.n as usize, info.m as usize),
+                    live_lift::LiftMaps {
+                        cols: &cols,
+                        rows: &rows,
+                    },
+                );
                 (
                     self.finalized_full_solution,
                     self.bound_multipliers_handed_to_rows,

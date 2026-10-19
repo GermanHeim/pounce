@@ -863,11 +863,23 @@ pub unsafe extern "C" fn SetIntermediateCallback(
 /// must match the dimensions the problem was created with; mismatched
 /// sizes cause the function to return `FALSE` without writing.
 ///
-/// `scaled` is currently ignored — quantities are reported in the
-/// user TNLP's unscaled space, the units `IpoptSolve` writes back:
-/// objective, constraint and per-variable (`SetIpoptProblemScaling`
-/// `x_scaling`) scaling all undone, on both the interior-point and the
-/// active-set SQP arm. Honoring `scaled` is a follow-up.
+/// `scaled` keeps upstream's meaning (`TNLP::get_curr_iterate`, Ipopt
+/// 3.14 `IpTNLP.cpp`), on both the interior-point and the active-set SQP
+/// arm:
+///
+/// * `FALSE` — the user TNLP's unscaled space, the units `IpoptSolve`
+///   writes back: objective, constraint and per-variable
+///   (`SetIpoptProblemScaling` `x_scaling`) scaling all undone.
+/// * `TRUE` — the algorithm's scaled space in the TNLP's shape: `x̃ = d ⊙ x`
+///   (a fixed variable at its own value, as upstream's `ResortX` writes
+///   it), `z̃ = obj·z/d` (at a fixed variable `obj·z`, `z_L`/`z_U` swapped
+///   when `obj < 0`, upstream's manual rescale of `ResortBoundMultipliers`),
+///   `g̃ = s ⊙ g` (row factor; equality right-hand sides scaled too) and
+///   `λ̃ = obj·λ/s` ([`pounce_nlp::live_iterate::scaled_iterate`]). With
+///   presolve on, the scaled values of the problem the algorithm solved,
+///   lifted to the user's shape like the unscaled ones: a column or row the
+///   algorithm holds carries its factor, one presolve removed carries
+///   factor `1` (a multiplier there still carries `obj`).
 ///
 /// Both arms answer from the iterate the algorithm materialises before
 /// each fire ([`pounce_algorithm::intermediate::UserIterate`]), built by
@@ -889,7 +901,7 @@ pub unsafe extern "C" fn SetIntermediateCallback(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GetIpoptCurrentIterate(
     ipopt_problem: IpoptProblem,
-    _scaled: Bool,
+    scaled: Bool,
     n: Index,
     x: *mut Number,
     z_l: *mut Number,
@@ -909,6 +921,13 @@ pub unsafe extern "C" fn GetIpoptCurrentIterate(
         // Active-set SQP arm (gh#1015): no `IpoptData`/`IpoptCq`, so the
         // callback window carries a materialised user-space iterate instead.
         if let Some(r) = ip_intermediate::with_current_user_iterate(|it| {
+            let scaled_it;
+            let it = if scaled != FALSE {
+                scaled_it = pounce_nlp::live_iterate::scaled_iterate(it);
+                &scaled_it
+            } else {
+                it
+            };
             let n_us = n as usize;
             let m_us = m as usize;
             let copy = |src: &[Number], dst: *mut Number, len: usize| -> bool {

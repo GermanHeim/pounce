@@ -715,6 +715,31 @@ impl TNLP for ScalingTnlp {
         ip_data: &IpoptData,
         ip_cq: &IpoptCq,
     ) -> bool {
+        // The live iterate arrives in this layer's `x̃ = d ⊙ x` coordinates —
+        // whatever sits between it and the algorithm (presolve above all)
+        // lifted it in those coordinates — and leaves in the inner TNLP's,
+        // by `finalize_solution`'s rule: `x = x̃ ⊘ d`, `z = d ⊙ z̃`. The
+        // algorithm's scaled space holds `x̃`, so a column it holds gains
+        // the factor `d` in the iterate's scaling. Done here, not where the
+        // algorithm builds the iterate: with presolve between the two the
+        // algorithm's NLP cannot see these factors, and the user read `x̃`.
+        let lifted = crate::live_iterate::current_user_iterate()
+            .filter(|it| it.x.len() == self.d.len())
+            .map(|mut it| {
+                unscale_iterate(Some(&self.d), &mut it.x, &mut it.z_l, &mut it.z_u);
+                if let Some(s) = it.scaling.as_mut()
+                    && s.x.len() == self.d.len()
+                    && s.x_in_alg.len() == self.d.len()
+                {
+                    for (j, f) in s.x.iter_mut().enumerate() {
+                        if s.x_in_alg[j] {
+                            *f *= self.d[j];
+                        }
+                    }
+                }
+                it
+            });
+        let _lifted = lifted.map(crate::live_iterate::UserIterateGuard::install);
         self.inner
             .borrow_mut()
             .intermediate_callback(stats, ip_data, ip_cq)
