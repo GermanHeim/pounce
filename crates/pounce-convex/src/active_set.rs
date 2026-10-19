@@ -458,13 +458,18 @@ where
         // scaled solve certifies a KKT point of the *scaled* QP, and unscaling
         // moves the residuals, so it has to be re-earned here rather than carried
         // over on the strength of the wrong problem's numbers.
-        retry.sol.status = reverify_after_unscale(retry.sol.status, &retry.sol, prob, opts);
+        retry.sol.status =
+            reverify_after_unscale(retry.sol.status, &retry.sol, prob, opts, make_backend);
         // Keep the original failure when the retry also fails, so the reported
         // status describes the attempt made on the problem as the user posed it.
-        // `PrimalInfeasible` counts as a win here because `reverify_after_unscale`
-        // just re-earned its Farkas certificate against the *original* problem;
-        // `DualInfeasible` does not, because its witness (the engine's ray) is not
-        // available out here to re-check.
+        // `PrimalInfeasible` and `DualInfeasible` count as wins here because
+        // `reverify_after_unscale` just re-earned each against the *original*
+        // problem — the Farkas pair from the multipliers, the recession ray from
+        // the unscaled iterate's direction (gh#1034). Before that, a retry's
+        // `DualInfeasible` could not win: the engine's ray never leaves
+        // `solve_translated`, so there was nothing to re-check, and a verdict the
+        // retry had reached correctly was discarded for the first attempt's
+        // `NumericalFailure`.
         if outranks(&retry.sol, &best.sol) {
             best = retry;
         }
@@ -538,7 +543,11 @@ fn is_final(s: QpStatus) -> bool {
 /// failure — plus `Optimal` over `OptimalInaccurate`, so an inaccurate best is
 /// only displaced by a strictly better verdict.
 fn outranks(new: &QpSolution, old: &QpSolution) -> bool {
-    let wins = is_solved(new.status) || new.status == QpStatus::PrimalInfeasible;
+    let wins = is_solved(new.status)
+        || matches!(
+            new.status,
+            QpStatus::PrimalInfeasible | QpStatus::DualInfeasible
+        );
     match old.status {
         QpStatus::OptimalInaccurate => new.status == QpStatus::Optimal,
         _ => wins,
@@ -565,10 +574,10 @@ pub(crate) fn is_solved(s: QpStatus) -> bool {
 /// running one anyway would only burn a second solve before falling back to
 /// this same answer.
 ///
-/// `DualInfeasible` is deliberately absent from the retry-acceptance side of
-/// this test (see the call site): the unboundedness certificate is re-derived
-/// from a ray that only exists inside `solve_translated`, so a retry's claim
-/// has no witness left to re-check after unscaling.
+/// A retry's `DualInfeasible` is re-earned after unscaling from the iterate's
+/// direction (`reverify_after_unscale`, gh#1034), since the engine's own ray
+/// only exists inside `solve_translated`; one that does not stand up there is
+/// demoted to `NumericalFailure` before it reaches this test.
 pub(crate) fn is_conclusive(s: QpStatus) -> bool {
     is_solved(s)
         || matches!(
@@ -1049,6 +1058,23 @@ where
         prob,
         opts,
     );
+    // `verify_status` already tried the iterate's direction as it stands; a
+    // failed attempt may also spend a factorization projecting it, and the
+    // engine's ray, onto `null(P)` (gh#1034 — see [`recession_rescue`]).
+    if matches!(
+        sol.status,
+        QpStatus::NumericalFailure | QpStatus::IterationLimit
+    ) && qsol.stats.second_order != SecondOrderVerdict::NegativeCurvature
+        && recession_rescue(prob, &sol.x, qsol.unbounded_ray.as_deref(), make_backend)
+    {
+        debug_trace(|| {
+            format!(
+                "{:?} -> DualInfeasible by projected ray (gh#1034)",
+                sol.status
+            )
+        });
+        sol.status = QpStatus::DualInfeasible;
+    }
     // Two second-order guards, and they cover different classes (gh #848).
     //
     // The engine's own certification is upstream of here and is the one that
@@ -1350,15 +1376,30 @@ fn debug_trace(msg: impl FnOnce() -> String) {
 /// which `unscale_solution` has moved. So the Farkas certificate is re-derived
 /// here against the original data rather than inherited on the strength of the
 /// scaled problem's arithmetic.
-fn reverify_after_unscale(
+fn reverify_after_unscale<F>(
     scaled_status: QpStatus,
     sol: &QpSolution,
     prob: &QpProblem,
     opts: &QpOptions,
-) -> QpStatus {
+    make_backend: &mut F,
+) -> QpStatus
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
     if scaled_status == QpStatus::PrimalInfeasible {
         return if certifies_primal_infeasible(prob, &sol.y, &sol.z, opts) {
             QpStatus::PrimalInfeasible
+        } else {
+            QpStatus::NumericalFailure
+        };
+    }
+    // The scaled solve's ray is gone by now, but the iterate it ran off along is
+    // not: `unscale_solution` maps `x` back, and a runaway's direction is a
+    // candidate ray of the original problem. Re-earn the verdict from it, or
+    // say honestly that it did not stand up (gh#1034).
+    if scaled_status == QpStatus::DualInfeasible {
+        return if recession_rescue(prob, &sol.x, None, make_backend) {
+            QpStatus::DualInfeasible
         } else {
             QpStatus::NumericalFailure
         };
@@ -1367,13 +1408,24 @@ fn reverify_after_unscale(
         scaled_status,
         QpStatus::Optimal | QpStatus::OptimalInaccurate
     ) {
+        if matches!(
+            scaled_status,
+            QpStatus::NumericalFailure | QpStatus::IterationLimit
+        ) && recession_rescue(prob, &sol.x, None, make_backend)
+        {
+            return QpStatus::DualInfeasible;
+        }
         return scaled_status;
     }
-    solved_band(
+    let status = solved_band(
         adjudicated_kkt_error(prob, sol, opts.tol, opts.obj_constant),
         opts.tol,
     )
-    .unwrap_or(QpStatus::NumericalFailure)
+    .unwrap_or(QpStatus::NumericalFailure);
+    if runaway_overrides(status, &sol.x, prob) {
+        return QpStatus::DualInfeasible;
+    }
+    status
 }
 
 /// Multiple of `tol` inside which a solve is downgraded to "acceptable" rather
@@ -1621,7 +1673,7 @@ pub fn verify_status(
         }
     };
 
-    match engine {
+    let status = match engine {
         // Trust, but verify.
         ActiveSetStatus::Optimal => solved_to(err).unwrap_or(QpStatus::NumericalFailure),
         // Unboundedness is a proof obligation too, and the engine's claim does
@@ -1631,8 +1683,16 @@ pub fn verify_status(
         // bounded QP — a *wrong verdict about the user's model*, which is worse
         // than any failure status. So re-derive the certificate here from the
         // returned ray, exactly as the `Infeasible` case is re-derived.
+        //
+        // Held to the IPM's curvature floor as well as to the ray conditions
+        // (gh#1034): the engine's zero-curvature test is `‖Hd‖ ≤ 1e-10·‖H‖`,
+        // which a strictly convex `P` with `λ_min = 1e-10·‖P‖` passes, and so
+        // does `ray_certifies_unbounded`'s absolute `‖Pd‖` slack. Measured
+        // with the engine's test widened to its unshifted solves (an
+        // alternative fix for gh#1034, rejected for this), 28 of 228 bounded
+        // `P + εI` draws came back `DualInfeasible`; the floor rejects them.
         ActiveSetStatus::Unbounded => match ray {
-            Some(d) if ray_certifies_unbounded(prob, d) => QpStatus::DualInfeasible,
+            Some(d) if recession_ray_certifies(prob, d) => QpStatus::DualInfeasible,
             // No ray, or a ray that does not stand up: fall back on the point.
             _ => solved_to(err).unwrap_or(QpStatus::NumericalFailure),
         },
@@ -1666,7 +1726,227 @@ pub fn verify_status(
         // [`crate::ipm::mark_timed_out`] exists to prevent, one layer down.
         ActiveSetStatus::TimeLimit => solved_to(err).unwrap_or(QpStatus::TimeLimit),
         ActiveSetStatus::NumericalError => solved_to(err).unwrap_or(QpStatus::NumericalFailure),
+    };
+    if !refuted && runaway_overrides(status, &sol.x, prob) {
+        debug_trace(|| format!("{status:?} at a runaway iterate -> DualInfeasible (gh#1034)"));
+        return QpStatus::DualInfeasible;
     }
+    status
+}
+
+/// Does the iterate the engine stopped at prove the problem unbounded, and may
+/// that proof replace `status`?
+///
+/// # Why the iterate, and not the engine's ray (gh#1034)
+///
+/// On a convex QP whose `P` is *exactly* singular — integer `P = RᵀR` of rank
+/// `n − 1` is the adversary's family — the smallest eigenvalue does not come out
+/// of a factorization as zero but as round-off, `±1e-15`. The backend takes it
+/// as a pivot, the inertia reads correct, no §4.5 shift fires, and the engine's
+/// recession-ray certificates, which all key on that shift, stay silent. The
+/// engine then runs off along the ray anyway: measured over 129 misreported
+/// instances (no rows, equality rows, inequality rows, one-sided bounds, and
+/// their mixes), the returned `x` had `‖x‖∞` from 1e8 to 1e31 and pointed
+/// along the true recession direction to cosine 1.000 in all but two. What came
+/// back was `NumericalFailure`, `IterationLimit` — the latter telling a
+/// modelling layer to raise a limit that can never help — and three times
+/// `Optimal` at objectives near `−1e15`, a wrong verdict about the model.
+///
+/// Which engine path ran off, and why, varies; the iterate's direction does
+/// not. So the certificate is taken from it here, once, for every path, and it
+/// is re-derived against `prob` exactly as an engine ray would be — the
+/// witness is only a candidate, and [`recession_ray_certifies`] is the proof.
+///
+/// # Which statuses it may replace
+///
+/// Any non-verdict (`NumericalFailure`, `IterationLimit`). A solved status only
+/// when the iterate is a genuine runaway — beyond [`RUNAWAY_FACTOR`] times
+/// every number in the model — because at an ordinary optimum the direction
+/// `x/‖x‖` means nothing, and an LP vertex whose direction happens to be a
+/// feasible recession one is still optimal if the descent there is within the
+/// certificate's slack. `PrimalInfeasible` and `TimeLimit` are never touched.
+fn runaway_overrides(status: QpStatus, x: &[f64], prob: &QpProblem) -> bool {
+    match status {
+        QpStatus::NumericalFailure | QpStatus::IterationLimit => recession_ray_certifies(prob, x),
+        QpStatus::Optimal | QpStatus::OptimalInaccurate => {
+            inf_norm(x) > RUNAWAY_FACTOR * data_scale(prob) && recession_ray_certifies(prob, x)
+        }
+        _ => false,
+    }
+}
+
+/// How far past every number in the model an iterate must be before its
+/// direction may overturn a *solved* status. `1e12` leaves four orders between
+/// it and the `1e8` a bounded QP's soft mode can legitimately push an optimum
+/// out to, and the runaways [`runaway_overrides`] exists for sit at `1e14` and
+/// beyond (measured, gh#1034).
+const RUNAWAY_FACTOR: f64 = 1e12;
+
+/// Largest magnitude among the model's right-hand sides and finite bounds, at
+/// least 1 — the scale a solved iterate is compared to in [`runaway_overrides`].
+fn data_scale(prob: &QpProblem) -> f64 {
+    let finite = |v: &f64| v.is_finite() && v.abs() < 1e19;
+    prob.b
+        .iter()
+        .chain(&prob.h)
+        .chain(prob.lb.iter().filter(|v| finite(v)))
+        .chain(prob.ub.iter().filter(|v| finite(v)))
+        .fold(1.0_f64, |a, v| a.max(v.abs()))
+}
+
+/// Is the direction of `x` a certified recession ray of `prob`?
+///
+/// The one test every `DualInfeasible` this driver reports has to pass — the
+/// engine's own ray and a runaway iterate's direction alike.
+///
+/// `u = x/‖x‖∞` (an overflowed entry counts as `±1`, the rest as `0` — the
+/// direction it overflowed in) must pass two independent tests:
+///
+/// * **no positive curvature**, `uᵀPu/‖u‖² ≤ 1e-20` — the IPM's own recession floor,
+///   `RECESSION_CURV_TOL`, with its gh #293 reasoning intact: a bounded
+///   problem floors this at its smallest real directional eigenvalue, and
+///   `1e-20` sits below every one that has to be rejected. It is what makes
+///   the test safe where [`ray_certifies_unbounded`]'s absolute `‖Pd‖` slack
+///   alone is not — `P = diag(1, 1e-10)` with an optimum at `1e10` has
+///   `‖Pu‖ = 1e-10` and would pass that, but has curvature `1e-10` here. A
+///   runaway's own offset from the ray contributes only `O(1/‖x‖²)`.
+/// * [`ray_certifies_unbounded`] itself — `Au ≈ 0`, `Gu ≤ 0`, the box
+///   respected directionally, and either `Pu ≈ 0` with `cᵀu < 0` or
+///   negative curvature beyond round-off. A negative quotient passes the
+///   floor on purpose: on an indefinite `P` that is how a nonconvex QP runs off
+///   to `−∞` (gh #791), and `ray_certifies_unbounded` decides it.
+fn recession_ray_certifies(prob: &QpProblem, x: &[f64]) -> bool {
+    if x.len() != prob.n || x.iter().any(|v| v.is_nan()) {
+        return false;
+    }
+    let u: Vec<f64> = if x.iter().any(|v| v.is_infinite()) {
+        x.iter()
+            .map(|&v| if v.is_infinite() { v.signum() } else { 0.0 })
+            .collect()
+    } else {
+        let xn = inf_norm(x);
+        if xn == 0.0 {
+            return false;
+        }
+        x.iter().map(|v| v / xn).collect()
+    };
+    // Compensated, not `p_mul` + `dot`: on a runaway `u` is the ray plus an
+    // `O(ε)` remainder, so the true `uᵀPu` is `O(ε²‖P‖)` while an ordinary sum
+    // returns its own cancellation noise, `O(ε‖P‖)` — measured `7.4e-17` on a
+    // genuine ray, four orders *above* the floor. Loosening the floor to that
+    // noise would readmit gh #293's `P = diag(1e6, 1e-12)`; resolving the
+    // quantity does not.
+    let pu = crate::ipm::p_mul_add_compensated(prob, &u, vec![0.0; prob.n]);
+    let curvature = crate::ipm::dot_compensated(&u, &pu) / dot(&u, &u);
+    curvature <= RECESSION_CURV_TOL && ray_certifies_unbounded(prob, &u)
+}
+
+/// The IPM's `RECESSION_CURV_TOL`, restated for [`recession_ray_certifies`].
+const RECESSION_CURV_TOL: f64 = 1e-20;
+
+/// [`recession_ray_certifies`] on the engine's ray and on the direction of `x`,
+/// each tried as returned and then projected onto `null(P)` — the version of the
+/// gh#1034 rescue that may spend a factorization, run only on an attempt that
+/// has already failed.
+///
+/// # Why a projection
+///
+/// When the engine *does* notice the singular block, it is through the §4.5
+/// shift, and what it hands back is a `δ`-proximal object: the null component
+/// of the step grows like `1/δ` while the range component stays `O(1)`, so at
+/// the first shift (`δ = 1e-8`) the iterate sits near `1e8` and its direction
+/// carries an `O(δ)` range remainder. That remainder is real curvature,
+/// `O(δ²)·‖P‖ ≈ 1e-16`, four orders above the floor, and no amount of exact
+/// arithmetic removes it. Measured: every one of the seven instances the
+/// unprojected direction could not certify was this shape (`‖x‖∞` from 1.4e8
+/// to 3.7e10), with the engine reporting `Unbounded` (its ray then failing
+/// the driver's check), `Optimal` at the proximal point, or `MaxIter`.
+///
+/// `w = u − (P + δI)⁻¹Pu` keeps `u`'s component in `null(P)` exactly and
+/// multiplies each range eigencomponent by `δ/(λ + δ)`; two passes on one
+/// factor take a `1e-8` remainder to round-off. It is a candidate generator,
+/// nothing more — `w` must pass the same certificate any other ray does, so
+/// a projection that lands somewhere useless costs a factorization and changes
+/// no verdict.
+fn recession_rescue<F>(
+    prob: &QpProblem,
+    x: &[f64],
+    engine_ray: Option<&[f64]>,
+    make_backend: &mut F,
+) -> bool
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    let candidates: Vec<&[f64]> = engine_ray
+        .filter(|r| r.len() == prob.n && r.iter().all(|v| v.is_finite()))
+        .into_iter()
+        .chain(std::iter::once(x).filter(|x| x.iter().all(|v| v.is_finite())))
+        .collect();
+    if candidates.is_empty() {
+        return false;
+    }
+    if candidates.iter().any(|d| recession_ray_certifies(prob, d)) {
+        return true;
+    }
+    let p_scale = p_inf_scale(prob);
+    if p_scale == 0.0 || crate::deadline::expired() {
+        // An LP has no range of `P` to project out.
+        return false;
+    }
+    let Some(mut fact) = shifted_p_factor(prob, 1e-10 * p_scale, make_backend) else {
+        return false;
+    };
+    candidates.iter().any(|&d| {
+        let xn = inf_norm(d);
+        if xn == 0.0 {
+            return false;
+        }
+        let mut w: Vec<f64> = d.iter().map(|v| v / xn).collect();
+        for _ in 0..2 {
+            let mut pw = vec![0.0; prob.n];
+            prob.p_mul(&w, &mut pw);
+            if fact.solve_one(&mut pw).is_err() {
+                return false;
+            }
+            for (wi, ci) in w.iter_mut().zip(&pw) {
+                *wi -= ci;
+            }
+            if recession_ray_certifies(prob, &w) {
+                return true;
+            }
+        }
+        false
+    })
+}
+
+/// A factorization of `P + δI` (stored lower triangle, 1-based, the
+/// convention [`Factorization`](pounce_linsol::Factorization) takes).
+fn shifted_p_factor<F>(
+    prob: &QpProblem,
+    delta: f64,
+    make_backend: &mut F,
+) -> Option<pounce_linsol::Factorization>
+where
+    F: FnMut() -> Box<dyn SparseSymLinearSolverInterface>,
+{
+    use pounce_common::types::Index;
+    let mut entries: std::collections::BTreeMap<(usize, usize), f64> =
+        (0..prob.n).map(|i| ((i, i), delta)).collect();
+    for t in &prob.p_lower {
+        let key = if t.row >= t.col {
+            (t.row, t.col)
+        } else {
+            (t.col, t.row)
+        };
+        *entries.entry(key).or_insert(0.0) += t.val;
+    }
+    let (mut airn, mut ajcn, mut vals) = (vec![], vec![], vec![]);
+    for ((r, c), v) in entries {
+        airn.push((r + 1) as Index);
+        ajcn.push((c + 1) as Index);
+        vals.push(v);
+    }
+    pounce_linsol::Factorization::new(prob.n as Index, airn, ajcn, vals, make_backend()).ok()
 }
 
 thread_local! {
