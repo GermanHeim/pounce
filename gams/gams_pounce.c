@@ -1047,10 +1047,15 @@ DllExport int STDCALL pouCallSolver(void *Cptr)
      * pounce.opt), so the cost on the default IPM path is one
      * setter call + a free of the buffers.
      *
-     * Sign convention: POUNCE expects the standard `λ_g` (positive
-     * for tight lower side); GAMS persists the "pi" with the
-     * solver-link sign flip we apply on output (mult_g[i] =
-     * -mult_g[i]). So when *reading back* we flip again.
+     * Sign convention: GAMS persists the marginals this link wrote
+     * on the previous solve, pi = -obj_sign * lambda and
+     * obj_sign * (z_L - z_U) (see the solution write below). Their
+     * meaning depends on the objective sense, so multiply by
+     * obj_sign before classifying: after that a positive value
+     * flags the lower side and a negative the upper, for minimize
+     * and maximize alike. Without it every active side of a max
+     * model came back flipped (the inbound half of gh#272, same
+     * class as gh#1033).
      *
      * Reconstruction is lossy on degenerate active sets — same
      * limitation upstream's CONOPT, IPOPT, and KNITRO links have
@@ -1071,11 +1076,11 @@ DllExport int STDCALL pouCallSolver(void *Cptr)
         if (bound_in && var_marg_in && (m == 0 || (cons_in && equ_marg_in))) {
             gmoGetVarM(gmo, var_marg_in);
             if (m > 0) gmoGetEquM(gmo, equ_marg_in);
-            /* Variables: nonzero marginal ⇒ a bound is active.
-             * GAMS stores the bound-multiplier sign with our
-             * convention (we already negated when writing it on the
-             * previous solve), so a positive value flags lower-side,
-             * negative upper-side. */
+            for (int j = 0; j < n; j++) var_marg_in[j] *= data->obj_sign;
+            for (int i = 0; i < m; i++) equ_marg_in[i] *= data->obj_sign;
+            /* Variables: nonzero marginal ⇒ a bound is active; with
+             * obj_sign applied, positive is z_L (lower side), negative
+             * z_U (upper side). */
             for (int j = 0; j < n; j++) {
                 if (x_l[j] >= x_u[j] - WS_TOL) {
                     bound_in[j] = POUNCE_WS_FIXED_OR_EQ;
