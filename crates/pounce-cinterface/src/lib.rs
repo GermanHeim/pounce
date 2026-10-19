@@ -607,9 +607,12 @@ pub unsafe extern "C" fn SetIpoptProblemScaling(
 /// # Safety
 ///
 /// All pointer arguments are read/written per the
-/// `IpStdCInterface.h` contract: `x` is in/out (size `n`); `g`,
-/// `mult_g`, `mult_x_L`, `mult_x_U` are out-only (sizes `m, m, n, n`)
-/// and may be NULL when the corresponding output is not desired.
+/// `IpStdCInterface.h` contract: `x` is in/out (size `n`); `g` is
+/// out-only (size `m`); `mult_g`, `mult_x_L`, `mult_x_U` (sizes
+/// `m, n, n`) are out, and are also *read* as the starting multipliers
+/// when `warm_start_init_point=yes` (upstream's `start_lam`, `start_z_L`,
+/// `start_z_U`). Any of them may be NULL; a NULL multiplier buffer under
+/// a warm start means "not supplied" and that block starts unseeded.
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn IpoptSolve(
@@ -686,7 +689,9 @@ pub unsafe extern "C" fn IpoptSolve(
                 let z_l = read_in(mult_x_L as *const Number, n_us);
                 let z_u = read_in(mult_x_U as *const Number, n_us);
                 // SQP packs the bound multipliers signed, as
-                // `lambda_x = z_l − z_u` (see `sqp::warm_start`).
+                // `lambda_x = z_l − z_u` (see `sqp::warm_start`). All three
+                // stay in the caller's space (`g` order, unscaled, full `n`);
+                // `set_sqp_warm_start` maps them into the algorithm's.
                 let lambda_x = z_l.iter().zip(&z_u).map(|(l, u)| l - u).collect();
                 info.app
                     .set_sqp_warm_start(pounce_algorithm::sqp::SqpIterates {
@@ -697,6 +702,8 @@ pub unsafe extern "C" fn IpoptSolve(
                     });
             }
 
+            let (lower_inf, upper_inf, zero_fixed_grad_lag) =
+                bridge_violation_options(info.app.options());
             let bridge = Rc::new(RefCell::new(CCallbackTnlp {
                 n: info.n,
                 m: info.m,
@@ -708,6 +715,9 @@ pub unsafe extern "C" fn IpoptSolve(
                 g_l: info.g_l.clone(),
                 g_u: info.g_u.clone(),
                 initial_x,
+                start_lambda: mult_g as *const Number,
+                start_z_l: mult_x_L as *const Number,
+                start_z_u: mult_x_U as *const Number,
                 eval_f: info.eval_f,
                 eval_grad_f: info.eval_grad_f,
                 eval_g: info.eval_g,
@@ -717,6 +727,9 @@ pub unsafe extern "C" fn IpoptSolve(
                 intermediate_cb: info.intermediate_cb,
                 user_scaling: info.user_scaling.clone(),
                 nonlinear_vars: info.nonlinear_vars.clone(),
+                lower_inf,
+                upper_inf,
+                zero_fixed_grad_lag,
                 final_status: None,
                 final_x: vec![0.0; n_us],
                 final_z_l: vec![0.0; n_us],
@@ -850,10 +863,32 @@ pub unsafe extern "C" fn SetIntermediateCallback(
 /// must match the dimensions the problem was created with; mismatched
 /// sizes cause the function to return `FALSE` without writing.
 ///
-/// `scaled` is currently ignored — quantities are reported in the
-/// user TNLP's unscaled space (matching upstream Ipopt's default
-/// caller behavior when scaling is unused). Honoring `scaled` for the
-/// `gradient-based` scaler is a follow-up.
+/// `scaled` keeps upstream's meaning (`TNLP::get_curr_iterate`, Ipopt
+/// 3.14 `IpTNLP.cpp`), on both the interior-point and the active-set SQP
+/// arm:
+///
+/// * `FALSE` — the user TNLP's unscaled space, the units `IpoptSolve`
+///   writes back: objective, constraint and per-variable
+///   (`SetIpoptProblemScaling` `x_scaling`) scaling all undone.
+/// * `TRUE` — the algorithm's scaled space in the TNLP's shape: `x̃ = d ⊙ x`
+///   (a fixed variable at its own value, as upstream's `ResortX` writes
+///   it), `z̃ = obj·z/d` (at a fixed variable `obj·z`, `z_L`/`z_U` swapped
+///   when `obj < 0`, upstream's manual rescale of `ResortBoundMultipliers`),
+///   `g̃ = s ⊙ g` (row factor; equality right-hand sides scaled too) and
+///   `λ̃ = obj·λ/s` ([`pounce_nlp::live_iterate::scaled_iterate`]). With
+///   presolve on, the scaled values of the problem the algorithm solved,
+///   lifted to the user's shape like the unscaled ones: a column or row the
+///   algorithm holds carries its factor, one presolve removed carries
+///   factor `1` (a multiplier there still carries `obj`).
+///
+/// Both arms answer from the iterate the algorithm materialises before
+/// each fire ([`pounce_algorithm::intermediate::UserIterate`]), built by
+/// the conversions `finalize_solution` applies — so at the last fire this
+/// reads what `IpoptSolve` writes back. That includes the bound
+/// multipliers of fixed variables, recovered from `∇f + Jᵀλ` as upstream's
+/// `TNLPAdapter::ResortBoundMultipliers` does (not under
+/// `fixed_variable_treatment=make_parameter_nodual`), and, with presolve on,
+/// the rows and columns it removed.
 ///
 /// Returns `FALSE` when called outside an active intermediate
 /// callback (no live iterate to inspect).
@@ -866,7 +901,7 @@ pub unsafe extern "C" fn SetIntermediateCallback(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GetIpoptCurrentIterate(
     ipopt_problem: IpoptProblem,
-    _scaled: Bool,
+    scaled: Bool,
     n: Index,
     x: *mut Number,
     z_l: *mut Number,
@@ -886,6 +921,13 @@ pub unsafe extern "C" fn GetIpoptCurrentIterate(
         // Active-set SQP arm (gh#1015): no `IpoptData`/`IpoptCq`, so the
         // callback window carries a materialised user-space iterate instead.
         if let Some(r) = ip_intermediate::with_current_user_iterate(|it| {
+            let scaled_it;
+            let it = if scaled != FALSE {
+                scaled_it = pounce_nlp::live_iterate::scaled_iterate(it);
+                &scaled_it
+            } else {
+                it
+            };
             let n_us = n as usize;
             let m_us = m as usize;
             let copy = |src: &[Number], dst: *mut Number, len: usize| -> bool {
@@ -924,25 +966,40 @@ pub unsafe extern "C" fn GetIpoptCurrentIterate(
             };
             let n_us = n as usize;
             let m_us = m as usize;
+            // Per-variable `user-scaling` substitutes `x̃ = d ⊙ x` in a
+            // `ScalingTnlp` below the NLP, so the iterate lifted here is
+            // `x̃` / `z̃`. `finalize_solution` undoes that on the way out;
+            // so must this, or the callback reads coordinates the user's
+            // model never had. The multipliers go through the
+            // `finalize_solution_*` lifts, not `pack_*_for_user`, for the
+            // same reason: only those divide out `obj_scale_factor`, so a
+            // solve with objective scaling (user or gradient-based) read
+            // `z` and `λ` that many times too large here — the same
+            // convention the SQP arm's iterate and `IpoptSolve` use.
+            let d = ctx.nlp.borrow().variable_scaling();
+            let d = d.as_deref();
             if !x.is_null() && n_us > 0 {
-                let full_x = ctx.nlp.borrow().lift_x_to_full(&*curr.x);
+                let mut full_x = ctx.nlp.borrow().lift_x_to_full(&*curr.x);
                 if full_x.len() != n_us {
                     return false;
                 }
+                pounce_nlp::scaling_tnlp::unscale_iterate(d, &mut full_x, &mut [], &mut []);
                 std::ptr::copy_nonoverlapping(full_x.as_ptr(), x, n_us);
             }
             if !z_l.is_null() && n_us > 0 {
-                let full = ctx.nlp.borrow().pack_z_l_for_user(&*curr.z_l);
+                let mut full = ctx.nlp.borrow().finalize_solution_z_l(&*curr.z_l);
                 if full.len() != n_us {
                     return false;
                 }
+                pounce_nlp::scaling_tnlp::unscale_iterate(d, &mut [], &mut full, &mut []);
                 std::ptr::copy_nonoverlapping(full.as_ptr(), z_l, n_us);
             }
             if !z_u.is_null() && n_us > 0 {
-                let full = ctx.nlp.borrow().pack_z_u_for_user(&*curr.z_u);
+                let mut full = ctx.nlp.borrow().finalize_solution_z_u(&*curr.z_u);
                 if full.len() != n_us {
                     return false;
                 }
+                pounce_nlp::scaling_tnlp::unscale_iterate(d, &mut [], &mut [], &mut full);
                 std::ptr::copy_nonoverlapping(full.as_ptr(), z_u, n_us);
             }
             if !g.is_null() && m_us > 0 {
@@ -962,7 +1019,7 @@ pub unsafe extern "C" fn GetIpoptCurrentIterate(
                 let full = ctx
                     .nlp
                     .borrow()
-                    .pack_lambda_for_user(&*curr.y_c, &*curr.y_d);
+                    .finalize_solution_lambda(&*curr.y_c, &*curr.y_d);
                 if full.len() != m_us {
                     return false;
                 }
@@ -978,11 +1035,30 @@ pub unsafe extern "C" fn GetIpoptCurrentIterate(
 /// Same contract as [`GetIpoptCurrentIterate`]; returns `FALSE` when
 /// called outside an active intermediate callback.
 ///
-/// `scaled` is currently ignored — see [`GetIpoptCurrentIterate`].
-/// Violations and complementarities are reported in the compressed
-/// algorithm-side space scattered out to full-`n`/`m`; this is the
-/// shape upstream callers consume (zero-fill for free positions /
-/// no-bound positions).
+/// `scaled` keeps upstream's meaning (`TNLP::get_curr_violations`):
+///
+/// * `FALSE` — the user's problem, unscaled: objective, constraint and
+///   per-variable scaling undone, full `n` with fixed variables, rows in
+///   `g` order. Computed from the live iterate [`GetIpoptCurrentIterate`]
+///   reads (so with presolve on, the user's own rows and columns) against
+///   the declared bounds: `x_L_violation = max(0, x_L − x)`,
+///   `compl_x_L = (x − x_L^alg)·z_L` with `x_L^alg` the bound the
+///   algorithm's slack is measured to (declared, widened by
+///   `bound_relax_factor`: upstream's `curr_compl_x_L / obj`, except under
+///   per-variable user scaling, where pounce relaxes in the scaled frame and
+///   Ipopt in the unscaled one), `grad_lag_x = ∇f + Jᵀλ − z_L + z_U`
+///   (`0` at fixed variables, as upstream's `ResortX` leaves them; `∇f` and
+///   `J` come from this problem's `eval_grad_f` / `eval_jac_g`, called only
+///   when `grad_lag_x` is requested), per-row violation `|g − g_L|` /
+///   `max(0, g_L − g, g − g_U)` and `compl_g` with upstream's signs. Both arms.
+/// * `TRUE` — upstream's `get_curr_violations(scaled = true)`: the same
+///   quantities in the algorithm's scaled space, each a fixed factor of its
+///   unscaled counterpart ([`pounce_nlp::live_iterate::scale_violations`]):
+///   bound violations `× d`, complementarities `× obj`, `grad_lag_x
+///   × obj/d`, row violations `× s` — the factors `GetIpoptCurrentIterate`
+///   (`scaled = TRUE`) applies. Both arms (the SQP arm's scaled space is
+///   `d` and the `obj_scaling_factor` option: it runs no other scaling),
+///   and under presolve, where a removed column or row carries factor 1.
 ///
 /// # Safety
 ///
@@ -992,7 +1068,7 @@ pub unsafe extern "C" fn GetIpoptCurrentIterate(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn GetIpoptCurrentViolations(
     ipopt_problem: IpoptProblem,
-    _scaled: Bool,
+    scaled: Bool,
     n: Index,
     x_l_violation: *mut Number,
     x_u_violation: *mut Number,
@@ -1011,102 +1087,72 @@ pub unsafe extern "C" fn GetIpoptCurrentViolations(
         if n != info.n || m != info.m {
             return FALSE;
         }
-        let result = ip_intermediate::with_current(|ctx| {
-            let data = ctx.data.borrow();
-            let Some(_curr) = data.curr.as_ref() else {
+        let n_us = n as usize;
+        let m_us = m as usize;
+        let Some(it) = ip_intermediate::with_current_user_iterate(|it| it.clone()) else {
+            return FALSE;
+        };
+        let bridge = CURRENT_BRIDGE.with(|c| c.get());
+        if bridge.is_null() {
+            return FALSE;
+        }
+        let bridge = &*bridge;
+        if it.x.len() != n_us
+            || it.z_l.len() != n_us
+            || it.z_u.len() != n_us
+            || it.g.len() != m_us
+            || it.lambda.len() != m_us
+        {
+            return FALSE;
+        }
+        let grad_lag = if grad_lag_x.is_null() || n_us == 0 {
+            None
+        } else if it.grad_lag_x.len() == n_us {
+            // The algorithm's own, from the evaluations it made: no
+            // `eval_grad_f` / `eval_jac_g` call for it.
+            Some(it.grad_lag_x.clone())
+        } else {
+            match bridge.user_grad_lag(&it) {
+                Some(g) => Some(g),
+                None => return FALSE,
+            }
+        };
+        let bounds = pounce_nlp::live_iterate::DeclaredBounds {
+            x_l: &bridge.x_l,
+            x_u: &bridge.x_u,
+            g_l: &bridge.g_l,
+            g_u: &bridge.g_u,
+            lower_inf: bridge.lower_inf,
+            upper_inf: bridge.upper_inf,
+        };
+        let violations = Some(pounce_nlp::live_iterate::current_violations(
+            &it,
+            &bounds,
+            grad_lag,
+            bridge.zero_fixed_grad_lag,
+            scaled != FALSE,
+        ));
+        let Some(v) = violations else {
+            return FALSE;
+        };
+        let copy = |src: &[Number], dst: *mut Number, len: usize| -> bool {
+            if dst.is_null() || len == 0 {
+                return true;
+            }
+            if src.len() != len {
                 return false;
-            };
-            drop(data);
-            let cq = ctx.cq.borrow();
-            let n_us = n as usize;
-            let m_us = m as usize;
-            // No `nlp` borrow may be held across a `cq` accessor that
-            // evaluates through the NLP (`curr_grad_lag_x` reaches
-            // `curr_grad_f`, which takes `nlp.borrow_mut()`); each branch
-            // below therefore borrows `nlp` only to pack a value that has
-            // already been computed. See `GetIpoptCurrentIterate`.
-            // x_L / x_U violations: scatter the compressed slack-shortfalls
-            // up to full-`n`. Upstream defines `x_L_violation_i = max(0, x_L_i
-            // - x_i)`; the algorithm tracks `slack_x_l = P_L^T x - x_L`
-            // (always non-negative at feasible iterates), so reverse the
-            // sign and clamp.
-            if !x_l_violation.is_null() && n_us > 0 {
-                let slack = cq.curr_slack_x_l();
-                let z_l_full = ctx.nlp.borrow().pack_z_l_for_user(&*slack);
-                // Guard the scatter length exactly like the sibling branches
-                // below: an unexpected packed length would otherwise index
-                // `v[i]` out of bounds and panic across this `extern "C"`
-                // boundary (an abort, not a recoverable error).
-                if z_l_full.len() != n_us {
-                    return false;
-                }
-                // pack_z_l_for_user scatters by the same x_L mapping; the
-                // returned vector at full-x positions holds `slack_x_l[i]`
-                // which is `x_i - x_L_i`. Clamp the *negative* part to get
-                // the violation `max(0, x_L_i - x_i)`.
-                let mut v = vec![0.0; n_us];
-                for (i, s) in z_l_full.iter().enumerate() {
-                    v[i] = (-s).max(0.0);
-                }
-                std::ptr::copy_nonoverlapping(v.as_ptr(), x_l_violation, n_us);
             }
-            if !x_u_violation.is_null() && n_us > 0 {
-                let slack = cq.curr_slack_x_u();
-                let s_full = ctx.nlp.borrow().pack_z_u_for_user(&*slack);
-                if s_full.len() != n_us {
-                    return false;
-                }
-                let mut v = vec![0.0; n_us];
-                for (i, s) in s_full.iter().enumerate() {
-                    v[i] = (-s).max(0.0);
-                }
-                std::ptr::copy_nonoverlapping(v.as_ptr(), x_u_violation, n_us);
-            }
-            if !compl_x_l.is_null() && n_us > 0 {
-                let compl = cq.curr_compl_x_l();
-                let v = ctx.nlp.borrow().pack_z_l_for_user(&*compl);
-                if v.len() != n_us {
-                    return false;
-                }
-                std::ptr::copy_nonoverlapping(v.as_ptr(), compl_x_l, n_us);
-            }
-            if !compl_x_u.is_null() && n_us > 0 {
-                let compl = cq.curr_compl_x_u();
-                let v = ctx.nlp.borrow().pack_z_u_for_user(&*compl);
-                if v.len() != n_us {
-                    return false;
-                }
-                std::ptr::copy_nonoverlapping(v.as_ptr(), compl_x_u, n_us);
-            }
-            if !grad_lag_x.is_null() && n_us > 0 {
-                let glx = cq.curr_grad_lag_x();
-                // Scatter compressed x-var → full-x via lift_x_to_full
-                // (treats `glx` as if it were an x-vector). Fixed-variable
-                // slots remain zero.
-                let full = ctx.nlp.borrow().lift_x_to_full(&*glx);
-                if full.len() != n_us {
-                    return false;
-                }
-                std::ptr::copy_nonoverlapping(full.as_ptr(), grad_lag_x, n_us);
-            }
-            if !nlp_constraint_violation.is_null() && m_us > 0 {
-                // Per-row equality and range violation reconstruction in
-                // full-g coordinates is a follow-up. The scalar
-                // `curr_primal_infeasibility_max` (== `inf_pr` reported in
-                // `IterStats`) is the outer summary; populate per-row
-                // detail as a future refinement and zero-fill for now.
-                let zero = vec![0.0; m_us];
-                std::ptr::copy_nonoverlapping(zero.as_ptr(), nlp_constraint_violation, m_us);
-            }
-            if !compl_g.is_null() && m_us > 0 {
-                // Per-row constraint complementarity (`v_L .* s_L` /
-                // `v_U .* s_U` mapped back to full-g) is also a follow-up.
-                let zero = vec![0.0; m_us];
-                std::ptr::copy_nonoverlapping(zero.as_ptr(), compl_g, m_us);
-            }
+            std::ptr::copy_nonoverlapping(src.as_ptr(), dst, len);
             true
-        });
-        if result.unwrap_or(false) { TRUE } else { FALSE }
+        };
+        let ok = copy(&v.x_l_violation, x_l_violation, n_us)
+            && copy(&v.x_u_violation, x_u_violation, n_us)
+            && copy(&v.compl_x_l, compl_x_l, n_us)
+            && copy(&v.compl_x_u, compl_x_u, n_us)
+            && copy(&v.grad_lag_x, grad_lag_x, n_us)
+            && copy(&v.constraint_violation, nlp_constraint_violation, m_us)
+            && copy(&v.compl_g, compl_g, m_us);
+        if ok { TRUE } else { FALSE }
     }
 }
 
@@ -1536,43 +1582,13 @@ fn int_to_cons_status(v: c_int) -> Option<pounce_qp::ConsStatus> {
     }
 }
 
-/// Internal → user row map for the SQP's constraint vector.
-///
-/// The SQP works on a *reordered* constraint vector: equalities first,
-/// inequalities after, each in ascending original index. Its working set
-/// is in that order, and both C entry points copied it positionally
-/// against the caller's row indices — so on HS071, whose rows are
-/// `[x₀x₁x₂x₃ ≥ 25, Σxᵢ² = 40]`, `IpoptGetWorkingSet` reported
-/// `[Equality, AtLower]`: exactly reversed. A caller feeding that back
-/// through `IpoptSetWarmStartWorkingSet`, which is the documented
-/// round-trip, warm-started with the statuses swapped.
-///
-/// The split is a pure function of the bounds — a row is an equality iff
-/// both sides are finite and equal — so the map is reconstructible here,
-/// with no need to plumb `BoundClassification` out of `pounce-nlp`.
-/// Mirrors `tnlp_adapter::classify_bounds`, sentinel test included.
-fn internal_to_user_rows(g_l: &[Number], g_u: &[Number]) -> Vec<usize> {
-    let m = g_l.len();
-    let is_eq =
-        |i: usize| g_l[i] > NLP_LOWER_BOUND_INF && g_u[i] < NLP_UPPER_BOUND_INF && g_l[i] == g_u[i];
-    let mut map: Vec<usize> = (0..m).filter(|&i| is_eq(i)).collect();
-    map.extend((0..m).filter(|&i| !is_eq(i)));
-    map
-}
-
-/// Internal → user variable map for the SQP's bound vector.
-///
-/// Fixed variables (`x_l == x_u`) are removed from the internal problem
-/// altogether, so the working set's bound vector is indexed by *non-fixed*
-/// position. Same reconstruction argument as `internal_to_user_rows`.
-fn internal_to_user_vars(x_l: &[Number], x_u: &[Number]) -> Vec<usize> {
-    (0..x_l.len()).filter(|&i| x_l[i] != x_u[i]).collect()
-}
-
 /// Retrieve the working set produced by the most recent SQP solve
 /// (`algorithm = active-set-sqp`). Buffer sizes are `n` for
 /// `bound_status_out` and `m` for `cons_status_out`. Pass `NULL`
-/// for either to skip that side.
+/// for either to skip that side. Entry `i` is variable `i` / constraint
+/// row `i` in the problem's own order (a variable fixed by
+/// `x_L == x_U` reads `POUNCE_WS_FIXED_OR_EQ`), the same indexing
+/// [`IpoptSetWarmStartWorkingSet`] takes.
 ///
 /// Returns `TRUE` (1) on success, `FALSE` (0) if there is no
 /// working set to retrieve (e.g. no SQP solve has run, the IPM
@@ -1599,28 +1615,28 @@ pub unsafe extern "C" fn IpoptGetWorkingSet(
             Some(w) => w,
             None => return FALSE,
         };
-        // Translate out of the SQP's equalities-first ordering, back into
-        // the caller's row / variable indices.
-        let row_map = internal_to_user_rows(&info.g_l, &info.g_u);
-        let var_map = internal_to_user_vars(&info.x_l, &info.x_u);
-        if ws.constraints.len() != row_map.len() || ws.bounds.len() != var_map.len() {
+        // `last_sqp_working_set` is already in the caller's index spaces —
+        // full `n` (fixed variables read `Fixed`) and `g` row order — so it
+        // is copied positionally. This used to rebuild the SQP's
+        // equalities-first order from the bounds and permute here, which
+        // stopped matching once the application lifted bound statuses to
+        // full `n` (gh#986): with any fixed variable the length check
+        // below failed and this returned FALSE after a successful solve.
+        let n = info.x_l.len();
+        let m = info.g_l.len();
+        if ws.constraints.len() != m || ws.bounds.len() != n {
             // The stored set does not match this problem's shape. Report
             // nothing rather than something mis-indexed.
             return FALSE;
         }
         if !bound_status_out.is_null() {
-            // A fixed variable is absent from the internal problem and so
-            // has no stored status. `Fixed` is what it is.
-            for i in 0..info.x_l.len() {
-                *bound_status_out.add(i) = POUNCE_WS_FIXED_OR_EQ;
-            }
-            for (internal, &user) in var_map.iter().enumerate() {
-                *bound_status_out.add(user) = bound_status_to_int(ws.bounds[internal]);
+            for (i, &s) in ws.bounds.iter().enumerate() {
+                *bound_status_out.add(i) = bound_status_to_int(s);
             }
         }
         if !cons_status_out.is_null() {
-            for (internal, &user) in row_map.iter().enumerate() {
-                *cons_status_out.add(user) = cons_status_to_int(ws.constraints[internal]);
+            for (i, &s) in ws.constraints.iter().enumerate() {
+                *cons_status_out.add(i) = cons_status_to_int(s);
             }
         }
         TRUE
@@ -1630,7 +1646,8 @@ pub unsafe extern "C" fn IpoptGetWorkingSet(
 /// Supply a warm-start working set consumed by the next
 /// [`IpoptSolve`] on this problem. Pass `NULL` for either side to
 /// cold-start it. The caller-owned buffers are copied; reuse
-/// across calls is safe.
+/// across calls is safe. Indexed like [`IpoptGetWorkingSet`]: entry `i`
+/// is variable `i` / constraint row `i` in the problem's own order.
 ///
 /// Returns `TRUE` on success, `FALSE` on (a) NULL problem, (b)
 /// an out-of-range status code in one of the buffers, or
@@ -1658,12 +1675,11 @@ pub unsafe extern "C" fn IpoptSetWarmStartWorkingSet(
         let info = &mut *ipopt_problem;
         let n = info.n.max(0) as usize;
         let m = info.m.max(0) as usize;
-        // The caller indexes by *their* rows and variables; the SQP works
-        // on the reordered, fixed-variables-removed vectors. Translate on
-        // the way in, mirroring `IpoptGetWorkingSet` on the way out, so
-        // the documented get/set round-trip is actually a round-trip.
-        let row_map = internal_to_user_rows(&info.g_l, &info.g_u);
-        let var_map = internal_to_user_vars(&info.x_l, &info.x_u);
+        // The caller indexes by *their* rows and variables, and so does
+        // `IpoptApplication::set_sqp_warm_start`: the solve maps the staged
+        // set into the SQP's equalities-first, fixed-variables-removed
+        // vectors through the problem's own classification, the inverse of
+        // what `IpoptGetWorkingSet` reads out. Staged as given.
         // Validation is not just a range check. A status code says
         // where the point sits relative to a bound — but `Fixed` /
         // `Equality`, and `AtLower` / `AtUpper` against an infinite
@@ -1682,7 +1698,7 @@ pub unsafe extern "C" fn IpoptSetWarmStartWorkingSet(
         // strictly better: the caller already handles FALSE, and this
         // function already returns it for an out-of-range code, so
         // TRUE reasonably reads as "your working set was accepted".
-        let mut bounds = vec![pounce_qp::BoundStatus::Inactive; var_map.len()];
+        let mut bounds = vec![pounce_qp::BoundStatus::Inactive; n];
         if !bound_status_in.is_null() {
             // Validate every entry the caller supplied, including those for
             // fixed variables that the internal problem drops: a wrong
@@ -1704,10 +1720,10 @@ pub unsafe extern "C" fn IpoptSetWarmStartWorkingSet(
                     return FALSE;
                 }
             }
-            for (internal, &user) in var_map.iter().enumerate() {
+            for (i, b) in bounds.iter_mut().enumerate() {
                 // Already range-checked above.
-                if let Some(s) = int_to_bound_status(*bound_status_in.add(user)) {
-                    bounds[internal] = s;
+                if let Some(s) = int_to_bound_status(*bound_status_in.add(i)) {
+                    *b = s;
                 }
             }
         }
@@ -1732,9 +1748,9 @@ pub unsafe extern "C" fn IpoptSetWarmStartWorkingSet(
                     return FALSE;
                 }
             }
-            for (internal, &user) in row_map.iter().enumerate() {
-                if let Some(s) = int_to_cons_status(*cons_status_in.add(user)) {
-                    constraints[internal] = s;
+            for (i, c) in constraints.iter_mut().enumerate() {
+                if let Some(s) = int_to_cons_status(*cons_status_in.add(i)) {
+                    *c = s;
                 }
             }
         }
@@ -1927,6 +1943,117 @@ pub unsafe extern "C" fn IpoptSolveWarmStart(
     })
 }
 
+thread_local! {
+    /// The bridge whose `intermediate_callback` is running, for
+    /// [`GetIpoptCurrentViolations`]; null outside that window.
+    static CURRENT_BRIDGE: std::cell::Cell<*const CCallbackTnlp> =
+        const { std::cell::Cell::new(std::ptr::null()) };
+}
+
+/// `(nlp_lower_bound_inf, nlp_upper_bound_inf, zero_fixed_grad_lag)` for
+/// the bridge fields of the same names.
+pub(crate) fn bridge_violation_options(
+    o: &pounce_common::options_list::OptionsList,
+) -> (Number, Number, bool) {
+    let num = |k: &str, d: Number| {
+        o.get_numeric_value(k, "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .unwrap_or(d)
+    };
+    let relax = matches!(
+        o.get_string_value("fixed_variable_treatment", "")
+            .ok()
+            .and_then(|(v, f)| f.then_some(v))
+            .as_deref(),
+        Some("relax_bounds")
+    );
+    (
+        num("nlp_lower_bound_inf", NLP_LOWER_BOUND_INF),
+        num("nlp_upper_bound_inf", NLP_UPPER_BOUND_INF),
+        !relax,
+    )
+}
+
+struct BridgeGuard {
+    prev: *const CCallbackTnlp,
+}
+
+impl BridgeGuard {
+    fn install(bridge: &CCallbackTnlp) -> Self {
+        let prev = CURRENT_BRIDGE.with(|c| c.replace(bridge as *const _));
+        Self { prev }
+    }
+}
+
+impl Drop for BridgeGuard {
+    fn drop(&mut self) {
+        CURRENT_BRIDGE.with(|c| c.set(self.prev));
+    }
+}
+
+impl CCallbackTnlp {
+    /// `∇f + Jᵀλ − z_L + z_U` at the user-space iterate `it`, through the
+    /// user's own C callbacks (called directly, not through the TNLP the
+    /// callback dispatch holds). `None` if a callback declines.
+    fn user_grad_lag(&self, it: &ip_intermediate::UserIterate) -> Option<Vec<Number>> {
+        let n = self.n as usize;
+        let cb = self.eval_grad_f?;
+        let mut grad = vec![0.0; n];
+        let x = it.x.as_ptr() as *mut Number;
+        if unsafe { cb(self.n, x, TRUE, grad.as_mut_ptr(), self.user_data) } == FALSE {
+            return None;
+        }
+        let nnz = self.nele_jac.max(0) as usize;
+        let (mut rows, mut cols, mut vals) = (vec![0; nnz], vec![0; nnz], vec![0.0; nnz]);
+        if self.m > 0 && nnz > 0 {
+            let jac = self.eval_jac_g?;
+            let structure = unsafe {
+                jac(
+                    self.n,
+                    x,
+                    FALSE,
+                    self.m,
+                    self.nele_jac,
+                    rows.as_mut_ptr(),
+                    cols.as_mut_ptr(),
+                    std::ptr::null_mut(),
+                    self.user_data,
+                )
+            };
+            let values = unsafe {
+                jac(
+                    self.n,
+                    x,
+                    FALSE,
+                    self.m,
+                    self.nele_jac,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    vals.as_mut_ptr(),
+                    self.user_data,
+                )
+            };
+            if structure == FALSE || values == FALSE {
+                return None;
+            }
+        }
+        let off = if self.index_style == 1 { 1 } else { 0 };
+        let to_usize = |v: &[Index]| -> Vec<usize> {
+            v.iter()
+                .map(|&k| usize::try_from(k - off).unwrap_or(usize::MAX))
+                .collect()
+        };
+        Some(pounce_nlp::live_iterate::lagrangian_gradient(
+            it,
+            &grad,
+            &to_usize(&rows),
+            &to_usize(&cols),
+            &vals,
+        ))
+    }
+}
+
 /// Adapter that bridges the user-supplied C callback table to the
 /// in-crate [`TNLP`] trait. Mirrors `Interfaces/IpStdInterfaceTNLP.cpp`
 /// (`StdInterfaceTNLP`); each TNLP method forwards to the matching
@@ -1948,6 +2075,23 @@ pub(crate) struct CCallbackTnlp {
     pub(crate) g_l: Vec<Number>,
     pub(crate) g_u: Vec<Number>,
     pub(crate) initial_x: Vec<Number>,
+    /// The caller's `mult_g` buffer (length `m`), or NULL. Read only by
+    /// [`TNLP::get_starting_point`] under `init_lambda`, i.e. when the
+    /// solve was asked for a dual warm start (`warm_start_init_point=yes`)
+    /// — upstream `StdInterfaceTNLP`'s `start_lam`. A caller that has not
+    /// opted in may pass an uninitialized buffer, which is why this is a
+    /// pointer read lazily under the flag rather than a snapshot taken
+    /// up front. Valid for the whole `IpoptSolve` call: the buffer is
+    /// overwritten with the solution only after the solve (and any
+    /// second-opinion re-solve, which calls `get_starting_point` again)
+    /// has finished.
+    pub(crate) start_lambda: *const Number,
+    /// The caller's `mult_x_L` buffer (length `n`), or NULL. Read under
+    /// `init_z`; see [`CCallbackTnlp::start_lambda`].
+    pub(crate) start_z_l: *const Number,
+    /// The caller's `mult_x_U` buffer (length `n`), or NULL. Read under
+    /// `init_z`; see [`CCallbackTnlp::start_lambda`].
+    pub(crate) start_z_u: *const Number,
     pub(crate) eval_f: Option<Eval_F_CB>,
     pub(crate) eval_grad_f: Option<Eval_Grad_F_CB>,
     pub(crate) eval_g: Option<Eval_G_CB>,
@@ -1962,6 +2106,15 @@ pub(crate) struct CCallbackTnlp {
     /// Snapshot of the nonlinear-variable subset (gh#624), in the
     /// problem's index style.
     pub(crate) nonlinear_vars: Option<Vec<Index>>,
+    /// `nlp_lower_bound_inf` / `nlp_upper_bound_inf` of the solve, for the
+    /// violations `GetIpoptCurrentViolations` measures against `x_l` …
+    /// `g_u` (a side at or beyond these is absent).
+    pub(crate) lower_inf: Number,
+    pub(crate) upper_inf: Number,
+    /// Whether `grad_lag_x` reads `0` at fixed variables: true unless
+    /// `fixed_variable_treatment=relax_bounds`, which keeps them in the
+    /// problem (upstream: `ResortX(…, usefixedvals=false)`).
+    pub(crate) zero_fixed_grad_lag: bool,
     pub(crate) final_status: Option<pounce_nlp::alg_types::SolverReturn>,
     pub(crate) final_x: Vec<Number>,
     pub(crate) final_z_l: Vec<Number>,
@@ -2029,6 +2182,33 @@ impl TNLP for CCallbackTnlp {
     fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
         if !self.initial_x.is_empty() {
             sp.x.copy_from_slice(&self.initial_x);
+        }
+        // Dual warm start, as upstream `StdInterfaceTNLP::get_starting_point`:
+        // under `init_z` / `init_lambda` the caller's `mult_x_L` / `mult_x_U`
+        // / `mult_g` buffers are the starting multipliers. Same sign
+        // convention as the values `finalize_solution` writes back into those
+        // buffers (L = f + lambda'g, z_L, z_U >= 0), so a solve's output feeds
+        // the next solve's input unchanged.
+        //
+        // One deliberate departure: upstream fails the solve when a requested
+        // buffer is NULL. Here NULL means "not supplied" and the slot is left
+        // untouched, so `OrigIpoptNlp`'s NaN "unseeded" marker (gh#622) stands
+        // and the warm-start initializer resolves it, rather than a primal-only
+        // warm start becoming an error.
+        let copy_in = |dst: &mut [Number], src: *const Number| {
+            if !src.is_null() && !dst.is_empty() {
+                // SAFETY: `src` is the caller's buffer of the documented
+                // length (`n` for the bound multipliers, `m` for `mult_g`),
+                // valid for the duration of the enclosing `IpoptSolve`.
+                dst.copy_from_slice(unsafe { std::slice::from_raw_parts(src, dst.len()) });
+            }
+        };
+        if sp.init_z {
+            copy_in(sp.z_l, self.start_z_l);
+            copy_in(sp.z_u, self.start_z_u);
+        }
+        if sp.init_lambda {
+            copy_in(sp.lambda, self.start_lambda);
         }
         true
     }
@@ -2213,6 +2393,13 @@ impl TNLP for CCallbackTnlp {
         self.intermediate_cb.is_some()
     }
 
+    /// A registered callback may call `GetIpoptCurrentIterate` /
+    /// `GetIpoptCurrentViolations`, and nothing says whether it will, so
+    /// the iterate is materialised for every fire it receives.
+    fn wants_current_iterate(&self) -> bool {
+        self.intermediate_cb.is_some()
+    }
+
     fn intermediate_callback(
         &mut self,
         stats: pounce_nlp::tnlp::IterStats,
@@ -2222,6 +2409,11 @@ impl TNLP for CCallbackTnlp {
         let Some(cb) = self.intermediate_cb else {
             return true;
         };
+        // `GetIpoptCurrentViolations` evaluates `∇f` and `J` through this
+        // bridge's C callbacks (the TNLP itself is mutably borrowed by the
+        // dispatch that called us), so it needs the callbacks, `user_data`
+        // and the declared bounds for exactly the duration of `cb`.
+        let _bridge = BridgeGuard::install(self);
         let ok = unsafe {
             cb(
                 stats.mode as Index,

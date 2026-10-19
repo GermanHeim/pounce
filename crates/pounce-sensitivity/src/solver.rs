@@ -2191,6 +2191,69 @@ impl Solver {
             .collect())
     }
 
+    /// Flat rows of the compound KKT vector holding the bound
+    /// multipliers `(z_l, z_u)` for the given 0-based **full-x**
+    /// variable indices. Each side is `None` where the variable has no
+    /// finite bound on that side, or where the solve removed the
+    /// column as fixed (`make_parameter`), which has no row at all.
+    ///
+    /// The `z` counterpart of [`Self::x_primal_rows`]. The `z_l` block
+    /// is NOT indexed by variable: it carries one entry per variable
+    /// with a finite lower bound (the `px_l` expansion's compressed
+    /// space), so `z_l_offset + i` names variable `i`'s multiplier only
+    /// on a model where every variable ahead of it is lower-bounded.
+    /// Any free variable ahead of it shifts the entry onto a
+    /// neighbour's, in range and plausible. Errors with `BadShape` on
+    /// an out-of-range index, and with `SensComputationFailed` when the
+    /// bound expansions could not be recovered.
+    pub fn bound_multiplier_rows(
+        &self,
+        x_indices: &[Index],
+    ) -> Result<Vec<(Option<Index>, Option<Index>)>, SolverError> {
+        let state = self.state.borrow();
+        let state = state.as_ref().ok_or(SolverError::NotConverged)?;
+        let n_full = state.backsolver.n_full_x();
+        if let Some(&bad) = x_indices.iter().find(|&&i| i < 0 || i >= n_full) {
+            return Err(SolverError::BadShape {
+                what: "bound_multiplier_rows variable index",
+                got: bad as usize,
+                expected: n_full as usize,
+            });
+        }
+        let dims = state.backsolver.block_dims();
+        let z_lo = dims[0] + dims[1] + dims[2] + dims[3];
+        let z_hi = z_lo + dims[4] + dims[5];
+        let rows = state.backsolver.bound_rows().ok_or_else(|| {
+            SolverError::SensComputationFailed(
+                "bound_multiplier_rows: bound expansions are not recoverable".into(),
+            )
+        })?;
+        // var-x row -> (z_l row, z_u row). Only the z blocks: a v-block
+        // entry's `var_row` is an s-block row, a valid index into nothing.
+        let mut by_var: Vec<(Option<Index>, Option<Index>)> = vec![(None, None); dims[0]];
+        for br in rows {
+            if br.row < z_lo || br.row >= z_hi || br.var_row >= dims[0] {
+                continue;
+            }
+            let slot = &mut by_var[br.var_row];
+            if br.lower {
+                slot.0 = Some(br.row as Index);
+            } else {
+                slot.1 = Some(br.row as Index);
+            }
+        }
+        // a table lookup through the fixed-variable map, never `i` itself
+        Ok(x_indices
+            .iter()
+            .map(|&i| {
+                state
+                    .backsolver
+                    .full_x_to_var_x(i)
+                    .map_or((None, None), |v| by_var[v as usize])
+            })
+            .collect())
+    }
+
     /// The user TNLP's variable count: the length of a full-x report
     /// and the domain of [`Self::x_primal_rows`].
     pub fn n_full_x(&self) -> Result<usize, SolverError> {

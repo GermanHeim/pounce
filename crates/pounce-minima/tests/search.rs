@@ -268,6 +268,8 @@ impl LocalSolve for Scripted {
             converged: self.converged,
             x: if self.converged { x } else { Vec::new() },
             lambda: Vec::new(),
+            z_l: Vec::new(),
+            z_u: Vec::new(),
             quality: SolveQuality {
                 unscaled_dual_inf: self.dual_inf,
                 unscaled_dual_scale: 1.0,
@@ -759,6 +761,8 @@ impl LocalSolve for ScriptedN {
             converged: true,
             x,
             lambda: Vec::new(),
+            z_l: Vec::new(),
+            z_u: Vec::new(),
             quality: SolveQuality::default(),
         }
     }

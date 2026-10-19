@@ -233,7 +233,9 @@ impl PyProblem {
     ///
     /// The optional `working_set` kwarg (Phase 5c §7.3) accepts a
     /// 2-tuple `(bounds, constraints)` of numpy int arrays
-    /// (length `n` and `m` respectively, status codes 0..=3).
+    /// (length `n` and `m` respectively, status codes 0..=3), indexed
+    /// like `x` and `g`: entry `i` is variable `i` / constraint row `i`
+    /// in the problem's own order (a fixed variable reads 3).
     /// Consumed only by the SQP path (`algorithm = active-set-sqp`);
     /// the IPM ignores it. When provided, it overrides any value
     /// previously stashed via `set_working_set`. After every SQP
@@ -309,7 +311,9 @@ impl PyProblem {
             let zu_warm = bridge_ref.state.z_u0.as_deref();
             // SQP's `lambda_x` follows IPOPT's user-facing
             // convention `lambda_x = z_l − z_u`. When the caller
-            // supplies neither, leave it at zero.
+            // supplies neither, leave it at zero. Everything here is in
+            // the caller's space (`g` order, unscaled, full `n`);
+            // `set_sqp_warm_start` maps it into the algorithm's.
             let lambda_x_warm = match (zl_warm, zu_warm) {
                 (Some(zl), Some(zu)) => zl.iter().zip(zu).map(|(l, u)| l - u).collect(),
                 (Some(zl), None) => zl.to_vec(),

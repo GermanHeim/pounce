@@ -10,21 +10,52 @@
 //!   reinstated with `λ=0` when forwarding `eval_h` / `finalize_solution`
 //!   to the inner TNLP.
 //!
-//!   **Dual-attribution caveat (issue M24).** A row that was *itself* the
+//!   **Dual attribution (issue M24).** A row that was *itself* the
 //!   reason a bound got tightened in Phase 1 — e.g. `x ≥ 2` tightening
 //!   `x_l = 2` — then has an activity interval flush against its own
 //!   bound, so Phase 2 sees it as redundant and drops it. If that bound is
 //!   active at the solution the interior-point method reports the dual on
 //!   the *variable bound* multiplier (`z_l`/`z_u`) against a bound that did
-//!   not exist in the original problem, while the reinstated row keeps
-//!   `λ = 0`. The primal point, objective, and KKT stationarity
-//!   (`∇f − Jᵀλ − z_l + z_u = 0`) are all unaffected — only the *attribution*
-//!   of the dual differs from a no-presolve solve (row multiplier vs. bound
-//!   multiplier). A faithful fix would transfer the bound multiplier back to
-//!   the row's `λ`, but that needs Phase-1 provenance (which row implied
-//!   which bound) that is not currently tracked, and is ambiguous for
-//!   multi-variable rows; it is left as future work. The behavior is pinned
-//!   by `tests::dropped_row_dual_lands_on_bound_not_row` (M24).
+//!   not exist in the original problem. For a **singleton** row Phase 2
+//!   dropped, `finalize_solution` hands that multiplier back to the row
+//!   (`λ = (z_u − z_l)/a`, the bound's side zeroed), and
+//!   `get_starting_point` does the inverse, so the duals agree with a
+//!   no-presolve solve and a `.sol` round-trips; see `SingletonBound`. A
+//!   declared bound tied with the row keeps the multiplier, row `λ = 0`
+//!   (a degenerate pair: `presolve=no`'s interior point splits it roughly
+//!   1:1, and both are valid KKT points; the rule is "the declared bound is
+//!   the incumbent", pinned by `tests/presolve_derived_bound_duals.rs`).
+//!
+//!   **Bounds derived from multi-variable rows** (Phase 1 / FBBT, e.g.
+//!   `x0 = 2·x1, x0 ≥ 4` ⇒ `x1 ≥ 2`, or `x0 = 0.5` then `x0 + x1 ≤ 2` ⇒
+//!   `x1 ≤ 1.5`) are handled by a general postsolve recovery rather than
+//!   per-derivation provenance: `finalize_solution` zeroes every multiplier
+//!   on a *derived* side (presolve's bound strictly tighter than the
+//!   declared one) that the original model does not have active at `x*`,
+//!   and re-solves for the original problem's multipliers on the active
+//!   rows and declared bounds the leftover stationarity residual reaches —
+//!   a sign-constrained least squares, dense over that connected component,
+//!   by a proximal-point iteration started from the reduced solve's own
+//!   multipliers (`dual_recovery`). Where the original multipliers are
+//!   unique this is exactly the `presolve=no` answer; where they are not it
+//!   is a valid KKT multiplier set of the original problem. It runs only
+//!   when a derived side carries a multiplier, and a component past the
+//!   dense cap (600 multipliers / 5000 variables) or a solve that does not
+//!   close stationarity leaves the reduced attribution in place with a
+//!   warning. Inbound, `get_starting_point` moves a Phase-2-dropped row's
+//!   supplied multiplier onto the reduced bounds of the variables it
+//!   touches (`a_ij·λ_i`), so the reduced start is stationary where the
+//!   supplied one was. A `.sol` round-trips through
+//!   `warm_start_init_point=yes max_iter=0` under any warm-start push: the
+//!   recovery above, the singleton hand-back, Phase 0's frames and
+//!   `linear_eq_elim`'s sweep all re-derive multipliers from stationarity
+//!   at the returned `x`, which the default push moved 1e-3 off its bounds,
+//!   so they would be `O(push)` off the supplied duals. Instead each layer
+//!   records the warm start it served and, when the solver hands back the
+//!   served multipliers unchanged, reports the ones it was handed — its
+//!   inbound map's exact inverse on that map's image (`warm_echo`). A cold
+//!   solve records none, so its postsolve is the recovery alone.
+//!   Primal point and objective are unaffected throughout.
 //! * **Phase 3** — structural LICQ check on the surviving equality
 //!   rows. Verdict is published via [`PresolveTnlp::licq_verdict`].
 //! * **Phase 4** — bound-multiplier warm-start hints for variables
@@ -67,6 +98,7 @@ pub mod btf;
 pub mod components;
 pub mod coupling;
 pub mod diagnostics;
+mod dual_recovery;
 pub mod dulmage_mendelsohn;
 pub mod fbbt;
 pub mod incidence;
@@ -74,12 +106,14 @@ pub mod inequality_projection;
 pub mod licq;
 pub mod linear_eq_elim;
 pub mod linear_eq_plan;
+mod live_lift;
 pub mod matching;
 pub mod options;
 pub mod reduction_frame;
 pub mod redundant;
 pub mod trivial_elim;
 pub mod warm;
+mod warm_echo;
 
 pub use block_solve::{
     BlockEquations, BlockSolveError, BlockSolveOptions, BlockSolveOutcome, BlockSolver,
@@ -648,6 +682,35 @@ pub struct PresolveTnlp {
     /// the solver produces otherwise mis-aligns against the `.nl`'s `m`.
     finalized_full_solution: Option<(Vec<Number>, Vec<Number>)>,
 
+    /// `(variable, upper)` for every bound multiplier the last
+    /// `finalize_solution` handed back to the dropped singleton row that
+    /// implied the bound (M24). A caller whose bound-multiplier capture sits
+    /// outside this wrapper zeroes these entries so the `.sol` agrees with
+    /// the `lambda` in [`Self::finalized_full_solution`].
+    bound_multipliers_handed_to_rows: Vec<(usize, bool)>,
+
+    /// `(variable, z_l, z_u)` for every variable whose bound multipliers the
+    /// last `finalize_solution` changed from what the solver handed it — the
+    /// singleton hand-back above, Phase 0's fixed-variable zeroing, and the
+    /// derived-bound recovery (`dual_recovery`). A caller that captured the
+    /// solver's own `z` outside this wrapper overwrites these entries.
+    bound_multiplier_overrides: Vec<(usize, Number, Number)>,
+
+    /// `true` when the last `finalize_solution` changed any multiplier
+    /// beyond lifting it to the original row space (see
+    /// [`Self::postsolve_rewrote_duals`]).
+    duals_rewritten: bool,
+
+    /// What the derived-bound recovery did at the last `finalize_solution`.
+    derived_bound_recovery: Option<dual_recovery::Outcome>,
+    /// The inner evaluations the iteration made, for the live-iterate lift.
+    live_record: live_lift::EvalRecord,
+
+    /// The duals the last `get_starting_point` was handed and served, when
+    /// it served any: `finalize_solution` returns the handed ones when the
+    /// solver gives the served ones back unchanged (`warm_echo`).
+    served_warm_start: Option<warm_echo::ServedWarmStart>,
+
     /// What the most recent starting-point calls actually changed while
     /// projecting the inner seed into this wrapper's row space and box.
     /// Reset by session callers before each solve.
@@ -705,6 +768,125 @@ struct PresolveState {
     /// Phase 0 postsolve stack. Empty until PR 7 wires real frames.
     #[allow(dead_code)]
     reduction_stack: ReductionStack,
+    /// Bounds Phase 1 created from a singleton linear row that Phase 2 then
+    /// dropped (M24): the multiplier the solver reports on such a bound
+    /// belongs to the row. See [`SingletonBound`].
+    singleton_bounds: Vec<SingletonBound>,
+    /// The model's declared box and row bounds, before any presolve pass:
+    /// postsolve judges a reported multiplier against these (M24, derived
+    /// bounds — see `dual_recovery`).
+    decl_x_l: Vec<Number>,
+    decl_x_u: Vec<Number>,
+    decl_g_l: Vec<Number>,
+    decl_g_u: Vec<Number>,
+    /// Linear rows Phase 2 dropped as redundant that are not handled as a
+    /// [`SingletonBound`], with their coefficients: on a warm start their
+    /// supplied multiplier's contribution moves onto the reduced bounds of
+    /// the variables they touch (the inverse of the `dual_recovery`
+    /// postsolve).
+    phase2_dropped_rows: Vec<(usize, Vec<(usize, Number)>)>,
+}
+
+/// A variable bound that exists only because a singleton linear row
+/// `lo ≤ a·x_j ≤ hi` implied it, and that row was dropped as redundant
+/// (issue M24).
+///
+/// The reduced problem has the bound and not the row, so the solver
+/// reports the dual on `z_l[j]` / `z_u[j]`, against a bound the model
+/// never declared. Postsolve hands it back to the row: the bound
+/// contributes `z_u − z_l` to stationarity at `j` and the row contributes
+/// `a·λ` (Ipopt's convention, `∇f + Jᵀλ − z_l + z_u = 0`), so
+/// `λ = (z_u − z_l)/a` with that side's `z` zeroed closes stationarity
+/// exactly as before. Recorded only where the implied bound is strictly
+/// tighter than the declared one; on a tie the multiplier stays on the
+/// declared bound (a valid split of a degenerate pair, the same posture
+/// `linear_eq_elim` takes for transferred bounds).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SingletonBound {
+    /// Inner row index.
+    row: usize,
+    /// Variable index.
+    var: usize,
+    /// The row's coefficient on `var`; non-zero.
+    coeff: Number,
+    /// `true` for the variable's upper bound, `false` for its lower.
+    upper: bool,
+}
+
+/// Find the bounds Phase 1 took from singleton rows that Phase 2 dropped.
+///
+/// `kept_before` is the row mask Phase 2 started from (so rows Phase 0
+/// consumed, whose multipliers its frames recover, are excluded) and
+/// `kept_after` the mask it produced. `x_l` / `x_u` are the presolved box
+/// and `decl_l` / `decl_u` the declared one.
+fn find_singleton_bounds(
+    linear_row_map: &[Option<LinearRow>],
+    kept_before: &[bool],
+    kept_after: &[bool],
+    x_l: &[Number],
+    x_u: &[Number],
+    decl_l: &[Number],
+    decl_u: &[Number],
+) -> Vec<SingletonBound> {
+    let same = |a: Number, b: Number| (a - b).abs() <= 1e-9 * a.abs().max(b.abs()).max(1.0);
+    let mut out = Vec::new();
+    // A side already claimed by an earlier row stays with that row.
+    let mut claimed: std::collections::BTreeSet<(usize, bool)> = Default::default();
+    for (row, lr) in linear_row_map.iter().enumerate() {
+        let Some(lr) = lr else { continue };
+        if !kept_before.get(row).copied().unwrap_or(false)
+            || kept_after.get(row).copied().unwrap_or(true)
+        {
+            continue;
+        }
+        let mut nz = lr.entries.iter().filter(|(_, a)| *a != 0.0);
+        let (Some(&(j, a)), None) = (nz.next(), nz.next()) else {
+            continue;
+        };
+        let j = j as usize;
+        if j >= x_l.len() || !a.is_finite() {
+            continue;
+        }
+        // The variable bounds `lo ≤ a·x ≤ hi` implies, by side.
+        let (imp_l, imp_u) = if a > 0.0 {
+            (
+                lower_bound_present(lr.lo).then(|| lr.lo / a),
+                upper_bound_present(lr.hi).then(|| lr.hi / a),
+            )
+        } else {
+            (
+                upper_bound_present(lr.hi).then(|| lr.hi / a),
+                lower_bound_present(lr.lo).then(|| lr.lo / a),
+            )
+        };
+        if let Some(b) = imp_l
+            && lower_bound_present(x_l[j])
+            && same(x_l[j], b)
+            && (!lower_bound_present(decl_l[j]) || x_l[j] > decl_l[j])
+            && claimed.insert((j, false))
+        {
+            out.push(SingletonBound {
+                row,
+                var: j,
+                coeff: a,
+                upper: false,
+            });
+        }
+        if let Some(b) = imp_u
+            && upper_bound_present(x_u[j])
+            && same(x_u[j], b)
+            && (!upper_bound_present(decl_u[j]) || x_u[j] < decl_u[j])
+            && claimed.insert((j, true))
+        {
+            out.push(SingletonBound {
+                row,
+                var: j,
+                coeff: a,
+                upper: true,
+            });
+        }
+    }
+    out
 }
 
 impl PresolveTnlp {
@@ -721,6 +903,12 @@ impl PresolveTnlp {
             witness_rule: WitnessRule::default(),
             state: None,
             finalized_full_solution: None,
+            bound_multipliers_handed_to_rows: Vec::new(),
+            bound_multiplier_overrides: Vec::new(),
+            duals_rewritten: false,
+            derived_bound_recovery: None,
+            served_warm_start: None,
+            live_record: live_lift::EvalRecord::default(),
             starting_point_projection_report: WarmProjectionReport::default(),
         }
     }
@@ -764,6 +952,12 @@ impl PresolveTnlp {
             witness_rule: WitnessRule::default(),
             state: None,
             finalized_full_solution: None,
+            bound_multipliers_handed_to_rows: Vec::new(),
+            bound_multiplier_overrides: Vec::new(),
+            duals_rewritten: false,
+            derived_bound_recovery: None,
+            served_warm_start: None,
+            live_record: live_lift::EvalRecord::default(),
             starting_point_projection_report: WarmProjectionReport::default(),
         }
     }
@@ -808,6 +1002,288 @@ impl PresolveTnlp {
     /// rather than the reduced kept-row count. See the field docs.
     pub fn finalized_full_solution(&self) -> Option<(Vec<Number>, Vec<Number>)> {
         self.finalized_full_solution.clone()
+    }
+
+    /// The bound multipliers the last `finalize_solution` moved onto a
+    /// dropped singleton row's `lambda`, as `(variable, upper)` (M24). The
+    /// inner TNLP already received them zeroed; this is for a caller that
+    /// captured the solver's own `z` outside the wrapper.
+    pub fn bound_multipliers_handed_to_rows(&self) -> &[(usize, bool)] {
+        &self.bound_multipliers_handed_to_rows
+    }
+
+    /// `(variable, z_l, z_u)` for every variable whose bound multipliers the
+    /// last `finalize_solution` rewrote before forwarding them (M24: the
+    /// singleton hand-back, Phase 0's fixed-variable zeroing, and the
+    /// derived-bound recovery). The values are what the inner TNLP
+    /// received, in its frame (Ipopt's internal convention, both `≥ 0`); a
+    /// caller whose bound-multiplier capture sits outside this wrapper
+    /// writes them over its own.
+    pub fn bound_multiplier_overrides(&self) -> &[(usize, Number, Number)] {
+        &self.bound_multiplier_overrides
+    }
+
+    /// `true` when the last `finalize_solution` rewrote any multiplier
+    /// beyond lifting it into the original row space — so a caller that
+    /// holds its own reduced-space capture must take
+    /// [`Self::finalized_full_solution`]'s `lambda` even when no row was
+    /// dropped.
+    pub fn postsolve_rewrote_duals(&self) -> bool {
+        self.duals_rewritten
+    }
+
+    /// How many multipliers the last `finalize_solution` found on derived
+    /// bounds the original model does not have active, and whether it
+    /// recovered the original problem's multipliers in their place
+    /// (`Some((n_spurious, recovered))`; `None` when there were none). See
+    /// the module docs, "Dual attribution".
+    pub fn derived_bound_dual_recovery(&self) -> Option<(usize, bool)> {
+        self.derived_bound_recovery
+            .as_ref()
+            .filter(|o| o.n_spurious > 0 || o.rolled_back)
+            .map(|o| (o.n_spurious, !o.rolled_back))
+    }
+
+    /// Which sides of each variable's box presolve derived: its bound there
+    /// is strictly tighter than the declared one, or the declared one is
+    /// absent. `None` before init.
+    fn derived_sides(&self) -> Option<(Vec<bool>, Vec<bool>)> {
+        let s = self.state.as_ref()?;
+        let tighter = |p: Number, d: Number, lower: bool| -> bool {
+            let present = if lower {
+                lower_bound_present(p)
+            } else {
+                upper_bound_present(p)
+            };
+            if !present {
+                return false;
+            }
+            let declared = if lower {
+                lower_bound_present(d)
+            } else {
+                upper_bound_present(d)
+            };
+            if !declared {
+                return true;
+            }
+            let gap = if lower { p - d } else { d - p };
+            gap > 1e-9 * d.abs().max(1.0)
+        };
+        let n = s.bounds.x_l.len();
+        let dl = (0..n)
+            .map(|j| tighter(s.bounds.x_l[j], s.decl_x_l[j], true))
+            .collect();
+        let du = (0..n)
+            .map(|j| tighter(s.bounds.x_u[j], s.decl_x_u[j], false))
+            .collect();
+        Some((dl, du))
+    }
+
+    /// Evaluate the original problem's `∇f` and Jacobian triplets
+    /// (0-based) at `x`.
+    fn original_derivatives(
+        &mut self,
+        x: &[Number],
+    ) -> Option<(Vec<Number>, Vec<(usize, usize, Number)>)> {
+        let (n, nnz, one_based) = {
+            let s = self.state.as_ref()?;
+            (
+                s.info_inner.n as usize,
+                s.info_inner.nnz_jac_g as usize,
+                matches!(s.info_inner.index_style, IndexStyle::Fortran),
+            )
+        };
+        let mut grad_f = vec![0.0; n];
+        if !self.inner.borrow_mut().eval_grad_f(x, true, &mut grad_f) {
+            return None;
+        }
+        let mut irow = vec![0 as Index; nnz];
+        let mut jcol = vec![0 as Index; nnz];
+        let mut vals = vec![0.0; nnz];
+        if nnz > 0 {
+            let mut inner = self.inner.borrow_mut();
+            if !inner.eval_jac_g(
+                None,
+                false,
+                SparsityRequest::Structure {
+                    irow: &mut irow,
+                    jcol: &mut jcol,
+                },
+            ) || !inner.eval_jac_g(
+                Some(x),
+                false,
+                SparsityRequest::Values { values: &mut vals },
+            ) {
+                return None;
+            }
+        }
+        let off: Index = if one_based { 1 } else { 0 };
+        let jac = (0..nnz)
+            .filter_map(|k| {
+                let i = irow[k] - off;
+                let j = jcol[k] - off;
+                (i >= 0 && j >= 0).then_some((i as usize, j as usize, vals[k]))
+            })
+            .collect();
+        Some((grad_f, jac))
+    }
+
+    /// The postsolve half of the derived-bound rule (M24; see
+    /// `dual_recovery`). Evaluates the original problem only when some
+    /// derived side carries a multiplier, so a solve that never leans on a
+    /// derived bound is untouched.
+    fn recover_derived_bound_duals(
+        &mut self,
+        x: &[Number],
+        g: &[Number],
+        lambda: &mut [Number],
+        z_l: &mut [Number],
+        z_u: &mut [Number],
+    ) -> Option<dual_recovery::Outcome> {
+        let (derived_l, derived_u) = self.derived_sides()?;
+        let n = x.len();
+        if z_l.len() != n || z_u.len() != n || derived_l.len() != n {
+            return None;
+        }
+        let touched = (0..n).any(|j| {
+            (derived_l[j] && z_l[j].is_finite() && z_l[j] != 0.0)
+                || (derived_u[j] && z_u[j].is_finite() && z_u[j] != 0.0)
+        });
+        if !touched {
+            return None;
+        }
+        let (grad_f, jac) = self.original_derivatives(x)?;
+        let s = self.state.as_ref()?;
+        let view = dual_recovery::KktView {
+            x,
+            g,
+            grad_f: &grad_f,
+            jac: &jac,
+            x_l: &s.decl_x_l,
+            x_u: &s.decl_x_u,
+            g_l: &s.decl_g_l,
+            g_u: &s.decl_g_u,
+            derived_l: &derived_l,
+            derived_u: &derived_u,
+        };
+        let out = dual_recovery::reattribute(&view, lambda, z_l, z_u);
+        if out.rolled_back {
+            tracing::warn!(
+                target: "pounce_presolve",
+                "presolve postsolve: multipliers on derived bounds could not be \
+                 re-attributed to the original problem (component past the dense cap \
+                 or residual not reduced); the reported duals keep the reduced \
+                 problem's attribution"
+            );
+        } else if out.n_spurious > 0 {
+            tracing::debug!(
+                target: "pounce_presolve",
+                n_spurious = out.n_spurious,
+                n_unknowns = out.n_unknowns,
+                residual_before = out.residual_before,
+                residual_after = out.residual_after,
+                "presolve postsolve: re-attributed derived-bound multipliers"
+            );
+        }
+        Some(out)
+    }
+
+    /// The original problem's duals when the solver handed back the warm
+    /// start this wrapper served without moving its duals: the ones the
+    /// caller supplied, `(lambda, z_l, z_u)` (see `warm_echo`). Every
+    /// re-derivation postsolve would otherwise do reads `∇f` at the returned
+    /// `x`, which the interior-point start pushed off the bounds the supplied
+    /// duals belong to. An entry the solver had to fill (a bound multiplier
+    /// supplied as 0 or not at all) is reported as filled when the model
+    /// declares that bound — what `presolve=no` reports — and as 0 on a
+    /// bound only presolve has. `None` on any other return.
+    fn echoed_warm_start(
+        &self,
+        sol: &Solution<'_>,
+    ) -> Option<(Vec<Number>, Vec<Number>, Vec<Number>)> {
+        let w = self.served_warm_start.as_ref()?;
+        if !w.echoed_by(sol.z_l, sol.z_u, sol.lambda) {
+            return None;
+        }
+        let s = self.state.as_ref()?;
+        let n = w.z_l_in.len();
+        if w.z_u_in.len() != n || s.decl_x_l.len() != n || s.bounds.x_l.len() != n {
+            return None;
+        }
+        let side = |z_in: &[Number], z_out: &[Number], got: &[Number], lower: bool| {
+            (0..n)
+                .map(|j| {
+                    let mut z = warm_echo::as_reported_z(z_in[j]);
+                    let declared = if lower {
+                        lower_bound_present(s.decl_x_l[j])
+                    } else {
+                        upper_bound_present(s.decl_x_u[j])
+                    };
+                    // A variable presolve fixed is not one the solver saw:
+                    // whatever it reports there is not a filled seed.
+                    let pinned =
+                        s.bounds.x_l[j] == s.bounds.x_u[j] && s.decl_x_l[j] != s.decl_x_u[j];
+                    if !warm_echo::is_seed(z_out[j]) && declared && !pinned && got[j].is_finite() {
+                        z += got[j];
+                    }
+                    z
+                })
+                .collect::<Vec<_>>()
+        };
+        Some((
+            w.lambda_in
+                .iter()
+                .map(|&l| warm_echo::as_reported_lambda(l))
+                .collect(),
+            side(&w.z_l_in, &w.z_l_out, sol.z_l, true),
+            side(&w.z_u_in, &w.z_u_out, sol.z_u, false),
+        ))
+    }
+
+    /// Record what `finalize_solution` is about to hand the inner TNLP
+    /// (overrides against the solver's `z`, whether any dual was rewritten,
+    /// the full-space `(x, λ)`), then hand it down.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_finalized(
+        &mut self,
+        sol: Solution<'_>,
+        g_full: &[Number],
+        lambda_full: &[Number],
+        lambda_lifted: &[Number],
+        z_l_full: &[Number],
+        z_u_full: &[Number],
+        ip_data: &IpoptData,
+        ip_cq: &IpoptCq,
+    ) {
+        self.bound_multiplier_overrides = (0..z_l_full.len().min(sol.z_l.len()))
+            .filter(|&j| {
+                z_l_full[j].to_bits() != sol.z_l[j].to_bits()
+                    || z_u_full.get(j).map(|z| z.to_bits()) != sol.z_u.get(j).map(|z| z.to_bits())
+            })
+            .map(|j| (j, z_l_full[j], z_u_full.get(j).copied().unwrap_or(0.0)))
+            .collect();
+        self.duals_rewritten = !self.bound_multiplier_overrides.is_empty()
+            || lambda_full
+                .iter()
+                .zip(lambda_lifted)
+                .any(|(a, b)| a.to_bits() != b.to_bits());
+        // Stash the full-space (x, lambda) the inner TNLP is about to
+        // receive so the CLI can prefer it over its reduced-space
+        // capture when sizing the `.sol` / JSON dual block.
+        self.finalized_full_solution = Some((sol.x.to_vec(), lambda_full.to_vec()));
+        self.inner.borrow_mut().finalize_solution(
+            Solution {
+                status: sol.status,
+                x: sol.x,
+                z_l: z_l_full,
+                z_u: z_u_full,
+                g: g_full,
+                lambda: lambda_full,
+                obj_value: sol.obj_value,
+            },
+            ip_data,
+            ip_cq,
+        );
     }
 
     /// Clear the record of transformations applied by
@@ -890,6 +1366,7 @@ impl PresolveTnlp {
     /// after fingerprint-invisible changes (FBBT tapes).
     pub fn invalidate(&mut self) {
         self.state = None;
+        self.served_warm_start = None;
         self.reset_starting_point_projection_report();
     }
 
@@ -1582,6 +2059,7 @@ impl PresolveTnlp {
         // tightened) box. Non-linear rows are never dropped. The
         // `row_kept_inner` mask was initialised above by Phase 0.
         let mut n_dropped_rows: Index = 0;
+        let kept_before_phase2 = row_kept_inner.clone();
         if self.opts.redundant_constraint_removal {
             let redundant_mask = find_redundant_rows(&linear_rows, &x_l, &x_u, 1e-9);
             // `redundant_mask` aligns with the *kept* linear rows
@@ -1590,6 +2068,37 @@ impl PresolveTnlp {
             n_dropped_rows =
                 apply_redundant_verdicts(&linear_row_map, &redundant_mask, &mut row_kept_inner);
         }
+
+        let singleton_bounds = find_singleton_bounds(
+            &linear_row_map,
+            &kept_before_phase2,
+            &row_kept_inner,
+            &x_l,
+            &x_u,
+            &inner_x_l,
+            &inner_x_u,
+        );
+        let phase2_dropped_rows: Vec<(usize, Vec<(usize, Number)>)> = linear_row_map
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| {
+                kept_before_phase2.get(*i).copied().unwrap_or(false)
+                    && !row_kept_inner.get(*i).copied().unwrap_or(true)
+                    && !singleton_bounds.iter().any(|sb| sb.row == *i)
+            })
+            .filter_map(|(i, lr)| {
+                lr.as_ref().map(|lr| {
+                    (
+                        i,
+                        lr.entries
+                            .iter()
+                            .filter(|(_, a)| *a != 0.0 && a.is_finite())
+                            .map(|&(j, a)| (j as usize, a))
+                            .collect(),
+                    )
+                })
+            })
+            .collect();
 
         // Phase 3: structural LICQ check on the kept equality rows.
         let licq_verdict = if self.opts.licq_check {
@@ -1693,6 +2202,12 @@ impl PresolveTnlp {
             scratch_lambda: vec![0.0; m_in],
             aux_diagnostics,
             reduction_stack,
+            singleton_bounds,
+            decl_x_l: inner_x_l,
+            decl_x_u: inner_x_u,
+            decl_g_l: g_l_inner,
+            decl_g_u: g_u_inner,
+            phase2_dropped_rows,
         });
         self.state.as_ref()
     }
@@ -1762,6 +2277,7 @@ impl TNLP for PresolveTnlp {
     fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
         // n is unchanged by presolve; lambda warm-start is masked to
         // kept rows only (caller already sized `sp.lambda` to m_out).
+        self.served_warm_start = None;
         let Some(_) = self.ensure_init() else {
             return false;
         };
@@ -1769,8 +2285,12 @@ impl TNLP for PresolveTnlp {
         // and project lambda down. Most users don't warm-start
         // duals, so this hits the no-op path.
         let m_in = self.state.as_ref().expect("inited").info_inner.m as usize;
-        let mut z_l_full = vec![0.0; sp.z_l.len()];
-        let mut z_u_full = vec![0.0; sp.z_u.len()];
+        // Start from the caller's buffers, not zeros: `OrigIpoptNlp` fills
+        // them with NaN to mean "unseeded" (gh#622), and an inner TNLP that
+        // supplies no bound multipliers must leave that marker standing. A
+        // zero fill turned a primal-only warm start into "z = 0 supplied".
+        let mut z_l_full = sp.z_l.to_vec();
+        let mut z_u_full = sp.z_u.to_vec();
         let mut lambda_full = vec![0.0; m_in];
         let ok = self.inner.borrow_mut().get_starting_point(StartingPoint {
             init_x: sp.init_x,
@@ -1784,9 +2304,74 @@ impl TNLP for PresolveTnlp {
         if !ok {
             return false;
         }
+        // What the caller handed, before any seeding below (`warm_echo`).
+        let handed = (sp.init_z || sp.init_lambda)
+            .then(|| (z_l_full.clone(), z_u_full.clone(), lambda_full.clone()));
+        let s = self.state.as_ref().expect("inited");
+        // M24, inbound: a dropped singleton row's supplied multiplier is the
+        // bound multiplier of the bound presolve made from it — the inverse
+        // of the hand-back in `finalize_solution`, so a `.sol` round-trips.
+        if sp.init_z && sp.init_lambda {
+            for sb in &s.singleton_bounds {
+                let Some(&lam) = lambda_full.get(sb.row) else {
+                    continue;
+                };
+                // Contribution to stationarity at the variable: `+a·λ`,
+                // which the bound carries as `+z_u` or `−z_l`.
+                let c = sb.coeff * lam;
+                if !c.is_finite() {
+                    continue;
+                }
+                let (side, z) = if sb.upper {
+                    (&mut z_u_full, c)
+                } else {
+                    (&mut z_l_full, -c)
+                };
+                if z > 0.0
+                    && let Some(dst) = side.get_mut(sb.var)
+                {
+                    *dst = if dst.is_finite() { *dst + z } else { z };
+                }
+            }
+            // M24, derived bounds, inbound: a multi-variable row Phase 2
+            // dropped is not in the reduced problem, so its supplied
+            // multiplier's contribution to stationarity, `a_ij·λ_i` at each
+            // variable it touches, can only be carried there by the reduced
+            // bound on that variable — the derived bound the row helped
+            // imply. Seed it so the reduced start is as stationary as the
+            // supplied one; `finalize_solution`'s recovery moves it back.
+            let n = z_l_full.len();
+            let mut net = vec![0.0; n];
+            for (row, entries) in &s.phase2_dropped_rows {
+                let Some(&lam) = lambda_full.get(*row) else {
+                    continue;
+                };
+                if !lam.is_finite() || lam == 0.0 {
+                    continue;
+                }
+                for &(j, a) in entries {
+                    if let Some(v) = net.get_mut(j) {
+                        *v += a * lam;
+                    }
+                }
+            }
+            for (j, &c) in net.iter().enumerate() {
+                if !c.is_finite() || c == 0.0 {
+                    continue;
+                }
+                // `+c` in stationarity is carried as `+z_u` or `−z_l`.
+                let (side, z, present) = if c > 0.0 {
+                    (&mut z_u_full, c, upper_bound_present(s.bounds.x_u[j]))
+                } else {
+                    (&mut z_l_full, -c, lower_bound_present(s.bounds.x_l[j]))
+                };
+                if present && let Some(dst) = side.get_mut(j) {
+                    *dst = if dst.is_finite() { *dst + z } else { z };
+                }
+            }
+        }
         sp.z_l.copy_from_slice(&z_l_full);
         sp.z_u.copy_from_slice(&z_u_full);
-        let s = self.state.as_ref().expect("inited");
         let mut x_fixed_overridden_count = None;
         let mut x_clamped_count = None;
         // Project the served primal into the reduced box the solver
@@ -1858,6 +2443,28 @@ impl TNLP for PresolveTnlp {
         if let Some(value) = x_clamped_count {
             self.starting_point_projection_report.x_clamped_count = value;
         }
+        // Record what was served, so `finalize_solution` can recognise it
+        // coming back unchanged. An entry the solver ignores (`init_z` /
+        // `init_lambda` off) is recorded as NaN, i.e. "not a seed".
+        let served = handed.map(|(z_l_in, z_u_in, lambda_in)| warm_echo::ServedWarmStart {
+            z_l_in,
+            z_u_in,
+            lambda_in,
+            z_l_out: warm_echo::served_bound_multipliers(
+                sp.init_z,
+                sp.z_l,
+                &s.bounds.x_l,
+                &s.bounds.x_u,
+            ),
+            z_u_out: warm_echo::served_bound_multipliers(
+                sp.init_z,
+                sp.z_u,
+                &s.bounds.x_l,
+                &s.bounds.x_u,
+            ),
+            lambda_out: warm_echo::served_row_multipliers(sp.init_lambda, sp.lambda),
+        });
+        self.served_warm_start = served;
         true
     }
 
@@ -1866,7 +2473,11 @@ impl TNLP for PresolveTnlp {
     }
 
     fn eval_grad_f(&mut self, x: &[Number], new_x: bool, grad_f: &mut [Number]) -> bool {
-        self.inner.borrow_mut().eval_grad_f(x, new_x, grad_f)
+        let ok = self.inner.borrow_mut().eval_grad_f(x, new_x, grad_f);
+        if ok && self.live_record.enabled(&self.inner) {
+            self.live_record.grad_f(x, grad_f);
+        }
+        ok
     }
 
     fn eval_g(&mut self, x: &[Number], new_x: bool, g: &mut [Number]) -> bool {
@@ -1876,6 +2487,9 @@ impl TNLP for PresolveTnlp {
         let s = self.state.as_mut().expect("inited");
         if !self.inner.borrow_mut().eval_g(x, new_x, &mut s.scratch_g) {
             return false;
+        }
+        if self.live_record.enabled(&self.inner) {
+            self.live_record.g(x, &s.scratch_g);
         }
         for (outer, &i_inner) in s.rows_kept.iter().enumerate() {
             g[outer] = s.scratch_g[i_inner];
@@ -1904,6 +2518,11 @@ impl TNLP for PresolveTnlp {
                     },
                 ) {
                     return false;
+                }
+                if let Some(x) = x
+                    && self.live_record.enabled(&self.inner)
+                {
+                    self.live_record.jac(x, &s.scratch_jac);
                 }
                 for (outer_k, &inner_k) in s.jac_kept_idx.iter().enumerate() {
                     values[outer_k] = s.scratch_jac[inner_k];
@@ -1998,6 +2617,30 @@ impl TNLP for PresolveTnlp {
                 matches!(s.info_inner.index_style, IndexStyle::Fortran),
             )
         };
+
+        // A warm start the solver handed back without moving its duals: the
+        // original problem's duals are the ones the caller supplied, not a
+        // re-derivation from stationarity at the pushed `x` (`warm_echo`).
+        if let Some((lambda_e, z_l_e, z_u_e)) = self.echoed_warm_start(&sol) {
+            tracing::debug!(
+                target: "pounce_presolve",
+                "presolve postsolve: the solver returned the served warm start unchanged; \
+                 reporting the supplied duals"
+            );
+            self.bound_multipliers_handed_to_rows.clear();
+            self.derived_bound_recovery = None;
+            self.forward_finalized(
+                sol,
+                &g_full,
+                &lambda_e,
+                &lambda_full,
+                &z_l_e,
+                &z_u_e,
+                ip_data,
+                ip_cq,
+            );
+            return;
+        }
 
         // Phase-0 (issue #53) multiplier recovery for dropped rows.
         // Walk the reduction stack top-down; for each frame, compute
@@ -2111,20 +2754,50 @@ impl TNLP for PresolveTnlp {
                 }
             }
         }
-        // Stash the full-space (x, lambda) the inner TNLP is about to
-        // receive so the CLI can prefer it over its reduced-space
-        // capture when sizing the `.sol` / JSON dual block.
-        self.finalized_full_solution = Some((sol.x.to_vec(), lambda_full.clone()));
-        self.inner.borrow_mut().finalize_solution(
-            Solution {
-                status: sol.status,
-                x: sol.x,
-                z_l: &z_l_full,
-                z_u: &z_u_full,
-                g: &g_full,
-                lambda: &lambda_full,
-                obj_value: sol.obj_value,
-            },
+        let lambda_lifted = lambda_full.clone();
+        // M24: a bound that exists only because a dropped singleton row
+        // implied it hands its multiplier back to that row.
+        self.bound_multipliers_handed_to_rows.clear();
+        {
+            let s = self.state.as_ref().expect("inited");
+            for sb in &s.singleton_bounds {
+                let side = if sb.upper {
+                    &mut z_u_full
+                } else {
+                    &mut z_l_full
+                };
+                let (Some(z), Some(lam)) = (side.get_mut(sb.var), lambda_full.get_mut(sb.row))
+                else {
+                    continue;
+                };
+                if !z.is_finite() || *z == 0.0 {
+                    continue;
+                }
+                let signed = if sb.upper { *z } else { -*z };
+                *lam += signed / sb.coeff;
+                *z = 0.0;
+                self.bound_multipliers_handed_to_rows
+                    .push((sb.var, sb.upper));
+            }
+        }
+        // M24, derived bounds: a multiplier the solver put on a bound
+        // presolve derived from rows, where the original model has no
+        // active bound, is not a multiplier of the original problem.
+        // Recover the original problem's in its place (`dual_recovery`).
+        self.derived_bound_recovery = self.recover_derived_bound_duals(
+            sol.x,
+            &g_full,
+            &mut lambda_full,
+            &mut z_l_full,
+            &mut z_u_full,
+        );
+        self.forward_finalized(
+            sol,
+            &g_full,
+            &lambda_full,
+            &lambda_lifted,
+            &z_l_full,
+            &z_u_full,
             ip_data,
             ip_cq,
         );
@@ -2229,12 +2902,65 @@ impl TNLP for PresolveTnlp {
         self.inner.borrow().wants_intermediate_callback()
     }
 
+    fn wants_current_iterate(&self) -> bool {
+        self.inner.borrow().wants_current_iterate()
+    }
+
     fn intermediate_callback(
         &mut self,
         stats: IterStats,
         ip_data: &IpoptData,
         ip_cq: &IpoptCq,
     ) -> bool {
+        // The live iterate arrives in this layer's (row-dropped) space;
+        // hand the inner TNLP its own, lifted by `finalize_solution`'s
+        // rule. The lift runs that function, so the state it records about
+        // the *final* solution is put back afterwards.
+        let lifted = match self.get_nlp_info() {
+            Some(info) => {
+                // Every field `finalize_solution` writes, including the
+                // derived-bound dual recovery's, so a lift never leaves a
+                // live iterate's record where the final solution's belongs.
+                let saved = (
+                    self.finalized_full_solution.take(),
+                    std::mem::take(&mut self.bound_multipliers_handed_to_rows),
+                    std::mem::take(&mut self.bound_multiplier_overrides),
+                    self.duals_rewritten,
+                    self.derived_bound_recovery.take(),
+                );
+                // Columns are the inner ones; outer row `k` is inner
+                // `rows_kept[k]`.
+                let cols: Vec<usize> = (0..info.n as usize).collect();
+                let rows: Vec<usize> = self
+                    .state
+                    .as_ref()
+                    .map(|s| s.rows_kept.clone())
+                    .unwrap_or_else(|| (0..info.m as usize).collect());
+                let lifted = live_lift::lift(
+                    self,
+                    |s| &mut s.inner,
+                    (info.n as usize, info.m as usize),
+                    // Every column is kept, so no declared bound is needed.
+                    live_lift::LiftMaps {
+                        cols: &cols,
+                        rows: &rows,
+                        declared_x_l: &[],
+                        declared_x_u: &[],
+                        record: self.live_record.clone(),
+                    },
+                );
+                (
+                    self.finalized_full_solution,
+                    self.bound_multipliers_handed_to_rows,
+                    self.bound_multiplier_overrides,
+                    self.duals_rewritten,
+                    self.derived_bound_recovery,
+                ) = saved;
+                lifted
+            }
+            None => None,
+        };
+        let _lifted = lifted.map(pounce_nlp::live_iterate::UserIterateGuard::install);
         self.inner
             .borrow_mut()
             .intermediate_callback(stats, ip_data, ip_cq)
@@ -3409,11 +4135,14 @@ mod tests {
         );
     }
 
-    /// Single-variable `min x` with one linear row `x ≥ 2` (M24). Phase 1
-    /// tightens `x_l = 2` from the row; Phase 2 then sees the row's activity
-    /// `[2, 10] ⊆ [2, +∞)` and drops it as redundant.
-    struct MinXWithLowerRow;
-    impl TNLP for MinXWithLowerRow {
+    /// `min x` over `x ∈ [decl_l, 10]` with one linear row `a·x` bounded so
+    /// that it reads `x ≥ 2` for either sign of `a` — the M24 shape: Phase 1
+    /// turns the row into `x_l = 2` and Phase 2 drops it as redundant.
+    struct SingletonLowerRow {
+        a: Number,
+        decl_l: Number,
+    }
+    impl TNLP for SingletonLowerRow {
         fn get_nlp_info(&mut self) -> Option<NlpInfo> {
             Some(NlpInfo {
                 n: 1,
@@ -3424,15 +4153,25 @@ mod tests {
             })
         }
         fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
-            b.x_l[0] = 0.0;
+            b.x_l[0] = self.decl_l;
             b.x_u[0] = 10.0;
-            b.g_l[0] = 2.0; // x ≥ 2
-            b.g_u[0] = 1e19;
+            if self.a > 0.0 {
+                b.g_l[0] = 2.0 * self.a;
+                b.g_u[0] = 1e19;
+            } else {
+                b.g_l[0] = -1e19;
+                b.g_u[0] = 2.0 * self.a;
+            }
             true
         }
         fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
             if sp.init_x {
                 sp.x[0] = 5.0;
+            }
+            if sp.init_lambda {
+                // The row multiplier a `presolve=no` solve reports:
+                // `∇f + a·λ = 0` with `∇f = 1`.
+                sp.lambda[0] = -1.0 / self.a;
             }
             true
         }
@@ -3444,7 +4183,7 @@ mod tests {
             true
         }
         fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
-            g[0] = x[0];
+            g[0] = self.a * x[0];
             true
         }
         fn eval_jac_g(
@@ -3459,7 +4198,7 @@ mod tests {
                     jcol[0] = 0;
                 }
                 SparsityRequest::Values { values } => {
-                    values[0] = 1.0;
+                    values[0] = self.a;
                 }
             }
             true
@@ -3471,78 +4210,255 @@ mod tests {
         fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
     }
 
-    /// Characterizes the M24 dual-attribution behavior (see the module-level
-    /// "Dual-attribution caveat"). A redundant row that *implied* a now-active
-    /// bound is dropped; the dual lands on the variable-bound multiplier
-    /// (`z_l`) rather than the row's `λ`, which stays 0. The primal point and
-    /// KKT stationarity are intact — only the attribution differs from a
-    /// no-presolve solve. Pins the current behavior so a future provenance-
-    /// based dual-transfer fix has an explicit target (the `λ == 0` assertion
-    /// is what such a fix would flip to `λ == z_l`).
-    #[test]
-    fn dropped_row_dual_lands_on_bound_not_row() {
-        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(MinXWithLowerRow));
+    /// Finalize `SingletonLowerRow` at its optimum `x = 2` with the reduced
+    /// solve's `z_l = 1` on the presolve-made bound, returning the full-space
+    /// row multiplier and the handed-back list.
+    fn finalize_singleton(a: Number, decl_l: Number) -> (Number, Vec<(usize, bool)>) {
+        let inner: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(SingletonLowerRow { a, decl_l }));
         let opts = PresolveOptions {
             enabled: true,
             bound_tightening: true,
             redundant_constraint_removal: true,
             ..PresolveOptions::defaults()
         };
-        let mut wrapped = PresolveTnlp::new(Rc::clone(&inner), opts);
+        let mut wrapped = PresolveTnlp::new(inner, opts);
         let info = wrapped.get_nlp_info().expect("init ok");
-
-        // Phase 1 tightened the bound from the row; Phase 2 dropped the row.
-        assert_eq!(
-            wrapped.n_dropped_rows(),
-            1,
-            "the `x ≥ 2` row must be dropped"
+        assert_eq!(wrapped.n_dropped_rows(), 1, "a={a}: the row is dropped");
+        assert_eq!(info.m, 0);
+        let b = wrapped.cached_bounds().expect("inited");
+        assert!((b.x_l[0] - 2.0).abs() < 1e-12, "a={a}: x_l = {}", b.x_l[0]);
+        let (x, z_l, z_u) = ([2.0], [1.0], [0.0]);
+        let (g, lambda): ([Number; 0], [Number; 0]) = ([], []);
+        wrapped.finalize_solution(
+            Solution {
+                status: pounce_nlp::alg_types::SolverReturn::Success,
+                x: &x,
+                z_l: &z_l,
+                z_u: &z_u,
+                g: &g,
+                lambda: &lambda,
+                obj_value: 2.0,
+            },
+            &IpoptData::default(),
+            &IpoptCq::default(),
         );
-        assert_eq!(info.m, 0, "reduced problem has no rows");
+        let (_, lamf) = wrapped.finalized_full_solution().expect("finalized");
+        assert_eq!(lamf.len(), 1, "full-space lambda regains the original row");
+        (lamf[0], wrapped.bound_multipliers_handed_to_rows().to_vec())
+    }
+
+    /// M24 (see the module-level "Dual-attribution caveat"): the multiplier
+    /// of a bound presolve made from a singleton row it then dropped goes
+    /// back to the row, as a `presolve=no` solve reports it. Ipopt's
+    /// convention, `∇f + Jᵀλ − z_l + z_u = 0`: `1 + a·λ − 0 = 0`, so
+    /// `λ = −1/a`, for either sign of `a` (with `a < 0` the row's *upper*
+    /// side implies the variable's *lower* bound).
+    #[test]
+    fn dropped_singleton_row_takes_back_its_bound_dual() {
+        for a in [1.0, 4.0, -1.0, -0.5] {
+            let (lam, handed) = finalize_singleton(a, 0.0);
+            assert!(
+                (lam - (-1.0 / a)).abs() < 1e-12,
+                "a={a}: dropped-row λ = {lam}, expected {}",
+                -1.0 / a
+            );
+            assert_eq!(handed, vec![(0, false)], "a={a}: z_l[0] was handed back");
+            // Stationarity with the bound multiplier zeroed.
+            let stat = 1.0 + a * lam;
+            assert!(
+                stat.abs() < 1e-12,
+                "a={a}: KKT stationarity residual {stat}"
+            );
+        }
+    }
+
+    /// A declared bound that already sits where the row puts it keeps its
+    /// multiplier: the two are a degenerate pair and the tie goes to the
+    /// incumbent, as for `linear_eq_elim`'s transferred bounds.
+    #[test]
+    fn a_declared_bound_tied_with_the_row_keeps_its_dual() {
+        let (lam, handed) = finalize_singleton(1.0, 2.0);
+        assert_eq!(lam, 0.0, "the row is redundant against the declared bound");
+        assert!(handed.is_empty(), "{handed:?}");
+    }
+
+    /// The inverse, for a warm start: the dropped row's supplied multiplier
+    /// becomes the bound multiplier of the bound presolve made from it, so
+    /// a `.sol` written through presolve round-trips.
+    #[test]
+    fn a_warm_row_multiplier_seeds_the_bound_presolve_made_from_it() {
+        for a in [1.0, -0.5] {
+            let inner: Rc<RefCell<dyn TNLP>> =
+                Rc::new(RefCell::new(SingletonLowerRow { a, decl_l: 0.0 }));
+            let opts = PresolveOptions {
+                enabled: true,
+                bound_tightening: true,
+                redundant_constraint_removal: true,
+                ..PresolveOptions::defaults()
+            };
+            let mut wrapped = PresolveTnlp::new(inner, opts);
+            let _ = wrapped.get_nlp_info().expect("init ok");
+            let (mut x, mut z_l, mut z_u) = ([0.0], [Number::NAN], [Number::NAN]);
+            let mut lambda: [Number; 0] = [];
+            assert!(wrapped.get_starting_point(StartingPoint {
+                init_x: true,
+                x: &mut x,
+                init_z: true,
+                z_l: &mut z_l,
+                z_u: &mut z_u,
+                init_lambda: true,
+                lambda: &mut lambda,
+            }));
+            assert!((z_l[0] - 1.0).abs() < 1e-12, "a={a}: z_l = {}", z_l[0]);
+            assert!(z_u[0].is_nan(), "a={a}: the upper side stays unseeded");
+        }
+    }
+
+    /// `min (x0+1)² + (x1−3)²  s.t.  C0: x0 = 0.5,  C1: x0 + x1 ≤ 2`, no
+    /// declared bounds. Presolve fixes x0 from C0, derives `x1 ≤ 1.5` from
+    /// C1, and drops both rows (M24, derived bounds). At `x* = (0.5, 1.5)`
+    /// the original multipliers are unique: `λ = (−6, 3)`, no bound
+    /// multipliers.
+    struct DerivedChain;
+    impl TNLP for DerivedChain {
+        fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+            Some(NlpInfo {
+                n: 2,
+                m: 2,
+                nnz_jac_g: 3,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l.fill(-1e19);
+            b.x_u.fill(1e19);
+            b.g_l.copy_from_slice(&[0.5, -1e19]);
+            b.g_u.copy_from_slice(&[0.5, 2.0]);
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            if sp.init_x {
+                sp.x.copy_from_slice(&[0.5, 1.5]);
+            }
+            if sp.init_lambda {
+                sp.lambda.copy_from_slice(&[-6.0, 3.0]);
+            }
+            true
+        }
+        fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+            Some((x[0] + 1.0).powi(2) + (x[1] - 3.0).powi(2))
+        }
+        fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = 2.0 * (x[0] + 1.0);
+            g[1] = 2.0 * (x[1] - 3.0);
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = x[0];
+            g[1] = x[0] + x[1];
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            _x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow.copy_from_slice(&[0, 1, 1]);
+                    jcol.copy_from_slice(&[0, 0, 1]);
+                }
+                SparsityRequest::Values { values } => values.copy_from_slice(&[1.0, 1.0, 1.0]),
+            }
+            true
+        }
+        fn get_constraints_linearity(&mut self, types: &mut [Linearity]) -> bool {
+            types.fill(Linearity::Linear);
+            true
+        }
+        fn finalize_solution(&mut self, _sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+    }
+
+    fn derived_chain() -> PresolveTnlp {
+        let opts = PresolveOptions {
+            enabled: true,
+            bound_tightening: true,
+            redundant_constraint_removal: true,
+            ..PresolveOptions::defaults()
+        };
+        let mut wrapped = PresolveTnlp::new(Rc::new(RefCell::new(DerivedChain)), opts);
+        let info = wrapped.get_nlp_info().expect("init ok");
+        assert_eq!(info.m, 0, "both rows are dropped");
         let b = wrapped.cached_bounds().expect("inited");
         assert!(
-            (b.x_l[0] - 2.0).abs() < 1e-12,
-            "x_l tightened to 2 by the row, got {}",
-            b.x_l[0]
+            (b.x_u[1] - 1.5).abs() < 1e-12,
+            "x1 ≤ 1.5 derived: {}",
+            b.x_u[1]
         );
+        wrapped
+    }
 
-        // Reduced solve at the optimum x=2: the bound `x ≥ 2` (which presolve
-        // created — the original lower bound was 0) is active, so the IPM puts
-        // the dual on z_l. ∇f = 1, so stationarity ∇f − z_l = 0 ⇒ z_l = 1.
-        let x = [2.0];
-        let z_l = [1.0];
-        let z_u = [0.0];
-        let g: [Number; 0] = [];
-        let lambda: [Number; 0] = [];
-        let sol = Solution {
-            status: pounce_nlp::alg_types::SolverReturn::Success,
-            x: &x,
-            z_l: &z_l,
-            z_u: &z_u,
-            g: &g,
-            lambda: &lambda,
-            obj_value: 2.0,
-        };
-        wrapped.finalize_solution(sol, &IpoptData::default(), &IpoptCq::default());
-        let (xf, lamf) = wrapped.finalized_full_solution().expect("finalized");
-
-        // Primal is correct.
-        assert!((xf[0] - 2.0).abs() < 1e-12, "primal x = 2");
-        // M24: the reinstated row keeps λ = 0 — the dual is *not* transferred
-        // back from the bound multiplier. (A dual-transfer fix would make this
-        // `≈ z_l = 1`.)
-        assert_eq!(lamf.len(), 1, "full-space lambda regains the original row");
+    /// Outbound: the reduced solve's `z_U(x1) = 3` on the derived bound and
+    /// x0's fixed-variable multiplier go back to C1 and C0.
+    #[test]
+    fn a_derived_bound_multiplier_is_recovered_onto_its_rows() {
+        let mut wrapped = derived_chain();
+        // Reduced stationarity: x0 (fixed) 3 − z_l = 0; x1 −3 + z_u = 0.
+        let (x, z_l, z_u) = ([0.5, 1.5], [3.0, 0.0], [0.0, 3.0]);
+        let (g, lambda): ([Number; 0], [Number; 0]) = ([], []);
+        wrapped.finalize_solution(
+            Solution {
+                status: pounce_nlp::alg_types::SolverReturn::Success,
+                x: &x,
+                z_l: &z_l,
+                z_u: &z_u,
+                g: &g,
+                lambda: &lambda,
+                obj_value: 4.5,
+            },
+            &IpoptData::default(),
+            &IpoptCq::default(),
+        );
+        let (_, lam) = wrapped.finalized_full_solution().expect("finalized");
         assert!(
-            lamf[0].abs() < 1e-12,
-            "M24: dropped-row λ stays 0 (dual sits on z_l instead), got {}",
-            lamf[0]
+            (lam[0] + 6.0).abs() < 1e-9 && (lam[1] - 3.0).abs() < 1e-9,
+            "λ = {lam:?}"
         );
-        // KKT stationarity ∇f − Jᵀλ − z_l + z_u = 0 still holds with the dual
-        // on z_l (1 − 1·0 − 1 + 0 = 0): the certificate is valid, only the
-        // attribution differs.
-        let grad_f = 1.0;
-        let jac = 1.0; // ∂g0/∂x
-        let stat = grad_f - jac * lamf[0] - z_l[0] + z_u[0];
-        assert!(stat.abs() < 1e-12, "KKT stationarity residual {stat}");
+        assert_eq!(wrapped.derived_bound_dual_recovery(), Some((1, true)));
+        let ov = wrapped.bound_multiplier_overrides().to_vec();
+        assert!(
+            ov.iter().all(|&(_, l, u)| l.abs() < 1e-9 && u.abs() < 1e-9) && ov.len() == 2,
+            "{ov:?}"
+        );
+        assert!(wrapped.postsolve_rewrote_duals());
+    }
+
+    /// Inbound: C1's supplied multiplier seeds the derived bound it implies,
+    /// so the reduced start is stationary where the supplied one was.
+    #[test]
+    fn a_dropped_rows_warm_multiplier_seeds_the_derived_bound() {
+        let mut wrapped = derived_chain();
+        let (mut x, mut z_l, mut z_u) = ([0.0; 2], [Number::NAN; 2], [Number::NAN; 2]);
+        let mut lambda: [Number; 0] = [];
+        assert!(wrapped.get_starting_point(StartingPoint {
+            init_x: true,
+            x: &mut x,
+            init_z: true,
+            z_l: &mut z_l,
+            z_u: &mut z_u,
+            init_lambda: true,
+            lambda: &mut lambda,
+        }));
+        assert!((z_u[1] - 3.0).abs() < 1e-12, "z_U(x1) = {}", z_u[1]);
+        assert!(z_l[1].is_nan(), "x1's lower side stays unseeded");
+        // x0: C0 (singleton, λ0 = −6) seeds z_L = 6, C1 adds z_U = 3; the
+        // reduced stationarity there, 3 − 6 + 3, closes.
+        assert!(
+            (z_l[0] - 6.0).abs() < 1e-12 && (z_u[0] - 3.0).abs() < 1e-12,
+            "{z_l:?} {z_u:?}"
+        );
     }
 
     /// M25 scratch: one variable, box `x ∈ [0, 10]`, two contradictory linear

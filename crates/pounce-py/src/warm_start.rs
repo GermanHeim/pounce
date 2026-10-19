@@ -27,8 +27,10 @@ use pyo3::prelude::*;
 /// - `g`, `g_l`, `g_u`: length `m` constraint values + bounds.
 /// - `lambda_g`: length `m` constraint multipliers.
 /// - `z_l`, `z_u`: length `n` bound multipliers (non-negative each).
-/// - `m_eq`: number of equality rows at the start of `g_l`/`g_u`
-///   (unconditionally classified as `Equality`).
+/// - `m_eq`: number of leading rows unconditionally classified as
+///   `Equality`. Pass `0` for rows in the problem's own order (the
+///   order `solve(working_set=...)` takes): a row with `g_l == g_u` is
+///   classified `Equality` from its bounds wherever it sits.
 /// - `mult_tol`, `primal_tol`: thresholds; sensible defaults are
 ///   `1e-8` and `1e-6` respectively.
 #[pyfunction]

@@ -178,4 +178,7 @@ See the [JSON Solve Report](json-output.md) schema for the format.
   features (`algorithm active-set-sqp`, `sqp_state_file`) are currently only in
   the native C link, where each `solve` reuses an in-process state. The pip
   link runs each solve as a fresh process; full warm-start parity is a planned
-  follow-up.
+  follow-up. Interior-point dual warm starts do work on the pip link: with
+  `warm_start_init_point yes` in `pounce.opt`, and when GMO reports a basis,
+  the equation and variable marginals (`.m`) seed the starting multipliers,
+  using the inverse of the sign convention under *Marginals* above.

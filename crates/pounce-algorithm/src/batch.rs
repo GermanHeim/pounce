@@ -180,6 +180,10 @@ impl<T: TNLP> TNLP for CaptureTnlp<T> {
         self.inner.wants_intermediate_callback()
     }
 
+    fn wants_current_iterate(&self) -> bool {
+        self.inner.wants_current_iterate()
+    }
+
     fn intermediate_callback(
         &mut self,
         stats: IterStats,
@@ -560,6 +564,10 @@ impl<T: TNLP> TNLP for WarmStartTnlp<T> {
     }
     fn wants_intermediate_callback(&self) -> bool {
         self.inner.wants_intermediate_callback()
+    }
+
+    fn wants_current_iterate(&self) -> bool {
+        self.inner.wants_current_iterate()
     }
 
     fn intermediate_callback(

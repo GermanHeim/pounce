@@ -244,10 +244,21 @@ bool SetIntermediateCallback(
  *   x         [in/out] initial point (length n) → primal solution
  *   g         [out]    constraint values g(x*), or NULL to skip
  *   obj_val   [out]    objective f(x*), or NULL to skip
- *   mult_g    [out]    constraint multipliers λ (length m), or NULL
- *   mult_x_L  [out]    lower-bound multipliers z_L (length n), or NULL
- *   mult_x_U  [out]    upper-bound multipliers z_U (length n), or NULL
+ *   mult_g    [in/out] constraint multipliers λ (length m), or NULL
+ *   mult_x_L  [in/out] lower-bound multipliers z_L (length n), or NULL
+ *   mult_x_U  [in/out] upper-bound multipliers z_U (length n), or NULL
  *   user_data forwarded unmodified to every callback
+ *
+ * The three multiplier buffers follow upstream Ipopt's IpoptSolve: they
+ * always receive the final multipliers, and under
+ * `warm_start_init_point=yes` they are also READ as the starting duals
+ * (Ipopt convention, L = f + λ'g, z_L, z_U >= 0 — exactly what a previous
+ * IpoptSolve wrote back, so feed its output in unchanged). With the
+ * option off (the default) they are never read and may be uninitialized.
+ * Under a warm start, initialize them or pass NULL: a NULL buffer means
+ * "not supplied" and that block starts unseeded (bound multipliers fall
+ * back to `bound_mult_init_val`, λ to zero) — upstream Ipopt instead
+ * rejects a NULL here.
  *
  * Returns an ApplicationReturnStatus (see IpoptReturnCodes.h).
  * ----------------------------------------------------------------- */
@@ -701,9 +712,10 @@ IpoptSolver IpoptCreateSolver(IpoptProblem* prob_handle);
 void IpoptFreeSolver(IpoptSolver solver);
 
 /**
- * Run the IPM. Same output buffer contract as IpoptSolve: `x` is
- * in/out (initial guess in, solution out); `g`, `obj_val`,
- * `mult_g`, `mult_x_L`, `mult_x_U` are out-only and may be NULL.
+ * Run the IPM. Same buffer contract as IpoptSolve: `x` is in/out
+ * (initial guess in, solution out); `g`, `obj_val` are out-only;
+ * `mult_g`, `mult_x_L`, `mult_x_U` are out, and also in (starting
+ * duals) under `warm_start_init_point=yes`. All but `x` may be NULL.
  * `user_data` is threaded into the C callbacks unchanged.
  */
 enum ApplicationReturnStatus IpoptSolverSolve(

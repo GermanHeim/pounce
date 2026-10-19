@@ -19,7 +19,7 @@
 //! stationarity within `kkt_tol` (gh#983) ∧ finite ∧ in-bounds ∧ (Hessian PSD
 //! within `psd_tol`) ∧ not already in the archive.
 
-use crate::archive::{Archive, scaled_distance};
+use crate::archive::{Archive, Duals, scaled_distance};
 use crate::local_solve::{HessianMode, LocalOutcome, LocalSolve};
 use crate::options::{Method, MinimaOptions};
 use crate::penalty_tnlp::{Kernel, PenaltyTnlp, TunnelTnlp};
@@ -267,36 +267,77 @@ impl<'a> Driver<'a> {
         }
     }
 
-    /// Recover the base-problem constraint duals at an accepted minimum `x`.
-    /// The accepting solve may have run on an augmented (penalty / tunnel)
-    /// objective, whose multipliers are not the base problem's, so re-solve the
-    /// clean base objective once from `x` — it is already optimal, so this
-    /// converges immediately — and take the captured `lambda`. Budget-exempt:
-    /// the point is already kept, so this does not consume a `--max-solves`
-    /// slot. Falls back to zeros if the recovery solve does not converge or the
-    /// nlp exposes no user-facing duals (length ≠ `m`).
+    /// Recover the base-problem multipliers at an accepted minimum `x`: the
+    /// constraint duals and the bound multipliers. The accepting solve may
+    /// have run on an augmented (penalty / tunnel) objective, whose
+    /// multipliers are not the base problem's, so re-solve the clean base
+    /// objective once from `x` — it is already optimal, so this converges
+    /// immediately — and take the captured `lambda`, `z_l` and `z_u`.
+    /// Budget-exempt: the point is already kept, so this does not consume a
+    /// `--max-solves` slot. Falls back to zeros if the recovery solve does not
+    /// converge or the nlp exposes no user-facing duals (length ≠ `m` / `n`).
     ///
-    /// With no constraints there is nothing to recover, and the re-solve is
-    /// skipped: it was not free. Started exactly at a minimum, where
+    /// With no constraints the re-solve is skipped unless `x` sits on a finite
+    /// bound: it was not free. Started exactly at an interior minimum, where
     /// `max |∇f|` is ~1e-10, it reads to the gh#983 audit as a badly scaled
     /// objective, which re-solves with the objective multiplied by ~1e10 —
     /// cheap under Newton, but under L-BFGS (Python without `hess=`) both
     /// attempts ran to `max_iter`: measured on 6-D Rastrigin, 145 011
-    /// objective evaluations and 11 s for 6 search solves (gh#966).
-    fn recover_duals(&mut self, x: &[Number]) -> Vec<Number> {
-        if self.m == 0 {
-            return Vec::new();
+    /// objective evaluations and 11 s for 6 search solves (gh#966). An
+    /// interior point of a bound-only problem has no nonzero multiplier to
+    /// recover, so zeros are its answer. A point *on* a bound does (its
+    /// reduced cost is the gradient component there, which is what makes it
+    /// nonzero), and there the gradient is not small, so the audit does not
+    /// misread it.
+    fn recover_duals(&mut self, x: &[Number]) -> Duals {
+        let n = x.len();
+        let zeros = || Duals {
+            lambda: vec![0.0; self.m],
+            z_l: vec![0.0; n],
+            z_u: vec![0.0; n],
+        };
+        if self.m == 0 && !self.on_a_bound(x) {
+            return Duals {
+                lambda: Vec::new(),
+                ..zeros()
+            };
         }
         let t: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(SeededTnlp::new(
             Rc::clone(&self.base),
             x.to_vec(),
         )));
         let out = self.solver.solve(t, HessianMode::Exact);
-        if out.converged && out.lambda.len() == self.m {
-            out.lambda
-        } else {
-            vec![0.0; self.m]
+        // A recovery that failed leaves the bound multipliers *empty*, not
+        // zero: the `.sol` writer skips an empty pair, while a zero pair is a
+        // claim that no bound is active, and `pounce verify` then holds the
+        // point to the exact (not the projected) stationarity test, which a
+        // correct minimum on a bound fails.
+        if !out.converged || out.lambda.len() != self.m {
+            return Duals {
+                z_l: Vec::new(),
+                z_u: Vec::new(),
+                ..zeros()
+            };
         }
+        let ok_z = out.z_l.len() == n && out.z_u.len() == n;
+        Duals {
+            lambda: out.lambda,
+            z_l: if ok_z { out.z_l } else { Vec::new() },
+            z_u: if ok_z { out.z_u } else { Vec::new() },
+        }
+    }
+
+    /// Does any component of `x` sit on (within `1e-6·max(1, |b|)` of) a
+    /// finite bound? Only the bound-only `recover_duals` gate reads it, so a
+    /// loose test costs at most one budget-exempt re-solve.
+    fn on_a_bound(&self, x: &[Number]) -> bool {
+        let near = |v: Number, b: Number| (v - b).abs() <= 1e-6 * b.abs().max(1.0);
+        x.iter()
+            .zip(&self.x_l)
+            .zip(&self.x_u)
+            .any(|((&v, &lo), &hi)| {
+                (lo > -BOUND_INF && near(v, lo)) || (hi < BOUND_INF && near(v, hi))
+            })
     }
 
     fn solve_seeded(&mut self, seed_x: &[Number], exact: bool) -> Result<SolveOut, Stop> {
@@ -525,8 +566,8 @@ impl<'a> Driver<'a> {
         // archiving (issue #196, related): the search may have accepted a
         // point from an augmented penalty/tunnel solve whose multipliers are
         // not the base problem's.
-        let lambda = self.recover_duals(&x);
-        self.archive.add(x, lambda, fval);
+        let duals = self.recover_duals(&x);
+        self.archive.add(x, duals, fval);
         self.stagnant = 0;
         if let Some(cb) = self.hooks.on_accept.as_mut() {
             let last = self.archive.xs.last().map(Vec::as_slice).unwrap_or(&[]);
@@ -853,6 +894,16 @@ pub struct Minimum {
     /// solve may have run on an augmented penalty / tunnel objective, whose
     /// multipliers are not the base problem's. Zeros if unavailable.
     pub lambda: Vec<Number>,
+    /// Base-problem lower / upper bound multipliers at this minimum (length
+    /// `n`), from the same re-solve as `lambda`: `≥ 0` at an active bound,
+    /// in the frame of the problem the engine solved (for a `maximize` `.nl`,
+    /// `min -f`), so a writer applies the `.sol` signs
+    /// `ipopt_zL_out = σ·z_l`, `ipopt_zU_out = −σ·z_u` exactly as a plain
+    /// solve does. Zeros at an interior minimum of a problem without
+    /// constraints (see `recover_duals`); empty if the recovery re-solve
+    /// failed, so nothing is written rather than a false "no bound active".
+    pub z_l: Vec<Number>,
+    pub z_u: Vec<Number>,
 }
 
 /// What [`find_minima`] returns.
@@ -1027,6 +1078,8 @@ pub fn find_minima_with<'a>(
             x: driver.archive.xs[i].clone(),
             objective: driver.archive.fs[i],
             lambda: driver.archive.ls[i].clone(),
+            z_l: driver.archive.zls[i].clone(),
+            z_u: driver.archive.zus[i].clone(),
         })
         .collect();
     Ok(MinimaResult {

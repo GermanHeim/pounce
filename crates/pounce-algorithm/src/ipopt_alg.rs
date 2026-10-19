@@ -218,6 +218,12 @@ pub struct IpoptAlgorithm {
     ///    truth: there is no current iterate of the user's problem
     ///    while the subproblem is being solved.
     pub fires_as_restoration: bool,
+    /// Whether the live iterate handed to the intermediate callback
+    /// recovers the bound multipliers of fixed variables, as the final
+    /// solution does. Set from `fixed_variable_treatment` by the driver
+    /// (`IpoptApplication::reports_fixed_var_duals`); see
+    /// [`crate::intermediate::ipm_user_iterate`].
+    pub live_iterate_fixed_var_duals: bool,
     /// Search-direction calculator (`PdSearchDirCalc`). Lands once a
     /// concrete `SymLinearSolver` backend (MUMPS / FERAL) is wired
     /// through `AlgBuilder` in Phase 7's tail.
@@ -637,6 +643,7 @@ impl IpoptAlgorithm {
             nlp: None,
             tnlp: None,
             fires_as_restoration: false,
+            live_iterate_fixed_var_duals: true,
             search_dir,
             restoration: None,
             kappa_sigma: 1e10,
@@ -2297,6 +2304,22 @@ impl IpoptAlgorithm {
                 nlp: Rc::clone(nlp),
             })
         });
+        // The materialised user-space iterate (`with_current_user_iterate`,
+        // what `GetIpoptCurrentIterate` reads), when the TNLP will read it.
+        // Built here, before the callback borrows the TNLP, because the
+        // fixed-variable multiplier recovery evaluates it.
+        let wants_iterate = !self.fires_as_restoration && tnlp.borrow().wants_current_iterate();
+        let _iterate_guard = if wants_iterate {
+            crate::intermediate::ipm_user_iterate(
+                nlp,
+                &self.data,
+                &self.cq,
+                self.live_iterate_fixed_var_duals,
+            )
+            .map(crate::intermediate::UserIterateGuard::install)
+        } else {
+            None
+        };
         tnlp.borrow_mut().intermediate_callback(
             stats,
             &TnlpIpoptData::default(),

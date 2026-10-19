@@ -166,8 +166,12 @@ class HS071View:
         ]
 
     def hess_lag_value(self, x, lam, obj_weight, con_weight):
-        # True Lagrangian Hessian (lower triangle), emulating GMO:
-        #   obj_weight * d2f + con_weight * sum_i lam_i * d2c_i
+        # Lower triangle, emulating what gmoHessLagValue really returns:
+        #   obj_weight * d2f  -  con_weight * sum_i lam_i * d2c_i
+        # GMO's Lagrangian is f - pi^T g in GAMS marginal convention, which is
+        # why the GAMS/Ipopt link (and both POUNCE links) pass lambda with
+        # con_weight = -1. A fake with `+ con_weight` here would agree with a
+        # link that passed +1 -- i.e. it would bless the wrong sign.
         hf = [
             2 * x[3],                       # (0,0)
             x[3],                           # (1,0)
@@ -192,11 +196,43 @@ class HS071View:
             x[0] * x[1],
             0.0,
         ]
-        hc1 = [2.0, 0, 0, 0, 0, 2.0, 0, 0, 0, 2.0]
+        # Diagonal slots of this layout are 0, 2, 5, 9. This used to read
+        # [2, 0, 0, 0, 0, 2, 0, 0, 0, 2], dropping d2c1/dx1^2 -- found by the
+        # finite-difference test below, which the old self-comparison
+        # could not see.
+        hc1 = [2.0, 0, 2.0, 0, 0, 2.0, 0, 0, 0, 2.0]
         return [
-            obj_weight * hf[k] + con_weight * (lam[0] * hc0[k] + lam[1] * hc1[k])
+            obj_weight * hf[k] - con_weight * (lam[0] * hc0[k] + lam[1] * hc1[k])
             for k in range(10)
         ]
+
+
+def _fd_lagrangian_hessian(view, x, lam, obj_factor, h=1e-6):
+    """Lower triangle of the cyipopt Lagrangian Hessian, by central differences.
+
+    ``d/dx [obj_factor * obj_sign * grad f + J^T lam]`` built only from the
+    view's first-derivative evaluators, so it shares nothing with
+    ``hess_lag_value`` (neither the hand-written second derivatives nor the
+    GMO weight convention). This is the contract POUNCE's ``hessian``
+    callback must meet:  ``obj_factor * d2(obj_sign f) + sum_i lam_i d2c_i``.
+    """
+    sign = -1.0 if view.maximize() else 1.0
+    rows, cols = view.jac_structure()
+    n = view.num_vars()
+
+    def grad_l(z):
+        g = obj_factor * sign * np.asarray(view.eval_grad_obj(z), dtype=float)
+        for v, i, j in zip(view.eval_jac(z), rows, cols):
+            g[j] += lam[i] * v
+        return g
+
+    H = np.zeros((n, n))
+    for j in range(n):
+        e = np.zeros(n)
+        e[j] = h
+        H[:, j] = (grad_l(x + e) - grad_l(x - e)) / (2 * h)
+    hr, hc = view.hess_structure()
+    return np.array([H[r, c] for r, c in zip(hr, hc)])
 
 
 HS071_OPT = 17.0140173
@@ -247,9 +283,16 @@ def test_solve_view_lbfgs_reaches_hs071_optimum():
 
 
 def test_solve_view_with_analytical_hessian_reaches_optimum():
+    """Objective alone is not sign-sensitive: HS071 still converges with the
+    constraint curvature inverted (the fake used to compute exactly that),
+    just more slowly. Exact-Hessian Ipopt solves HS071 in 8 iterations and so
+    does POUNCE through this link; the bound fails on a Hessian whose
+    constraint term has the wrong sign."""
     _gp, x, info = link.solve_view(HS071View(with_hessian=True), options={"tol": 1e-8})
     assert info["status_msg"] in _CONVERGED
     assert info["obj_val"] == pytest.approx(HS071_OPT, abs=1e-4)
+    np.testing.assert_allclose(x, [1.0, 4.743, 3.821, 1.379], atol=1e-2)
+    assert info["iter_count"] <= 9
 
 
 def test_solve_view_writes_solve_report(tmp_path):
@@ -306,30 +349,29 @@ def test_maximize_sign_flips_objective_and_gradient():
     )
 
 
-def test_hessian_callback_applies_sign_and_conweight():
-    """hessian() must call hess_lag_value with obj_sign*obj_factor and conweight=-1."""
+@pytest.mark.parametrize("maximize", [False, True])
+def test_hessian_callback_matches_the_lagrangian_by_finite_differences(maximize):
+    """hessian() through the GMO-emulating fake must equal the cyipopt
+    Lagrangian Hessian ``obj_factor*d2(obj_sign f) + sum lam_i d2c_i``,
+    measured by differencing the view's gradients -- not by re-reading the
+    weights the link passed.
 
-    captured = {}
-
-    class RecordingView(HS071View):
-        def hess_lag_value(self, x, lam, obj_weight, con_weight):
-            captured["obj_weight"] = obj_weight
-            captured["con_weight"] = con_weight
-            captured["lam"] = list(lam)
-            return [0.0] * 10
-
-    # minimize: obj_weight == obj_factor, conweight == -1, lambda passed through.
-    gp = problem_from_gmo(RecordingView(maximize=False, with_hessian=True))
-    gp.problem_obj.hessian(np.ones(4), np.array([2.0, 3.0]), 0.5)
-    assert captured["obj_weight"] == pytest.approx(0.5)
-    assert captured["con_weight"] == pytest.approx(-1.0)
-    assert captured["lam"] == [2.0, 3.0]
-
-    # maximize: obj_weight negated.
-    gp = problem_from_gmo(RecordingView(maximize=True, with_hessian=True))
-    gp.problem_obj.hessian(np.ones(4), np.array([1.0, 1.0]), 0.5)
-    assert captured["obj_weight"] == pytest.approx(-0.5)
-    assert captured["con_weight"] == pytest.approx(-1.0)
+    The old version of this test recorded `(obj_weight, con_weight)` and
+    compared them with the constants the code uses, which cannot fail
+    whatever GMO does with them; and the fake applied `+ con_weight`, so
+    with `-1` it computed `d2f - sum lam d2c` and the "analytical Hessian"
+    tests were solving with the constraint curvature inverted. Nonzero,
+    unequal multipliers of both signs and obj_factor != 1, so neither a
+    flipped constraint term nor a flipped / dropped objective weight can
+    cancel.
+    """
+    view = HS071View(maximize=maximize, with_hessian=True)
+    gp = problem_from_gmo(view)
+    x = np.array([1.3, 4.2, 3.7, 1.6])
+    lam = np.array([0.7, -1.9])
+    got = gp.problem_obj.hessian(x, lam, 0.5)
+    want = _fd_lagrangian_hessian(view, x, lam, 0.5)
+    np.testing.assert_allclose(got, want, rtol=1e-6, atol=1e-6)
 
 
 # ── status mapping ────────────────────────────────────────────────────────────
@@ -1033,3 +1075,363 @@ def test_a_raising_callback_has_its_own_gams_status():
     assert link.status_to_gams("Callback_Error") == (
         link.MODELSTAT_INFEASIBLE_INTERMED, link.SOLVESTAT_INTERNAL_ERR)
     assert not link.reports_objective("Callback_Error", 1.0)
+
+
+# --- marginals out (_write_solution) and back in (warm start) ----------------
+#
+# One LP whose multipliers are known by hand, in BOTH senses, so every sign in
+# the round trip is pinned against an analytic number rather than against the
+# conversion code itself:
+#
+#   minimize  3 x0 - 2 x1 + x2        (or: maximize -3 x0 + 2 x1 - x2)
+#   s.t.      row:  x2 >= 4
+#             0 <= x0 <= 10,  0 <= x1 <= 7,  x2 free
+#
+# Optimum x* = (0, 7, 4) in both senses (min f* = -10, max f* = +10).
+#
+# GAMS marginals, from GAMS's definitions (`.m` of a variable is its reduced
+# cost d obj / d x_j, of an equation d obj / d rhs):
+#   minimize:  x0.m = +3, x1.m = -2, x2.m = 0, row.m = +1
+#   maximize:  x0.m = -3, x1.m = +2, x2.m = 0, row.m = -1
+#
+# POUNCE multipliers, from the KKT conditions of the problem it actually
+# solves -- min f, or min -f for the maximize model, the SAME problem here:
+#   grad + J^T lambda - z_L + z_U = 0  =>  z_L = (3, 0, 0), z_U = (0, 2, 0),
+#   lambda = -1  (row at its lower bound)
+# identical in both senses.
+
+_LP_X = np.array([0.0, 7.0, 4.0])
+_LP_POUNCE = {"mult_g": np.array([-1.0]),
+              "mult_x_L": np.array([3.0, 0.0, 0.0]),
+              "mult_x_U": np.array([0.0, 2.0, 0.0])}
+_LP_GAMS = {False: {"var_m": [3.0, -2.0, 0.0], "equ_m": [1.0]},
+            True: {"var_m": [-3.0, 2.0, 0.0], "equ_m": [-1.0]}}
+
+
+class _LPView:
+    """The LP above as a GmoView, with optional GMO-held marginals."""
+
+    def __init__(self, maximize=False, marginals=None):
+        self._max = maximize
+        self._marg = marginals  # None -> GMO has no basis to offer
+
+    def name(self):
+        return "lp3"
+
+    def num_vars(self):
+        return 3
+
+    def num_cons(self):
+        return 1
+
+    def maximize(self):
+        return self._max
+
+    def has_hessian(self):
+        return False
+
+    def var_lower(self):
+        return [0.0, 0.0, -POUNCE_INF]
+
+    def var_upper(self):
+        return [10.0, 7.0, POUNCE_INF]
+
+    def var_init(self):
+        return [1.0, 1.0, 5.0]
+
+    def con_lower(self):
+        return [4.0]
+
+    def con_upper(self):
+        return [POUNCE_INF]
+
+    def jac_structure(self):
+        return [0], [2]
+
+    def _c(self):
+        c = np.array([3.0, -2.0, 1.0])
+        return -c if self._max else c
+
+    def eval_obj(self, x):
+        return float(self._c() @ np.asarray(x))
+
+    def eval_grad_obj(self, x):
+        return list(self._c())
+
+    def eval_cons(self, x):
+        return [float(x[2])]
+
+    def eval_jac(self, x):
+        return [1.0]
+
+    def has_marginals(self):
+        return self._marg is not None
+
+    def var_marginals(self):
+        return self._marg["var_m"]
+
+    def equ_marginals(self):
+        return self._marg["equ_m"]
+
+
+@pytest.mark.parametrize("maximize", [False, True])
+def test_write_solution_publishes_the_analytic_gams_marginals(maximize):
+    """`gmoSetSolution2` gets the GAMS equation marginal and `gmoSetVarM` the
+    reduced costs, both against the hand-derived values above. `_solved_info`
+    carries zero bound multipliers, so the variable-marginal sign was never
+    observed by any test."""
+    g = _RecordingGmo()
+    info = _solved_info(obj_val=-10.0, **_LP_POUNCE)
+    link._write_solution(object(), g, _TinyView(m=1, maximize=maximize), _LP_X, info)
+
+    x_out, pi_out = g.solution
+    np.testing.assert_allclose(x_out, _LP_X)
+    np.testing.assert_allclose(pi_out, _LP_GAMS[maximize]["equ_m"])
+    np.testing.assert_allclose(g.var_marginals, _LP_GAMS[maximize]["var_m"])
+    # and the objective in the model's own sense
+    assert g.head_n_tail[g.gmoHobjval] == pytest.approx(10.0 if maximize else -10.0)
+
+
+@pytest.mark.parametrize("maximize", [False, True])
+def test_solved_lp_marginals_reach_gams_with_the_analytic_signs(maximize):
+    """End to end: solve the LP through the link, write it back, compare with
+    the GAMS marginals derived from GAMS's definitions -- the engine's own
+    multipliers this time, not hand-fed ones."""
+    _gp, x, info = link.solve_view(_LPView(maximize=maximize), options={"tol": 1e-10})
+    assert info["status_msg"] in _CONVERGED
+    g = _RecordingGmo()
+    link._write_solution(object(), g, _TinyView(m=1, maximize=maximize), x, info)
+    np.testing.assert_allclose(g.solution[0], _LP_X, atol=1e-6)
+    np.testing.assert_allclose(g.solution[1], _LP_GAMS[maximize]["equ_m"], atol=1e-6)
+    np.testing.assert_allclose(g.var_marginals, _LP_GAMS[maximize]["var_m"], atol=1e-6)
+
+
+@pytest.mark.parametrize("maximize", [False, True])
+def test_warm_start_duals_invert_the_write_back(maximize):
+    """GMO's marginals -> POUNCE's starting multipliers must land on the KKT
+    multipliers derived by hand, in both senses."""
+    from pounce.gams.gmo_translate import warm_start_duals
+
+    view = _LPView(maximize=maximize, marginals=_LP_GAMS[maximize])
+    lam, zl, zu = warm_start_duals(view, -1.0 if maximize else 1.0)
+    np.testing.assert_allclose(lam, _LP_POUNCE["mult_g"])
+    np.testing.assert_allclose(zl, _LP_POUNCE["mult_x_L"])
+    np.testing.assert_allclose(zu, _LP_POUNCE["mult_x_U"])
+
+
+def test_warm_start_duals_need_marginals_from_gmo():
+    from pounce.gams.gmo_translate import warm_start_duals
+
+    assert warm_start_duals(_LPView(marginals=None), 1.0) is None
+    assert warm_start_duals(HS071View(), 1.0) is None  # no has_marginals at all
+
+
+def _capture_solve_kwargs(view, options):
+    seen = {}
+
+    class FakeProblem:
+        def __init__(self, **kwargs):
+            pass
+
+        def add_option(self, key, value):
+            pass
+
+        def solve(self, x0, **kwargs):
+            seen.update(kwargs)
+            return np.asarray(x0, dtype=float), {"status_msg": "Solve_Succeeded"}
+
+    import pounce as pounce_mod
+
+    real = pounce_mod.Problem
+    try:
+        pounce_mod.Problem = FakeProblem
+        link.solve_view(view, options=options)
+    finally:
+        pounce_mod.Problem = real
+    return seen
+
+
+@pytest.mark.parametrize("maximize", [False, True])
+def test_solve_view_seeds_duals_only_under_warm_start(maximize):
+    marg = _LP_GAMS[maximize]
+    warm = {"warm_start_init_point": "yes"}
+
+    seen = _capture_solve_kwargs(_LPView(maximize, marg), warm)
+    np.testing.assert_allclose(seen["lagrange"], _LP_POUNCE["mult_g"])
+    np.testing.assert_allclose(seen["zl"], _LP_POUNCE["mult_x_L"])
+    np.testing.assert_allclose(seen["zu"], _LP_POUNCE["mult_x_U"])
+
+    # not requested -> GMO's marginals are not read
+    for opts in (None, {"warm_start_init_point": "no"}):
+        seen = _capture_solve_kwargs(_LPView(maximize, marg), opts)
+        assert not {"lagrange", "zl", "zu"} & set(seen)
+    # requested, but GMO has none -> nothing seeded
+    seen = _capture_solve_kwargs(_LPView(maximize, None), warm)
+    assert not {"lagrange", "zl", "zu"} & set(seen)
+    # GAMS option files are case-insensitive, key and value alike
+    for opts in ({"Warm_Start_Init_Point": "Yes"}, {"WARM_START_INIT_POINT": "yes"}):
+        seen = _capture_solve_kwargs(_LPView(maximize, marg), opts)
+        np.testing.assert_allclose(seen["lagrange"], _LP_POUNCE["mult_g"])
+
+
+@pytest.mark.parametrize("maximize", [False, True])
+def test_a_warm_start_from_the_optimal_marginals_is_cheaper(maximize):
+    """The seeds reach the engine and point the right way: restarting at the
+    optimum with its own marginals takes fewer iterations than restarting at
+    the optimum with NEGATED marginals (the gh#272 class of defect, inbound)."""
+    marg = _LP_GAMS[maximize]
+    flipped = {k: [-v for v in vals] for k, vals in marg.items()}
+    opts = {"tol": 1e-8, "warm_start_init_point": "yes",
+            "warm_start_bound_push": 1e-9, "warm_start_mult_bound_push": 1e-9,
+            "mu_init": 1e-9}
+
+    class AtOptimum(_LPView):
+        def var_init(self):
+            return list(_LP_X)
+
+    _gp, _x, good = link.solve_view(AtOptimum(maximize, marg), options=opts)
+    _gp, _x, bad = link.solve_view(AtOptimum(maximize, flipped), options=opts)
+    assert good["status_msg"] in _CONVERGED
+    assert good["iter_count"] < bad["iter_count"]
+
+
+# --- GMO evaluation errors (numerr / rc) ------------------------------------
+#
+# `_GmoAdapter` is driven here through a fake `gams.core.gmo` module that
+# answers in gamsapi's SWIG shape: `[rc, outputs..., numerr]`.
+
+
+class _FakeGmoLog:
+    """A one-variable GMO for  min x - log(x),  x free, x* = 1.
+
+    For x <= 0 it does what GMO does on a domain error: reports
+    `numerr = 1` and leaves an arbitrary number (0.0) in the output slot.
+    The Newton step from x0 = 3 lands on x = -3, where that 0.0 is *lower*
+    than f(3) -- so a link that reads the slot without looking at `numerr`
+    accepts a point outside the domain.
+    """
+
+    gmoObj_Max = 1
+    gmoObj_Min = 0
+
+    def __init__(self, rc=0):
+        self.rc = rc
+        self.domain_errors = 0
+
+    # arrays
+    def doubleArray(self, n):  # noqa: N802
+        return [0.0] * n
+
+    def intArray(self, n):  # noqa: N802
+        return [0] * n
+
+    # dimensions / setup
+    def gmoN(self, h):  # noqa: N802
+        return 1
+
+    def gmoM(self, h):  # noqa: N802
+        return 0
+
+    def gmoNZ(self, h):  # noqa: N802
+        return 0
+
+    def gmoHessLoad(self, h, a, b, c):  # noqa: N802
+        return 0
+
+    def gmoHessLagNz(self, h):  # noqa: N802
+        return 1
+
+    def gmoHessLagStruct(self, h, r, c):  # noqa: N802
+        r[0], c[0] = 0, 0
+        return 0
+
+    def gmoSense(self, h):  # noqa: N802
+        return self.gmoObj_Min
+
+    def gmoPinf(self, h):  # noqa: N802
+        return 1e300
+
+    def gmoMinf(self, h):  # noqa: N802
+        return -1e300
+
+    def gmoGetVarLower(self, h, buf):  # noqa: N802
+        buf[0] = -1e300
+
+    def gmoGetVarUpper(self, h, buf):  # noqa: N802
+        buf[0] = 1e300
+
+    def gmoGetVarL(self, h, buf):  # noqa: N802
+        buf[0] = 3.0
+
+    # evaluators, gamsapi return shapes
+    def _bad(self, x):
+        if x[0] <= 0.0:
+            self.domain_errors += 1
+            return True
+        return False
+
+    def gmoEvalFuncObj(self, h, x):  # noqa: N802
+        if self._bad(x):
+            return [self.rc, 0.0, 1]
+        return [self.rc, x[0] - np.log(x[0]), 0]
+
+    def gmoEvalGradObj(self, h, x, g):  # noqa: N802
+        if self._bad(x):
+            g[0] = 0.0
+            return [self.rc, 0.0, 0.0, 1]
+        g[0] = 1.0 - 1.0 / x[0]
+        return [self.rc, x[0] - np.log(x[0]), 0.0, 0]
+
+    def gmoHessLagValue(self, h, x, pi, w, ow, cw):  # noqa: N802
+        if self._bad(x):
+            w[0] = 0.0
+            return [self.rc, 1]
+        w[0] = ow / x[0] ** 2
+        return [self.rc, 0]
+
+
+def test_check_gmo_eval_unpacks_and_rejects():
+    from pounce.gams.gmo_translate import GmoEvalError
+
+    assert link._check_gmo_eval([0, 2.5, 0], "f") == [2.5]
+    assert link._check_gmo_eval([0, 2.5, 7.0, 0], "g") == [2.5, 7.0]
+    assert link._check_gmo_eval([0, 0], "h") == []
+    with pytest.raises(GmoEvalError, match="evaluation error"):
+        link._check_gmo_eval([0, 2.5, 1], "f")
+    with pytest.raises(GmoEvalError, match="return code 3"):
+        link._check_gmo_eval([3, 2.5, 0], "f")
+    with pytest.raises(GmoEvalError, match="unexpected"):
+        link._check_gmo_eval(2.5, "f")
+
+
+def test_adapter_rejects_a_point_gmo_flags_as_a_domain_error():
+    from pounce.gams.gmo_translate import GmoEvalError
+
+    view = link._GmoAdapter(object(), _FakeGmoLog())
+    assert view.eval_obj(np.array([1.0])) == pytest.approx(1.0)
+    for call in (lambda: view.eval_obj(np.array([-3.0])),
+                 lambda: view.eval_grad_obj(np.array([-3.0])),
+                 lambda: view.hess_lag_value(np.array([-3.0]), np.zeros(0), 1.0, -1.0)):
+        with pytest.raises(GmoEvalError):
+            call()
+
+
+def test_adapter_rejects_a_nonzero_return_code():
+    from pounce.gams.gmo_translate import GmoEvalError
+
+    view = link._GmoAdapter(object(), _FakeGmoLog(rc=1))
+    with pytest.raises(GmoEvalError, match="return code"):
+        view.eval_obj(np.array([1.0]))
+
+
+def test_a_domain_error_makes_the_solver_backtrack_not_accept():
+    """Through the real adapter and a real solve: the full Newton step from
+    x0 = 3 is x = -3, outside log's domain. Rejecting it makes the line search
+    cut the step, and the solve still reaches x* = 1 -- having actually hit
+    the domain error on the way."""
+    fake = _FakeGmoLog()
+    view = link._GmoAdapter(object(), fake)
+    _gp, x, info = link.solve_view(view, options={"tol": 1e-10})
+    assert fake.domain_errors > 0, "fixture no longer reaches the domain error"
+    assert info["status_msg"] in _CONVERGED
+    assert x[0] == pytest.approx(1.0, abs=1e-6)

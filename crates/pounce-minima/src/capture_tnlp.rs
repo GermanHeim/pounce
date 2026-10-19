@@ -9,15 +9,27 @@ use pounce_nlp::tnlp::{
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// The `(x, lambda)` of the last `finalize_solution` a [`CaptureTnlp`] saw.
-pub(crate) type FinalSlot = Rc<RefCell<Option<(Vec<Number>, Vec<Number>)>>>;
+/// The answer of the last `finalize_solution` a [`CaptureTnlp`] saw.
+pub(crate) struct Final {
+    pub(crate) x: Vec<Number>,
+    pub(crate) lambda: Vec<Number>,
+    /// Bound multipliers, full length `n`, `≥ 0` at an active bound, in the
+    /// frame of the problem the engine solved (for a `maximize` `.nl`, the
+    /// negated one) -- the same numbers a plain solve's `ipopt_zL_out` /
+    /// `ipopt_zU_out` blocks are built from.
+    pub(crate) z_l: Vec<Number>,
+    pub(crate) z_u: Vec<Number>,
+}
+
+/// The slot a [`CaptureTnlp`] writes its [`Final`] into.
+pub(crate) type FinalSlot = Rc<RefCell<Option<Final>>>;
 
 /// Forwards every method to `inner` unchanged and records the
 /// `finalize_solution` payload in `slot`.
 ///
 /// That payload is what the application reports as the answer: the full
-/// `x` after `honor_original_bounds`, and `lambda` in the user's
-/// `∇f + λ·∇g + z = 0` convention. When an attempt loses and an earlier
+/// `x` after `honor_original_bounds`, `lambda` in the user's
+/// `∇f + λ·∇g + z = 0` convention, and the bound multipliers `z_l` / `z_u`. When an attempt loses and an earlier
 /// one's answer is restored from the floor, the restore re-delivers it
 /// through `finalize_solution` too, so the slot always holds the answer
 /// the status describes.
@@ -70,7 +82,12 @@ impl TNLP for CaptureTnlp {
     fn finalize_solution(&mut self, sol: Solution<'_>, ip_data: &IpoptData, ip_cq: &IpoptCq) {
         // The last delivery wins: a floor replay re-delivers the winning
         // attempt's payload after the losing one's (gh#884).
-        *self.slot.borrow_mut() = Some((sol.x.to_vec(), sol.lambda.to_vec()));
+        *self.slot.borrow_mut() = Some(Final {
+            x: sol.x.to_vec(),
+            lambda: sol.lambda.to_vec(),
+            z_l: sol.z_l.to_vec(),
+            z_u: sol.z_u.to_vec(),
+        });
         self.inner
             .borrow_mut()
             .finalize_solution(sol, ip_data, ip_cq)

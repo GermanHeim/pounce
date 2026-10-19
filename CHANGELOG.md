@@ -42,7 +42,7 @@ changes.
   as on the interior-point arm), `GetIpoptCurrentIterate` returns that
   iterate's `x`, `z_L`, `z_U`, `g` and `lambda` in the user's index spaces,
   and returning `false` ends the solve with `User_Requested_Stop`.
-  `GetIpoptCurrentViolations` is not served on this arm and returns `FALSE`.
+  `GetIpoptCurrentViolations` is served on this arm too, `scaled` either way.
   The hook only observes the iterate, so no trajectory moves.
 - **`objective_scaling.total_factor`: the whole objective multiplier of the
   returned run (gh#1001 item 3).** `objective_scaling.factor` is the
@@ -197,6 +197,349 @@ changes.
   parity test's strict `xfail` on camel deflation is now a pass.
 
 ### Fixed
+- **The active-set SQP arm takes the model's starting multipliers under
+  `warm_start_init_point=yes`.** Only a warm start staged through
+  `set_sqp_warm_start` reached it; the TNLP's own starting duals (a `.nl` `d`
+  segment, `ipopt_zL_in` / `ipopt_zU_in`, a `lagrange=` start) were dropped,
+  so a `d` entry of 5 came back as 0 after zero SQP iterations where the
+  interior-point arm gives 5. They now arrive through the same projections the
+  IPM's warm initializer reads, already in algorithm space.
+- **The live iterate costs no user evaluation.** For a TNLP that reads it,
+  every fire re-evaluated `∇f` and `J` for the fixed-variable bound
+  multipliers, each presolve layer re-ran `eval_g` / `eval_grad_f` /
+  `eval_jac_g` in its lift, and `GetIpoptCurrentViolations` evaluated `∇f`
+  and `J` through the user's callbacks for `grad_lag_x` — all at the point
+  the algorithm had just evaluated. Now: the fixed-variable recovery reads
+  `OrigIpoptNlp`'s record of its last `eval_grad_f` / `eval_jac_g` at that
+  full-x (fixed columns only, upstream's `jac_fixed_idx_map_`; evaluated as
+  before when the record is for another point); presolve layers answer
+  their lift from a record of the inner evaluations the iteration made
+  through them; `grad_lag_x` is the algorithm's own `∇L` unscaled
+  (`UserIterate::grad_lag_x`; presolve recomputes it from the record); the
+  SQP arm builds its iterate only for a TNLP that asks, as the
+  interior-point arm does. Measured (`grad_f/g/jac` evaluations, 8 fires,
+  identical iterations and final `x`): interior-point with a fixed
+  variable `19/9/18 → 10/9/9`, with presolve `28/28/29 → 12/12/13` (also
+  without fixed variables); SQP with a fixed variable `5/3/5 → 2/3/2`, with
+  presolve `5/10/7 → 3/6/5` — each now equal to the same solve with no
+  iterate read (`pounce-algorithm/tests/live_iterate_eval_cost.rs`).
+- **`GetIpoptCurrentIterate` honours `scaled`, on both arms and under
+  presolve; with presolve and per-variable scaling the live iterate is no
+  longer `x̃`.** `scaled` was ignored (always the unscaled iterate). `TRUE`
+  now follows upstream's `get_curr_iterate(scaled = true)`: the algorithm's
+  iterate in the TNLP's shape — `x̃ = d ⊙ x`, `z̃ = obj·z/d`, `g̃ = s ⊙ g`,
+  `λ̃ = obj·λ/s`, a fixed variable at its own value with `obj·z` (swapped
+  when `obj < 0`, upstream's manual rescale). The live iterate carries those
+  factors (`UserIterate::scaling`), each wrapper lifting them with the
+  iterate: presolve gives a removed column or row factor 1, and the
+  `ScalingTnlp` now unscales the iterate in its own `intermediate_callback`
+  (the algorithm did it before, which under presolve — the `ScalingTnlp`
+  sits outside the presolve layers — never happened: `x0` read `3.0` against
+  the solution's `1.5`). On the SQP arm the scaled space is the one it
+  solves in: `d` and the `obj_scaling_factor` option only (it runs no
+  user/gradient objective or row scaling). Tests:
+  `pounce-cinterface/tests/live_iterate_matches_solution.rs`,
+  `pounce-algorithm/tests/live_iterate_matches_finalize.rs`.
+- **Presolve reported multipliers on bounds the model does not have when a
+  bound it derived from rows was active (M24).** Phase 1 / FBBT derive
+  variable bounds from multi-variable rows (`x0 = 2·x1, x0 ≥ 4` ⇒ `x1 ≥ 2`),
+  and the reduced solve was free to put the multiplier there. On that model
+  `presolve=yes presolve_linear_eq_reduction=yes` wrote `.sol` dual `8` and
+  `ipopt_zL_out(x1) = 20` against `presolve=no`'s `-2` and `z_L(x0) = 10` —
+  duals `pounce verify --require-optimal` rejects (dual infeasibility
+  `3.2e1`); plain `presolve=yes` split it three ways (`1.2e1`). Postsolve now
+  zeroes a multiplier on a derived side the original model does not have
+  active and recovers the original problem's multipliers on the active rows
+  and declared bounds (sign-constrained least squares over the connected
+  component the residual reaches): the `presolve=no` duals wherever those are
+  unique, a valid KKT set otherwise, on both the NLP and SQP arms and in both
+  senses. A warm start seeds the reduced bounds from a dropped row's supplied
+  multiplier, and from an eliminated column's bound multiplier by the chain
+  rule when no bound was transferred off it (a tie). A `.sol` fed back at
+  `max_iter=0` now returns exactly the duals `presolve=no` returns — the
+  supplied ones — under the *default* warm-start push too: that push moves
+  `x` about `1e-3` off its bounds, and every multiplier postsolve re-derives
+  (a consumed row's `λ`, a derived bound's `z`) read `∇f` there, so 4 of 12
+  model × presolve cases came back wrong (ELIM_NEG under elimination: `λ`
+  `-2` → `7e-16`, and `-1.992`; CHAIN: `[6, -3]` → `[3, 0]` with a `z_U` on
+  an undeclared bound) and 2 more carried a spurious `z_L = 1` on a derived
+  bound. Each presolve layer now records the warm start it served and, when
+  the solver hands its multipliers back unchanged, reports the ones it was
+  handed. A cold solve never records one; its duals are unchanged.
+  A singleton row coincident with a declared bound keeps its
+  multiplier on the bound (row dual 0) — a degenerate pair, now pinned.
+  `presolve` is off by default; `presolve=no` output is unchanged.
+- **`GetIpoptCurrentViolations` reports the user's problem, and honours
+  `scaled`.** It scattered the algorithm's scaled internals — complementarity
+  carrying the objective factor, `grad_lag_x` in `x̃`-space with fixed
+  variables' *values* in their slots — and zero-filled
+  `nlp_constraint_violation` and `compl_g`; on the SQP arm it refused.
+  `scaled = FALSE` (what CasADi asks for) now follows upstream's
+  `get_curr_violations`: computed from the live user-space iterate against
+  the declared bounds, `grad_lag_x = ∇f + Jᵀλ − z_L + z_U` through the
+  problem's own `eval_grad_f` / `eval_jac_g` (`0` at fixed variables, as
+  upstream's `ResortX` leaves them), per-row violation and `compl_g` with
+  upstream's signs, on both arms. `scaled = TRUE` returns the algorithm's own
+  space: each entry a fixed factor of the unscaled one (bound violation `×d`,
+  complementarities `×obj`, `grad_lag_x ×obj/d`, row violation `×s`,
+  `live_iterate::scale_violations`), by the factors the live iterate carries
+  — so it is served on the SQP arm (where it refused) and under presolve
+  (where it refused; a removed column or row carries factor 1). Before: `compl_x_L[1]` at the first fire
+  read `10.0` against the original problem's `200` under gradient-based
+  scaling (×20) and `5.0` against `1.67` under user scaling (×3). After:
+  equal to 1e-9 at every fire, both arms. `compl_x_*` are upstream's: the
+  algorithm's slack times the multiplier, measured to the bound it iterates
+  against — the declared one widened by `bound_relax_factor` (and moved by
+  safe-slack adjustments), carried with the live iterate
+  (`UserIterate::x_l_alg` / `x_u_alg`, lifted through `ScalingTnlp` and
+  presolve; a column presolve removed keeps its declared bound). Measured to
+  the declared bound they were `δ·z` off (`1e-4·z_U` at
+  `bound_relax_factor = 1e-3`), of the wrong sign once the iterate sat in
+  the widening; now equal to an independent recomputation with the relaxed
+  bounds, both arms, both scalings, and under presolve.
+- **With presolve on, the live iterate is lifted to the user's problem.**
+  The algorithm solves the reduced problem and installed that problem's
+  iterate, which reached the user's intermediate callback
+  (`with_current_user_iterate`) unexpanded: reduced length, entries at the
+  wrong indices. `PresolveTnlp` and `LinearEqElimTnlp` now lift it one layer
+  in their `intermediate_callback` forward, by running their own
+  `finalize_solution` against a stand-in inner TNLP that keeps the solution
+  instead of finalizing (`pounce-presolve/src/live_lift.rs`) — so
+  eliminated columns, dropped rows' `g` and their recovered multipliers are
+  exactly the final solution's at the last fire. Before: `x` of length 2
+  against the user's 4, `g` of length 2 against 3; after: equal to 1e-9
+  relative on both arms. Costs the finalize re-evaluations per fire, only
+  with presolve on and a TNLP that asks for the iterate. The C interface is
+  unaffected: presolve declines callback TNLPs, which declare no linearity.
+- **The interior-point live iterate carries fixed variables' bound
+  multipliers, as the final solution does.** `GetIpoptCurrentIterate` on the
+  interior-point arm read `z_L` / `z_U` straight off the algorithm, which
+  holds none for a variable `make_parameter` removed, so they read `0` where
+  `IpoptSolve` reports the recovered `z_L − z_U = ∇f + Jᵀλ` — upstream's
+  `get_curr_iterate` recovers them too (`TNLPAdapter::ResortBoundMultipliers`).
+  The arm now materialises the user-space iterate before each fire, by
+  `finalize_via_orig_nlp`'s conversions, and installs it where the SQP arm
+  already installed its own (`with_current_user_iterate`, now defined in
+  `pounce_nlp::live_iterate`). It does so only for a TNLP that asks
+  (`TNLP::wants_current_iterate`, default `false`; the C interface answers
+  `true` when a callback is registered), since the recovery evaluates `∇f`
+  and `J` each fire. Before: fixed `x3`'s `z_U` read `0` against a final
+  `4.0` (`4.0e3` under gradient-based scaling with `obj_scaling_factor=3`);
+  after: equal to 1e-9 relative, both arms. Reporting only, no step moved.
+- **The intermediate callback fires under per-variable `user-scaling`, and
+  the iterate it reads is unscaled.** Non-unit `x` factors install a
+  `ScalingTnlp` (`x̃ = d ⊙ x`, gh#486), which did not forward
+  `intermediate_callback` / `wants_intermediate_callback`, so the user's
+  callback never fired on either arm (and could not request a stop). It
+  also dropped `get_number_of_nonlinear_variables` /
+  `get_list_of_nonlinear_variables` (a declared L-BFGS subset was ignored)
+  and `presolve_infeasibility_proof`; all five are forwarded now. The SQP
+  arm's user iterate (`with_current_user_iterate`, `GetIpoptCurrentIterate`
+  there) reported `x̃` / `z̃`; it now applies `finalize_solution`'s rule,
+  `x = x̃ ⊘ d`, `z = d ⊙ z̃` (new `scaling_tnlp::unscale_iterate`). The
+  interior-point `GetIpoptCurrentIterate` did the same, and also read its
+  multipliers through `pack_*_for_user`, which leaves `obj_scale_factor` in
+  (so under any objective scaling, user or gradient-based, `z` and `λ` were
+  off by that factor); it now uses the `finalize_solution_*` lifts. Reading
+  the factors from inside the callback panicked across the C boundary
+  (the TNLP is mutably borrowed there), so `OrigIpoptNlp` now snapshots
+  them at construction. At the last fire both arms now read exactly what
+  `IpoptSolve` writes back. Tests:
+  `pounce-algorithm/tests/user_x_scaling_intermediate_callback.rs`,
+  `pounce-cinterface/tests/user_x_scaling_current_iterate.rs`.
+- **The SQP working set is published and taken in user row and variable
+  order.** `IpoptApplication::last_sqp_working_set` (and so pounce-py's
+  `info["working_set"]` / `get_working_set()` and pounce-rs) reported
+  constraint statuses positionally in the SQP's internal equalities-first
+  `[c; d]` order: on a model whose `g0` is an active inequality and `g1` an
+  equality it read `[Equality, AtUpper]`, and `set_sqp_warm_start` /
+  `solve(working_set=...)` read a caller's set the same way, while the C API,
+  the GAMS link and any hand-written set index by `g` row. Both directions now
+  map through the NLP's `c_map` / `d_map` (bound statuses were already full
+  `n`, gh#986), so `[AtUpper, Equality]` comes out and the published set fed
+  back is a 0-iteration re-solve. The C API had rebuilt the internal order
+  from the bounds on its own, which stopped matching once bound statuses
+  became full-`n`: with any fixed variable `IpoptGetWorkingSet` returned FALSE
+  after a successful SQP solve, so `IpoptSolveWarmStart` and the GAMS link's
+  working-set state file silently lost the set. It now copies positionally.
+  `classify_working_set`'s `m_eq` is documented as "leading rows forced
+  `Equality`": pass `0` for user-order rows. Tests:
+  `pounce-algorithm/tests/sqp_working_set_user_order.rs`,
+  `pounce-cinterface/tests/sqp_working_set_user_order.rs`.
+- **`Continuation(predict_duals=True)` reads the dual step through the row
+  maps.** `_tangent` sliced the compound KKT step by offset: it assigned the
+  `k`-th entry of the `z_l` / `z_u` blocks to variable `k`, but those blocks
+  hold one entry per *bounded* variable, so any unbounded variable ahead of a
+  bounded one credited it a neighbour's multiplier step; it took `dx =
+  full[:n]`, which under `make_parameter` runs past the shorter var-x block
+  into the slacks; and it read every inequality's `dλ` as zero because
+  `multiplier_rows` answers `None` there. Each block is now gathered through
+  `primal_rows`, `multiplier_rows` / `inequality_multiplier_rows` and a new
+  `Solver.bound_multiplier_rows` (Rust `Solver::bound_multiplier_rows`), which
+  maps a user-space variable to its `(z_l, z_u)` rows. The primal-only path
+  (`predict_duals=False`) also scatters its var-x step back to user space; with
+  a fixed variable it previously came back one short. Checked against
+  finite differences of re-solved duals, with and without
+  `obj_scaling_factor`, in `python/tests/test_continuation_tangent_duals.py`.
+- **The pip GAMS link rejects points GMO flags as evaluation errors.**
+  `_GmoAdapter` ignored the return code and `numerr` of `gmoEvalFuncObj`,
+  `gmoEvalGradObj`, `gmoEvalFunc`, `gmoEvalGrad` and `gmoHessLagValue`, so a
+  domain error (`log` of a negative, ...) handed POUNCE whatever GMO left in
+  the output slot as a valid value, and the line search could accept a point
+  outside the model's domain. A non-zero `rc` or `numerr > 0` now raises
+  `GmoEvalError`, which the `pounce.Problem` callback layer reports as a failed
+  evaluation, matching `gams_pounce.c`'s `return false`.
+- **The pip GAMS link honours `warm_start_init_point yes` for the duals.** It
+  passed only the primal start; GMO's marginals were never read. It now seeds
+  `lagrange = -obj_sign * EquM` and splits `obj_sign * VarM` into `z_L`/`z_U`
+  by sign -- the exact inverse of what it writes back, so a maximizing model
+  round-trips too -- when the option is set and `gmoHaveBasis` says GMO has
+  marginals.
+- **GMO's Hessian-of-the-Lagrangian formula is stated correctly.** The comments
+  in `gmo_translate.py` and `gams/gams_pounce.c` gave `gmoHessLagValue` as
+  `objweight*d2f + conweight*sum pi_i d2g_i`; it is
+  `objweight*d2f - conweight*sum pi_i d2g_i` (GMO's Lagrangian is `f - pi^T g`),
+  which is why passing `lambda` with `conweight = -1` is right. The code was
+  already correct; the license-free test fake implemented the wrong formula, so
+  the "analytical Hessian" tests ran with the constraint curvature inverted and
+  could not have caught a sign regression. The fake now computes what GMO
+  computes, and the Hessian callback is checked against finite differences of
+  the Lagrangian's gradient in both senses. New tests also pin
+  `gmoSetSolution2` / `gmoSetVarM` marginals for minimize and maximize against
+  hand-derived GAMS marginals.
+- **The C API's multiplier buffers seed a dual warm start, as Ipopt's do.**
+  `IpoptSolve` (and `IpoptSolverSolve`, `IpoptSolveWarmStart`, Fortran
+  `IPSOLVE`) treated `mult_g` / `mult_x_L` / `mult_x_U` as out-only: the
+  bridge's `get_starting_point` copied `x` and nothing else, so a C caller
+  setting `warm_start_init_point=yes` and passing the previous solve's
+  multipliers silently got a primal-only warm start. Under `init_lambda` /
+  `init_z` the buffers are now read as the starting duals (upstream
+  `StdInterfaceTNLP`'s `start_lam` / `start_z_L` / `start_z_U`, same sign
+  convention as what the solve writes back, so output feeds input
+  unchanged). A NULL buffer means "not supplied" and leaves that block
+  unseeded (gh#622's marker) rather than failing as upstream does. The GAMS
+  C link, which passes zeroed buffers, now marks its bound multipliers NaN
+  so a `warm_start_init_point=yes` option file keeps reading them as
+  unseeded. Pinned by `crates/pounce-cinterface/tests/ipm_dual_warm_start.rs`.
+- **An active-set SQP warm start is taken in the caller's space.** The C
+  API (`IpoptSolve` after `IpoptSetWarmStartWorkingSet`) and `pounce-py`'s
+  `solve(working_set=...)` stage the user's `x`, `mult_g` and `z_L − z_U`,
+  and `set_sqp_warm_start` installed them as the algorithm's own iterate,
+  whose `lambda_g` is `[y_c; y_d]` (equality rows first) times
+  `obj_scaling_factor`, and whose `x` / `lambda_x` carry the per-variable
+  factors of `user-scaling`. Fed its own converged multipliers back, a model
+  with an inequality before its equality started from `λ = [3.667, 6.667]`
+  instead of `[6.667, 3.667]`, and under `obj_scaling_factor=10` from
+  `[0.3667, 6.667e-5]` instead of `[6.667e-4, 3.667]`. The application now
+  maps the staged iterate into algorithm space, as the exact inverse of
+  what `finalize_solution` reports (row order, objective and constraint
+  scale, fixed-variable elimination, `x̃ = d ⊙ x`, `z̃ = z ⊘ d`); the
+  iteration-0 iterate equals the seed and the re-solve takes 0 iterations.
+  Pinned by `crates/pounce-algorithm/tests/sqp_warm_start_user_space.rs`.
+  The working set is unchanged.
+- **`pounce-continue` transfers bound multipliers, not just `x` and `d`.** The
+  warm transfer wrote the previous point's primal and constraint duals into the
+  next model and dropped its bound multipliers (documented as "this driver does
+  not write them yet"). It now copies the previous `.sol`'s `ipopt_zL_out` /
+  `ipopt_zU_out` into `ipopt_zL_in` / `ipopt_zU_in` `S4` segments of the next
+  `.nl`, replacing any the source already carried. The `_out` and `_in`
+  suffixes share one sign convention (`σ·z_L`, `−σ·z_U`), and the reader
+  applies the sense (gh#1033), so the copy is exact for minimize and maximize
+  models. They are read from the `.sol` because the JSON report carries no
+  bound multipliers. Under the default `warm_start_recentering=residual` the
+  engine still re-derives them from the transferred point. The van der Pol
+  measurement in `docs/src/continuation.md` predates this and was not re-run.
+- **`--minima` `.sol` files carry `ipopt_zL_out` / `ipopt_zU_out`.** The
+  ranked `.sol` files were written with no suffix blocks, so a Pyomo
+  `model.ipopt_zL_out` / AMPL `.rc` read after a `--minima` run came back empty
+  while a plain solve of the same file filled it (gh #296). The clean re-solve
+  that recovers each minimum's constraint duals (issue #196) now also captures
+  its bound multipliers, and every file writes them with a plain solve's signs
+  (`σ·z_L`, `−σ·z_U`, gh#959). Without constraints that re-solve used to be
+  skipped outright; it now runs when the minimum sits on a finite bound (an
+  interior minimum keeps the skip, and zeros). The JSON report is unchanged: a
+  plain solve's carries no bound multipliers either. `scripts/sweep-minima.sh`
+  now records the best `.sol`'s blocks; across its 54 lines only that column
+  moves.
+- **A requested warm start is no longer silently discarded on the convex
+  arms.** Under `solver_selection=auto` an LP / convex QP / convex QCQP went to
+  `pounce-convex`, which re-parses the model and starts cold, so
+  `warm_start_init_point=yes max_iter=0` wrote `x = 0` and zero duals instead of
+  the `.nl`'s `x0`, `d` segment and `ipopt_z*_in` suffixes. `auto` now routes
+  such a run to the NLP interior point (with a note on stderr), as it already
+  does for user scaling and sensitivity requests; a forced convex
+  `solver_selection` keeps its engine and warns that the warm start is ignored.
+  Cold starts are unaffected, and so is a warm-start request on a model that
+  supplies nothing to start from (no nonzero `x` / `d` entry or `_in` suffix):
+  Pyomo users often set the option globally, and rerouting such a model took
+  `lp_israel` from 29 iterations to 210 for nothing. Test:
+  `tests/convex_warm_start_routes_to_nlp.rs`.
+- **Presolve hands a dropped singleton row's dual back to the row (M24).**
+  Phase 1 turns a row like `x0 <= 0.5` into a variable bound and Phase 2 drops
+  the row, so the solver's multiplier came out as `ipopt_zU_out` on a variable
+  with no declared upper bound while the row's `.sol` dual read 0; `presolve=no`
+  and the convex arms report the row dual (-2) and nothing on `x0`. Postsolve
+  now sets `λ = (z_u − z_l)/a` on the row and zeroes that bound side (also in the
+  CLI's bound-multiplier capture), and the warm-start path does the inverse, so
+  a `.sol` round-trips. Only where the derived bound is strictly tighter than
+  the declared one; a tie keeps the declared bound's multiplier. NLP and SQP
+  arms, both senses, `≤`/`≥`/ranged rows and either coefficient sign now match
+  `presolve=no`. Bounds derived from multi-variable rows are unchanged (still
+  documented as M24). Tests: `tests/presolve_singleton_row_dual.rs` and three
+  crate unit tests.
+- **A transferred bound multiplier survives a warm start through
+  `presolve_linear_eq_reduction` (gh#493, inbound half).** On the way out the
+  linear-equality pass reports the multiplier of a bound it moved onto a
+  surviving column against the eliminated column that declared it (scaled by
+  `1/|α|`, side-flipped for `α < 0`); on the way in `get_starting_point` read
+  only the survivor's own entry, so feeding that `.sol` back seeded the reduced
+  bound as unsupplied and `z_L` came back as `bound_mult_init_val` (1, against
+  10 supplied, on `min x0²+x1², x0 = 2·x1, x0 ≥ 4`). The inverse now gathers the
+  source column's value (times `|α|`, side-flipped); a NaN source still means
+  "unsupplied". Tests: `tests/linear_eq_elim_warm_bound_multipliers.rs` and two
+  crate unit tests.
+- **A `.nl` file's initial duals are read in the `.sol` sign (gh#1033).** The
+  `d` segment carries AMPL's dual, `d obj / d b`, the sign `sol_writer`
+  produces by negating pounce's multiplier; the reader stored it unnegated, so
+  a `warm_start_init_point=yes max_iter=0` run handed a `d` entry of 5 back as
+  -5 (Ipopt: 5). The reader now negates on the way in. `pounce-continuation`,
+  which wrote the JSON report's `lambda` straight into the next point's `d`
+  segment and so relied on the old behaviour, now negates it on the way out;
+  its transfer is unchanged. The objective sense is applied too: a maximize
+  model's `.sol` dual is `-sigma*lambda`, so the reader's inverse is
+  `lambda = -sigma*d`. The reader also honours the `ipopt_zL_in` /
+  `ipopt_zU_in` bound-multiplier suffixes it used to drop, as Ipopt's AMPL
+  driver does (`z_L = sigma*zL_in`, `z_U = -sigma*zU_in`, the inverse of the
+  `_out` blocks); note that the default `warm_start_recentering=residual`
+  re-derives supplied bound multipliers, so they survive verbatim only under
+  `warm_start_recentering=none`. A full solve ends at the same multipliers
+  either way.
+- **`pounce verify` and `--minima` read maximize models in the right frame.**
+  `verify` compared the `.sol` bound blocks (`sigma*z_L` / `-sigma*z_U`,
+  gh#959) against the negated objective's gradient, so pounce's own optimal
+  maximize `.sol` read as dual infeasibility `2(z_L - z_U)` and failed
+  `--require-optimal`. `--minima` wrote the best minimum's JSON `lambda`
+  without the sense factor its `.sol` and a plain solve apply, and reported
+  `problem.minimize: true`.
+- **The active-set SQP arm reports its bound multipliers.** `finalize_via_sqp`
+  and the live-inspector iterate split the signed per-variable `lambda_x`
+  per variable and handed it to `finalize_solution_z_*`, which read the
+  compressed x_l / x_u spaces; with an unbounded variable ahead of a bounded
+  one each multiplier landed on the wrong variable or was dropped. Separately
+  the CLI backfilled an SQP solve's `x` / `lambda` for the `.sol` but not its
+  bound multipliers, so the file had no `ipopt_zL_out` / `ipopt_zU_out`
+  entries. Both now match the NLP arm.
+- **Presolve keeps a warm start's "unseeded" bound-multiplier marker.**
+  `PresolveTnlp` and `LinearEqElimTnlp` copied zero-filled buffers over the
+  NaN `OrigIpoptNlp` passes to mean "not supplied" (gh#622), so with
+  `presolve=yes` a primal-only warm start read as one supplying `z = 0` and
+  was floored at `warm_start_mult_bound_push` instead of taking
+  `bound_mult_init_val`. Masked under the default
+  `warm_start_recentering=residual`, which treats the two alike.
+- **GAMS C link: the active-set-SQP warm start reads maximize marginals with
+  the right sign.** The working-set reconstruction classified persisted
+  marginals without `obj_sign`, so every active side of a maximize model came
+  back flipped; the outbound half of gh#272 had the factor.
 - **`qp-active-set` reports a convex QP that is unbounded along `null(P)` as
   unbounded — with or without rows and bounds (gh#1034).** With an exactly
   singular `P` (integer `P = RᵀR`, rank `n − 1`) and a descent direction in

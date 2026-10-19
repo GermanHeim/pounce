@@ -432,6 +432,15 @@ comparison is `python/examples/hs071_warm_start.py`. On the CLI the
 same options apply as `KEY=VALUE` pairs, with dual seeds coming from
 the `.nl` file's dual segment when present.
 
+From C (`IpoptSolve`, `IpoptSolverSolve`, and the Fortran `IPSOLVE`) the
+dual seeds are the `mult_g` / `mult_x_L` / `mult_x_U` buffers themselves:
+as in upstream Ipopt they are in/out, read as the starting multipliers
+under `warm_start_init_point=yes` and overwritten with the final ones, so
+the previous solve's output feeds the next solve unchanged (same Ipopt
+sign convention both ways). With the option off they are never read. A
+NULL buffer under a warm start means "not supplied" — that block starts
+unseeded, where upstream would reject the solve.
+
 | Option | Default | Meaning |
 |---|---|---|
 | `warm_start_init_point` | `no` | Master switch: honor supplied primal *and* dual seeds. |

@@ -193,15 +193,19 @@ static bool gams_eval_jac_g(ipindex n, ipnumber *x, bool new_x,
  *
  * POUNCE convention:  H = obj_factor * nabla^2 f + sum_i lambda_i * nabla^2 c_i
  *
- * gmoHessLagValue(gmo, x, pi, w, objweight, conweight, numerr) computes:
- *   w = objweight * nabla^2 f + conweight * sum_i pi_i * nabla^2 c_i
+ * gmoHessLagValue(gmo, x, pi, w, objweight, conweight, numerr) computes the
+ * Hessian of GMO's Lagrangian  objweight*f - conweight * pi^T c,  stated in
+ * GAMS's marginal convention (pi_gams = -lambda_ipopt for a minimization):
+ *   w = objweight * nabla^2 f - conweight * sum_i pi_i * nabla^2 c_i
+ * Note the MINUS on the constraint term.
  *
- * GAMS multiplier convention: pi_gams = -lambda_ipopt.
- * The Ipopt solver link negates lambda before passing to gmoHessLagValue.
- * Equivalently, we pass lambda directly with conweight = -1.0:
- *   w = objweight * nabla^2 f + (-1) * sum_i lambda_i * nabla^2 c_i
- *     = objweight * nabla^2 f - sum_i lambda_i * nabla^2 c_i
- * which matches negating lambda and using conweight = 1.0.
+ * The natural call would pass pi = -lambda with conweight = +1. Like the
+ * GAMS/Ipopt link (GamsNLP::eval_h: "for GAMS, lambda would need to be
+ * multiplied by -1, we do this via the constraint weight"), we instead pass
+ * lambda directly with conweight = -1.0:
+ *   w = objweight * nabla^2 f - (-1) * sum_i lambda_i * nabla^2 c_i
+ *     = objweight * nabla^2 f + sum_i lambda_i * nabla^2 c_i
+ * which is the POUNCE convention above.
  *
  * For maximization, obj_sign = -1, so objweight = -obj_factor negates the
  * objective Hessian (POUNCE minimizes -f).
@@ -1003,6 +1007,19 @@ DllExport int STDCALL pouCallSolver(void *Cptr)
     if (!x || (m > 0 && (!g_vals || !mult_g)) || !mult_xl || !mult_xu)
         goto oom;
 
+    /* The multiplier buffers are in/out: under warm_start_init_point=yes
+     * IpoptSolve reads them as the starting duals (upstream Ipopt's
+     * contract). This link supplies no duals, so mark the bound
+     * multipliers NaN — POUNCE's "unseeded" marker (gh#622), resolved to
+     * bound_mult_init_val — rather than zero, which would read as a
+     * supplied multiplier of 0 and be floored at
+     * warm_start_mult_bound_push. lambda stays zero, which is already its
+     * unseeded value. */
+    for (int j = 0; j < n; j++) {
+        mult_xl[j] = NAN;
+        mult_xu[j] = NAN;
+    }
+
     gmoGetVarL(gmo, x);
 
     /* ---------------------------------------------------------------
@@ -1047,10 +1064,15 @@ DllExport int STDCALL pouCallSolver(void *Cptr)
      * pounce.opt), so the cost on the default IPM path is one
      * setter call + a free of the buffers.
      *
-     * Sign convention: POUNCE expects the standard `λ_g` (positive
-     * for tight lower side); GAMS persists the "pi" with the
-     * solver-link sign flip we apply on output (mult_g[i] =
-     * -mult_g[i]). So when *reading back* we flip again.
+     * Sign convention: GAMS persists the marginals this link wrote
+     * on the previous solve, pi = -obj_sign * lambda and
+     * obj_sign * (z_L - z_U) (see the solution write below). Their
+     * meaning depends on the objective sense, so multiply by
+     * obj_sign before classifying: after that a positive value
+     * flags the lower side and a negative the upper, for minimize
+     * and maximize alike. Without it every active side of a max
+     * model came back flipped (the inbound half of gh#272, same
+     * class as gh#1033).
      *
      * Reconstruction is lossy on degenerate active sets — same
      * limitation upstream's CONOPT, IPOPT, and KNITRO links have
@@ -1071,11 +1093,11 @@ DllExport int STDCALL pouCallSolver(void *Cptr)
         if (bound_in && var_marg_in && (m == 0 || (cons_in && equ_marg_in))) {
             gmoGetVarM(gmo, var_marg_in);
             if (m > 0) gmoGetEquM(gmo, equ_marg_in);
-            /* Variables: nonzero marginal ⇒ a bound is active.
-             * GAMS stores the bound-multiplier sign with our
-             * convention (we already negated when writing it on the
-             * previous solve), so a positive value flags lower-side,
-             * negative upper-side. */
+            for (int j = 0; j < n; j++) var_marg_in[j] *= data->obj_sign;
+            for (int i = 0; i < m; i++) equ_marg_in[i] *= data->obj_sign;
+            /* Variables: nonzero marginal ⇒ a bound is active; with
+             * obj_sign applied, positive is z_L (lower side), negative
+             * z_U (upper side). */
             for (int j = 0; j < n; j++) {
                 if (x_l[j] >= x_u[j] - WS_TOL) {
                     bound_in[j] = POUNCE_WS_FIXED_OR_EQ;

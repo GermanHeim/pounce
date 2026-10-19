@@ -231,9 +231,11 @@ pub fn register_options(reg: &RegisteredOptions) -> Result<(), SolverException> 
          tighten variable bounds, drop redundant constraints, and \
          detect rank-deficient equality blocks before the IPM starts. \
          Off by default; the per-pass options below are then dormant. \
-         A removed row that tightened a variable bound may be returned with \
-         a zero row multiplier, while its dual attribution is carried by the \
-         corresponding tightened variable-bound multiplier.",
+         A removed singleton row that tightened a variable bound gets that \
+         bound's multiplier back as its row multiplier; a removed row with \
+         several free columns may still be returned with a zero row \
+         multiplier, its dual carried by the tightened variable-bound \
+         multiplier.",
     )?;
 
     reg.add_bool_option(

@@ -17,7 +17,7 @@
 use crate::ipopt_cq::IpoptCqHandle;
 use crate::ipopt_data::IpoptDataHandle;
 use crate::ipopt_nlp::IpoptNlp;
-use pounce_common::types::Number;
+use pounce_common::types::{Index, Number};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -30,51 +30,192 @@ pub struct IntermediateContext {
     pub nlp: Rc<RefCell<dyn IpoptNlp>>,
 }
 
-/// Iterate of the user's problem, already in the user's index spaces
-/// (full `n`, full `m`, original `g` order).
+/// The materialised iterate of the user's problem (full `n`, full `m`,
+/// original `g` order), and its window. Defined in
+/// [`pounce_nlp::live_iterate`] so the decorators that lift it one layer
+/// per `intermediate_callback` forward — presolve's above all — can reach
+/// it; re-exported here, where callers have always found it.
 ///
-/// The active-set SQP arm has no `IpoptData` / `IpoptCq` to stash handles
-/// to, so it hands the callback window a materialised copy instead. The
-/// interior-point arm never installs one.
-#[derive(Clone, Debug)]
-pub struct UserIterate {
-    pub x: Vec<Number>,
-    pub z_l: Vec<Number>,
-    pub z_u: Vec<Number>,
-    pub g: Vec<Number>,
-    pub lambda: Vec<Number>,
-}
+/// The active-set SQP arm installs one at every fire. The interior-point
+/// arm installs one when the TNLP asks for it
+/// ([`pounce_nlp::tnlp::TNLP::wants_current_iterate`]), built by
+/// [`ipm_user_iterate`].
+pub use pounce_nlp::live_iterate::{UserIterate, UserIterateGuard, with_current_user_iterate};
 
 thread_local! {
     static CURRENT_CTX: RefCell<Option<IntermediateContext>> = const { RefCell::new(None) };
-    static CURRENT_USER_ITERATE: RefCell<Option<UserIterate>> = const { RefCell::new(None) };
 }
 
-/// RAII guard for a [`UserIterate`] — the SQP counterpart of [`CtxGuard`].
-pub struct UserIterateGuard {
-    _private: (),
-}
-
-impl UserIterateGuard {
-    pub fn install(it: UserIterate) -> Self {
-        CURRENT_USER_ITERATE.with(|c| *c.borrow_mut() = Some(it));
-        Self { _private: () }
+/// The interior-point iterate in the space of the TNLP the NLP wraps, by
+/// the conversions `finalize_via_orig_nlp` applies to the final one, so the
+/// iterate read at the last fire is the solution `finalize_solution`
+/// reports:
+///
+/// * `x` through `finalize_solution_x` (fixed variables spliced back in);
+/// * `z_L`, `z_U`, `λ` through the `finalize_solution_*` lifts, which
+///   divide out `obj_scale_factor` (the unscaled-Lagrangian convention);
+/// * the bound multipliers of variables `make_parameter` removed recovered
+///   from `z_L − z_U = ∇f + Jᵀλ` when `fixed_var_duals` — upstream
+///   `TNLP::get_curr_iterate` does the same through
+///   `TNLPAdapter::ResortBoundMultipliers` for every treatment but
+///   `make_parameter_nodual`. Left at `0` they were not a zero multiplier
+///   but a missing one;
+/// * per-variable `user-scaling` (`x̃ = d ⊙ x`) is *not* undone here: the
+///   `ScalingTnlp` that substitutes it undoes it on the iterate's way
+///   through its `intermediate_callback`, as its `finalize_solution` does;
+/// * `g` from the iterate's own `c` / `d` values, unscaled.
+///
+/// The fixed-variable recovery evaluates the TNLP, so this must run before
+/// the callback borrows it, never from inside the callback.
+pub fn ipm_user_iterate(
+    nlp: &Rc<RefCell<dyn IpoptNlp>>,
+    data: &IpoptDataHandle,
+    cq: &IpoptCqHandle,
+    fixed_var_duals: bool,
+) -> Option<UserIterate> {
+    let curr = data.borrow().curr.clone()?;
+    // `curr_c` / `curr_d` evaluate through the NLP when not cached; no NLP
+    // borrow may be alive across them.
+    let (c, d, glx) = {
+        let cq = cq.borrow();
+        (cq.curr_c(), cq.curr_d(), cq.curr_grad_lag_x())
+    };
+    let nlp = nlp.borrow();
+    let n = nlp.n_full_x() as usize;
+    let m = nlp.n_full_g() as usize;
+    let x = nlp.finalize_solution_x(&*curr.x);
+    let mut z_l = nlp.finalize_solution_z_l(&*curr.z_l);
+    if z_l.is_empty() {
+        z_l = vec![0.0; n];
     }
-}
-
-impl Drop for UserIterateGuard {
-    fn drop(&mut self) {
-        CURRENT_USER_ITERATE.with(|c| *c.borrow_mut() = None);
+    let mut z_u = nlp.finalize_solution_z_u(&*curr.z_u);
+    if z_u.is_empty() {
+        z_u = vec![0.0; n];
     }
+    let mut lambda = nlp.finalize_solution_lambda(&*curr.y_c, &*curr.y_d);
+    if lambda.is_empty() {
+        lambda = vec![0.0; m];
+    }
+    if fixed_var_duals {
+        nlp.complete_fixed_var_bound_multipliers(&x, &lambda, &mut z_l, &mut z_u);
+    }
+    let g = nlp.pack_g_for_user(&*c, &*d);
+    let scaling = Some(iterate_scaling(&*nlp));
+    let (x_l_alg, x_u_alg) = algorithm_x_bounds(&*nlp, &x);
+    let grad_lag_x = user_grad_lag(&*nlp, &dense_values(&*glx));
+    Some(UserIterate {
+        x,
+        z_l,
+        z_u,
+        g,
+        lambda,
+        scaling,
+        x_l_alg,
+        x_u_alg,
+        grad_lag_x,
+    })
 }
 
-/// Read access to the SQP arm's current iterate; `None` outside its
-/// callback window.
-pub fn with_current_user_iterate<F, R>(f: F) -> Option<R>
-where
-    F: FnOnce(&UserIterate) -> R,
-{
-    CURRENT_USER_ITERATE.with(|c| c.borrow().as_ref().map(f))
+fn dense_values(v: &dyn pounce_linalg::Vector) -> Vec<Number> {
+    v.as_any()
+        .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
+        .map(|d| d.expanded_values())
+        .unwrap_or_default()
+}
+
+/// The algorithm's own `∇L` (var-x, scaled: `obj·∇f + J̃ᵀỹ − z̃_L + z̃_U`,
+/// upstream `curr_grad_lag_x`) as the unscaled `∇f + Jᵀλ − z_L + z_U` of the
+/// TNLP `nlp` wraps — `÷ obj`, the row factors cancelling in `J̃ᵀỹ` — at
+/// full x, `0` at a column the algorithm does not hold (upstream
+/// `ResortX(…, usefixedvals=false)`). Its `∇f` and `J` are the ones the
+/// algorithm evaluated at the iterate, so this costs no evaluation.
+pub fn user_grad_lag(nlp: &dyn IpoptNlp, glx: &[Number]) -> Vec<Number> {
+    let n = nlp.n_full_x() as usize;
+    let obj = nlp.obj_scaling_factor();
+    let inv = if obj == 0.0 { 1.0 } else { 1.0 / obj };
+    (0..n)
+        .map(|j| match nlp.full_x_to_var_x(j as Index) {
+            Some(k) => glx.get(k as usize).map_or(Number::NAN, |g| g * inv),
+            None => 0.0,
+        })
+        .collect()
+}
+
+/// The variable bounds `nlp` iterates against — its live `x_L` / `x_U`,
+/// i.e. the declared box after `bound_relax_factor` widened it and any
+/// safe-slack adjustment moved it (upstream `IpoptNLP::x_L()`, what
+/// `curr_slack_x_L` is measured to) — in the shape of the TNLP it wraps
+/// ([`UserIterate::x_l_alg`]): `±∞` at a column with no such bound, and at a
+/// fixed variable the algorithm does not hold, its value `x[j]`.
+pub fn algorithm_x_bounds(nlp: &dyn IpoptNlp, x: &[Number]) -> (Vec<Number>, Vec<Number>) {
+    use pounce_linalg::dense_vector::DenseVectorSpace;
+    let n = nlp.n_full_x() as usize;
+    let side = |live: &dyn pounce_linalg::Vector,
+                upper: bool,
+                packed: &dyn Fn(&dyn pounce_linalg::Vector) -> Vec<Number>| {
+        let mut ones = DenseVectorSpace::new(live.dim()).make_new_dense();
+        if live.dim() > 0 {
+            ones.set_values(&vec![1.0; live.dim() as usize]);
+        }
+        let (vals, mask) = (packed(live), packed(&ones));
+        (0..n)
+            .map(|j| {
+                if nlp.full_x_to_var_x(j as Index).is_none() {
+                    x.get(j).copied().unwrap_or(Number::NAN)
+                } else if mask.get(j).copied().unwrap_or(0.0) != 0.0 {
+                    vals[j]
+                } else if upper {
+                    Number::INFINITY
+                } else {
+                    Number::NEG_INFINITY
+                }
+            })
+            .collect::<Vec<Number>>()
+    };
+    (
+        side(nlp.x_l(), false, &|v| nlp.pack_z_l_for_user(v)),
+        side(nlp.x_u(), true, &|v| nlp.pack_z_u_for_user(v)),
+    )
+}
+
+/// The [`IterateScaling`](pounce_nlp::live_iterate::IterateScaling) of the
+/// problem `nlp` iterates on, in the shape of the TNLP it wraps — the
+/// objective factor and the per-row `c` / `d` factors, and which columns
+/// the algorithm holds (not a fixed variable, which upstream's `ResortX`
+/// reports at the TNLP's own value). The per-variable factor is `1` here:
+/// a `ScalingTnlp` substituting `x̃ = d ⊙ x` multiplies its `d` in when it
+/// lifts the iterate. Both arms solve through the same `OrigIpoptNlp`, so
+/// both read their scaling here.
+pub fn iterate_scaling(nlp: &dyn IpoptNlp) -> pounce_nlp::live_iterate::IterateScaling {
+    let n = nlp.n_full_x() as usize;
+    let m = nlp.n_full_g() as usize;
+    let x_in_alg: Vec<bool> = (0..n)
+        .map(|j| nlp.full_x_to_var_x(j as Index).is_some())
+        .collect();
+    let x = vec![1.0; n];
+    let cs = nlp.c_scale_vec();
+    let ds = nlp.d_scale_vec();
+    let g = (0..m)
+        .map(|i| {
+            if let Some(k) = nlp.full_g_to_c_block(i as Index) {
+                cs.as_ref()
+                    .and_then(|v| v.get(k as usize).copied())
+                    .unwrap_or(1.0)
+            } else if let Some(k) = nlp.full_g_to_d_block(i as Index) {
+                ds.as_ref()
+                    .and_then(|v| v.get(k as usize).copied())
+                    .unwrap_or(1.0)
+            } else {
+                1.0
+            }
+        })
+        .collect();
+    pounce_nlp::live_iterate::IterateScaling {
+        obj: nlp.obj_scaling_factor(),
+        x,
+        x_in_alg,
+        g,
+    }
 }
 
 /// RAII guard — installs `ctx` on construction, clears on drop. Used
@@ -108,6 +249,5 @@ where
 
 /// Whether a context is currently installed.
 pub fn is_active() -> bool {
-    CURRENT_CTX.with(|c| c.borrow().is_some())
-        || CURRENT_USER_ITERATE.with(|c| c.borrow().is_some())
+    CURRENT_CTX.with(|c| c.borrow().is_some()) || pounce_nlp::live_iterate::is_installed()
 }

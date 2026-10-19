@@ -1150,7 +1150,8 @@ works here: tolerances, `max_iter`, scaling, warm-start knobs.
 
 With `warm_start_init_point=yes` (Python `True` works too) among the
 options, the initial multipliers come from the model's suffixes, the
-same ones the ASL path uses: `dual` for equality multipliers,
+same ones the ASL path uses (the `.nl` reader honours the bound pair
+since gh#1033): `dual` for constraint multipliers,
 `ipopt_zL_in` / `ipopt_zU_in` for bound multipliers, matched by
 component name (the declaration's in-place rewrite keeps every
 constraint's name, so suffixes keyed by your own constraints match

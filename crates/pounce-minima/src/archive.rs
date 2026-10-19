@@ -18,6 +18,18 @@ pub fn scaled_distance(a: &[Number], b: &[Number], l: &[Number]) -> Number {
     acc.sqrt()
 }
 
+/// The base-problem multipliers recovered at an accepted minimum.
+#[derive(Clone, Debug, Default)]
+pub struct Duals {
+    /// Constraint duals, length `m`, in the user's `∇f + λ·∇g + z = 0`
+    /// convention.
+    pub lambda: Vec<Number>,
+    /// Bound multipliers, length `n` (empty when unavailable), `≥ 0` at an
+    /// active bound, in the frame of the problem the engine solved.
+    pub z_l: Vec<Number>,
+    pub z_u: Vec<Number>,
+}
+
 /// Accepted minima plus the dedup test.
 pub struct Archive {
     dedup: Number,
@@ -29,6 +41,10 @@ pub struct Archive {
     /// clean re-solve at the accepted point (issue #196, related). Parallel to
     /// `xs` / `fs`.
     pub ls: Vec<Vec<Number>>,
+    /// Per-minimum lower / upper bound multipliers (length `n`, or empty when
+    /// unavailable), recovered alongside `ls`. Parallel to `xs` / `fs`.
+    pub zls: Vec<Vec<Number>>,
+    pub zus: Vec<Vec<Number>>,
 }
 
 impl Archive {
@@ -39,6 +55,8 @@ impl Archive {
             xs: Vec::new(),
             fs: Vec::new(),
             ls: Vec::new(),
+            zls: Vec::new(),
+            zus: Vec::new(),
         }
     }
 
@@ -64,9 +82,11 @@ impl Archive {
             .any(|m| scaled_distance(x, m, &self.l) <= radius)
     }
 
-    pub fn add(&mut self, x: Vec<Number>, lambda: Vec<Number>, f: Number) {
+    pub fn add(&mut self, x: Vec<Number>, duals: Duals, f: Number) {
         self.xs.push(x);
-        self.ls.push(lambda);
+        self.ls.push(duals.lambda);
+        self.zls.push(duals.z_l);
+        self.zus.push(duals.z_u);
         self.fs.push(f);
     }
 

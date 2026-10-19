@@ -1861,3 +1861,322 @@ fn the_cap_legs_compose_at_the_fixed_and_scaled_corner() {
         );
     }
 }
+
+// ---------------------------------------------------------------
+// `bound_multiplier_rows` in every leg
+// ---------------------------------------------------------------
+
+/// The `z` slopes of the logical variables `[k, w]` from the plain
+/// full step, as `(z_L, z_U)` pairs, read through `bound_multiplier_rows`
+/// with the full-x offset `off` of `k`. `p` carries no bound, so its pair
+/// must be `(None, None)`, as must a leading fixed variable's.
+fn z_slopes(s: &Solver, off: usize, d_hi: Number, d_lo: Number) -> Vec<Number> {
+    let n = s.n_full_x().expect("n_full_x") as usize;
+    let idx: Vec<Index> = (0..n as Index).collect();
+    let rows = s.bound_multiplier_rows(&idx).expect("bound rows");
+    assert_eq!(rows[off + 2], (None, None), "p is free: no z rows");
+    if off == 1 {
+        assert_eq!(rows[0], (None, None), "a fixed variable has no z rows");
+    }
+    let at = |d: Number| s.parametric_step_full(&[0], &[d]).expect("full step");
+    let (hi, lo) = (at(d_hi), at(d_lo));
+    let mut out = Vec::new();
+    for v in [off, off + 1] {
+        let (l, u) = rows[v];
+        for r in [l.expect("bounded below"), u.expect("bounded above")] {
+            let r = r as usize;
+            out.push((hi[r] - lo[r]) / (d_hi - d_lo));
+        }
+    }
+    out
+}
+
+/// `[z_L(k), z_U(k), z_L(w), z_U(w)]`. The plain step is the two-sided
+/// average at a kink (the directional mode exists to repair that), so
+/// `k`'s lower multiplier moves at `-A/2` on both sides -- the mean of the
+/// holding side's `-A` and the leaving side's `0`. Every other multiplier
+/// sits on an inactive bound and does not move. A map that put `k`'s step
+/// on `w`, or on the fixed variable, moves the `-A/2` off its slot.
+fn exact_z_slopes() -> [Number; 4] {
+    [-A / 2.0, 0.0, 0.0, 0.0]
+}
+
+#[test]
+fn leg_scaling_the_bound_multiplier_rows_are_unmoved_by_the_change_of_variables() {
+    let plain = solved(None, false);
+    let scaled = solved(Some(D_PLAIN.to_vec()), false);
+    assert_eq!(
+        plain.bound_multiplier_rows(&[0, 1, 2]).expect("plain rows"),
+        scaled
+            .bound_multiplier_rows(&[0, 1, 2])
+            .expect("scaled rows"),
+        "the z rows moved under the change of variables",
+    );
+    for (what, s) in [("plain", &plain), ("scaled", &scaled)] {
+        assert_close(
+            &format!("{what} z slopes"),
+            &z_slopes(s, 0, 1.0e-3, 1.0e-6),
+            &exact_z_slopes(),
+            1e-5,
+        );
+    }
+}
+
+#[test]
+fn leg_magnitude_the_bound_multiplier_slopes_do_not_depend_on_the_step_size() {
+    let s = solved(None, false);
+    for sign in [1.0, -1.0] {
+        for w in DELTAS.windows(2) {
+            assert_close(
+                &format!("z slopes between {:e} and {:e}", sign * w[0], sign * w[1]),
+                &z_slopes(&s, 0, sign * w[0], sign * w[1]),
+                &exact_z_slopes(),
+                1e-4,
+            );
+        }
+    }
+}
+
+#[test]
+fn leg_fixed_the_bound_multipliers_are_unmoved_by_a_fixed_variable_ahead_of_the_kink() {
+    for (what, s) in [
+        ("fixed", solved(None, true)),
+        ("fixed and scaled", solved(Some(D_FIXED.to_vec()), true)),
+    ] {
+        assert_close(
+            &format!("{what} z slopes"),
+            &z_slopes(&s, 1, 1.0e-3, 1.0e-6),
+            &exact_z_slopes(),
+            1e-5,
+        );
+    }
+}
+
+// ---------------------------------------------------------------
+// `bound_multiplier_rows` where the bound spaces are not var-x
+// ---------------------------------------------------------------
+//
+// The three legs above cannot see the defect `bound_multiplier_rows`
+// exists to prevent. On `KinkTnlp` the free `p` sits AFTER the bounded
+// `k`, `w`, and both carry both bounds, so var-x, the `x_l` compressed
+// space and the `x_u` compressed space all coincide on every variable
+// the legs read: the naive `z_lo + var_row` / `z_lo + n_l + var_row`
+// maps are exact there. Measured: that mutation left all three legs
+// green. The fixture below puts a free variable and an upper-only
+// variable AHEAD of the kink, so the three spaces disagree everywhere.
+//
+// Mutation table (`bound_multiplier_rows`, `crates/pounce-sensitivity/
+// src/solver.rs`; restored after each):
+//
+// | mutation                                            | goes red |
+// |-----------------------------------------------------|----------|
+// | `slot.0 = Some(z_lo + var_row)`, `slot.1 = Some(z_lo + dims[4] + var_row)` | this test only: `z_U(u)` reads `k`'s `0` for `B`, `z_L(k)` reads `u`'s `B` for `-A/2` |
+
+/// Pull of the upper-only variable's target on the pin.
+const B: Number = 0.4;
+/// Unconstrained target of the upper-only variable, above its bound.
+const U_TGT: Number = 3.0;
+/// The upper-only variable's bound: strongly active.
+const U_HI: Number = 1.0;
+
+/// ```text
+/// min  0.5 (f - 1)^2 + 0.5 (u - U_TGT - B p)^2
+///      + 0.5 k^2 - A p k + 0.5 (w - W_STAR)^2
+/// s.t. p = 0,   u <= U_HI,   0 <= k <= 10,   0 <= w <= 10
+/// ```
+///
+/// Variable order `[f, u, k, w, p]`: `f` free, `u` upper-only, then the
+/// `KinkTnlp` block. var-x rows are `0..5`; the `x_l` space is `[k, w]`
+/// and the `x_u` space is `[u, k, w]`, so `k` is var-x row 2, `x_l`
+/// entry 0 and `x_u` entry 1 -- three different numbers for one
+/// variable. `u` holds its bound strongly, with `z_U = U_TGT + B p -
+/// U_HI`, so its upper multiplier moves at `B`: a slot a shifted map
+/// lands on reads `0` or `-A/2` instead, never by accident `B`.
+struct ShiftedBoundsTnlp {
+    x_scaling: Option<Vec<Number>>,
+}
+
+impl TNLP for ShiftedBoundsTnlp {
+    fn get_nlp_info(&mut self) -> Option<NlpInfo> {
+        Some(NlpInfo {
+            n: 5,
+            m: 1,
+            nnz_jac_g: 1,
+            nnz_h_lag: 7,
+            index_style: IndexStyle::C,
+        })
+    }
+
+    fn get_scaling_parameters(&mut self, req: ScalingRequest<'_>) -> bool {
+        let Some(d) = self.x_scaling.as_ref() else {
+            return false;
+        };
+        *req.obj_scaling = 1.0;
+        *req.use_x_scaling = true;
+        req.x_scaling.copy_from_slice(d);
+        *req.use_g_scaling = false;
+        true
+    }
+
+    fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+        b.x_l
+            .copy_from_slice(&[-1.0e19, -1.0e19, 0.0, 0.0, -1.0e19]);
+        b.x_u.copy_from_slice(&[1.0e19, U_HI, 10.0, 10.0, 1.0e19]);
+        b.g_l[0] = 0.0;
+        b.g_u[0] = 0.0;
+        true
+    }
+
+    fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        sp.x.copy_from_slice(&[0.0, 0.5, 0.3, 0.5, 0.0]);
+        true
+    }
+
+    fn eval_f(&mut self, x: &[Number], _new_x: bool) -> Option<Number> {
+        let (f, u, k, w, p) = (x[0], x[1], x[2], x[3], x[4]);
+        let r = u - U_TGT - B * p;
+        Some(
+            0.5 * (f - 1.0) * (f - 1.0) + 0.5 * r * r + 0.5 * k * k - A * p * k
+                + 0.5 * (w - W_STAR) * (w - W_STAR),
+        )
+    }
+
+    fn eval_grad_f(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        let (f, u, k, w, p) = (x[0], x[1], x[2], x[3], x[4]);
+        let r = u - U_TGT - B * p;
+        g[0] = f - 1.0;
+        g[1] = r;
+        g[2] = k - A * p;
+        g[3] = w - W_STAR;
+        g[4] = -B * r - A * k;
+        true
+    }
+
+    fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+        g[0] = x[4];
+        true
+    }
+
+    fn eval_jac_g(&mut self, _x: Option<&[Number]>, _nx: bool, mode: SparsityRequest<'_>) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                irow[0] = 0;
+                jcol[0] = 4;
+            }
+            SparsityRequest::Values { values } => values[0] = 1.0,
+        }
+        true
+    }
+
+    fn eval_h(
+        &mut self,
+        _x: Option<&[Number]>,
+        _new_x: bool,
+        obj_factor: Number,
+        _lambda: Option<&[Number]>,
+        _new_lambda: bool,
+        mode: SparsityRequest<'_>,
+    ) -> bool {
+        match mode {
+            SparsityRequest::Structure { irow, jcol } => {
+                // lower triangle: (f,f) (u,u) (k,k) (w,w) (p,u) (p,k) (p,p)
+                irow.copy_from_slice(&[0, 1, 2, 3, 4, 4, 4]);
+                jcol.copy_from_slice(&[0, 1, 2, 3, 1, 2, 4]);
+            }
+            SparsityRequest::Values { values } => {
+                let o = obj_factor;
+                values.copy_from_slice(&[o, o, o, o, -o * B, -o * A, o * B * B]);
+            }
+        }
+        true
+    }
+
+    fn finalize_solution(&mut self, _s: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {}
+}
+
+fn solved_shifted(x_scaling: Option<Vec<Number>>) -> Solver {
+    let mut app = IpoptApplication::new();
+    app.options_mut()
+        .set_integer_value("print_level", 0, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_string_value("sb", "yes", true, false)
+        .unwrap();
+    app.options_mut()
+        .set_string_value("nlp_scaling_method", "user-scaling", true, false)
+        .unwrap();
+    app.options_mut()
+        .set_numeric_value("tol", 1e-8, true, false)
+        .unwrap();
+    app.options_mut()
+        .set_numeric_value("bound_relax_factor", 0.0, true, false)
+        .unwrap();
+    app.initialize().unwrap();
+    let tnlp: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(ShiftedBoundsTnlp { x_scaling }));
+    let mut solver = Solver::new(app, tnlp);
+    let status = solver.solve();
+    assert!(
+        matches!(
+            status,
+            ApplicationReturnStatus::SolveSucceeded
+                | ApplicationReturnStatus::SolvedToAcceptableLevel
+        ),
+        "base solve failed: {status:?}",
+    );
+    solver
+}
+
+/// Per-variable factors spanning five orders, so the scaled arm also
+/// moves every frame conversion the rows pass through.
+const D_SHIFTED: [Number; 5] = [3.0, 1.0e-2, 5.0, 0.25, 1.0e3];
+
+#[test]
+fn the_bound_multiplier_rows_follow_each_bound_space_not_var_x() {
+    for (what, s) in [
+        ("plain", solved_shifted(None)),
+        ("scaled", solved_shifted(Some(D_SHIFTED.to_vec()))),
+    ] {
+        let rows = s
+            .bound_multiplier_rows(&[0, 1, 2, 3, 4])
+            .expect("bound rows");
+        assert_eq!(rows[0], (None, None), "{what}: f is free");
+        assert_eq!(rows[4], (None, None), "{what}: p is free");
+        assert_eq!(rows[1].0, None, "{what}: u has no lower bound");
+        let wanted = [
+            (rows[1].1.expect("u bounded above"), B),
+            (rows[2].0.expect("k bounded below"), -A / 2.0),
+            (rows[2].1.expect("k bounded above"), 0.0),
+            (rows[3].0.expect("w bounded below"), 0.0),
+            (rows[3].1.expect("w bounded above"), 0.0),
+        ];
+        // slopes on both sides and across the magnitude sweep: the
+        // `-A/2` is the plain step's two-sided average at the kink
+        for sign in [1.0, -1.0] {
+            for d in DELTAS.windows(2) {
+                let (d_hi, d_lo) = (sign * d[0], sign * d[1]);
+                let at = |d: Number| s.parametric_step_full(&[0], &[d]).expect("full step");
+                let (hi, lo) = (at(d_hi), at(d_lo));
+                let got: Vec<Number> = wanted
+                    .iter()
+                    // a checked read: a shifted map can land past the
+                    // vector, and that must fail as a wrong slope (NaN)
+                    .map(|&(r, _)| {
+                        let r = r as usize;
+                        hi.get(r)
+                            .zip(lo.get(r))
+                            .map_or(Number::NAN, |(a, b)| (a - b) / (d_hi - d_lo))
+                    })
+                    .collect();
+                let want: Vec<Number> = wanted.iter().map(|&(_, v)| v).collect();
+                assert_close(
+                    &format!(
+                        "{what} [z_U(u), z_L(k), z_U(k), z_L(w), z_U(w)] between {d_hi:e} and {d_lo:e}"
+                    ),
+                    &got,
+                    &want,
+                    1e-4,
+                );
+            }
+        }
+    }
+}

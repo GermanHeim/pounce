@@ -557,6 +557,11 @@ fn real_main() -> ExitCode {
     // `(0, 1.5, 1)` and `solver_selection=nlp` wrote `(-0, -1.5, -1)`.
     // Builtins are always minimize, so this stays `1.0` for them.
     let mut nl_dual_sign: f64 = 1.0;
+    // Does the `.nl` carry anything a warm start would read — a nonzero `x`
+    // or `d` entry, or a nonzero `ipopt_zL_in` / `ipopt_zU_in` value? Gates the
+    // convex-arm decline below: an all-zero or absent start is what the
+    // convex engines' cold start already uses.
+    let mut nl_supplies_start = false;
     // The model's own AMPL option words, echoed back in the `.sol`
     // `Options` block the way an ASL solver does. Empty for problems
     // that did not come from a `.nl` header.
@@ -598,6 +603,19 @@ fn real_main() -> ExitCode {
                     nl_suffixes = Some(prob.suffixes.clone());
                     nl_dims = Some((prob.n, prob.m));
                     nl_dual_sign = if prob.minimize { 1.0 } else { -1.0 };
+                    nl_supplies_start = prob.x0.iter().any(|v| *v != 0.0)
+                        || prob.lambda0.iter().any(|v| *v != 0.0)
+                        || ["ipopt_zL_in", "ipopt_zU_in"].iter().any(|k| {
+                            prob.suffixes
+                                .var_real
+                                .get(*k)
+                                .is_some_and(|v| v.iter().any(|x| *x != 0.0))
+                                || prob
+                                    .suffixes
+                                    .var_int
+                                    .get(*k)
+                                    .is_some_and(|v| v.iter().any(|x| *x != 0))
+                        });
                     nl_ampl_options = prob.ampl_options.clone();
                     // gh#987: pounce is a continuous solver. A `.nl` that
                     // declares binary / integer variables is solved as its
@@ -947,11 +965,40 @@ fn real_main() -> ExitCode {
         // this is refused outright below rather than warned about.
         let decline_convex_for_obj_scaling =
             maximize_via_obj_scaling && matches!(selection, SolverSelection::Auto);
+        // And for a requested warm start. `warm_start_init_point=yes` asks the
+        // solve to begin from the `.nl`'s primal and dual starting values
+        // (`x0`, the `d` segment, the `ipopt_zL_in`/`ipopt_zU_in` suffixes),
+        // and the convex dispatch below reads none of them: it re-parses the
+        // model into a `QpProblem` and runs a cold self-dual start, so with
+        // `max_iter=0` it reported `x = 0` and zero duals instead of the
+        // supplied point. `pounce_convex::solve_qp_ipm_warm` exists, but it is
+        // not that contract either: it recenters the slacks and multipliers
+        // into the interior by design (`QpWarmStart`), needs the direct KKT
+        // driver, and the conic and active-set engines take no dual seed at
+        // all. So under `auto` the general path, which honors every part of
+        // the request, takes the model.
+        //
+        // Only when the `.nl` supplies something to start from, though — the
+        // same test the curvature-scaling gate above applies, for the same
+        // reason. Pyomo users often set `warm_start_init_point=yes` globally;
+        // on a model with no `x`/`d` entries and no `_in` suffixes the reroute
+        // buys a different engine and nothing else. Measured on `lp_israel`
+        // before this test: 29 iterations on the convex arm, 210 on the NLP
+        // one.
+        let wants_warm_start = nl_supplies_start
+            && app
+                .options()
+                .get_string_value("warm_start_init_point", "")
+                .map(|(v, _)| v == "yes")
+                .unwrap_or(false);
+        let decline_convex_for_warm_start =
+            wants_warm_start && matches!(selection, SolverSelection::Auto);
         // Any of these declines the fast path; the messages below say which.
         let decline_convex = decline_convex_for_postopt
             || decline_convex_for_user_scaling
             || decline_convex_for_curvature_scaling
-            || decline_convex_for_obj_scaling;
+            || decline_convex_for_obj_scaling
+            || decline_convex_for_warm_start;
 
         // Same bargain for a conic solve that finishes without a verified KKT
         // point: under `auto` the class was our inference, not the user's
@@ -1172,6 +1219,29 @@ fn real_main() -> ExitCode {
                          internally and does not read them; the requested \
                          scaling will be skipped. Use solver_selection=nlp or \
                          auto to apply it."
+                    );
+                }
+            }
+            // The warm-start decline, or, under a forced convex engine, a
+            // warning that the starting point will not be read.
+            if wants_warm_start {
+                if decline_convex_for_warm_start {
+                    eprintln!(
+                        "pounce: note: this problem classifies as {} but \
+                         warm_start_init_point=yes asks to start from the .nl's \
+                         primal and dual values, which the convex solver \
+                         (pounce-convex) does not read; routing to the general \
+                         NLP interior-point path so the warm start is honored.",
+                        class.name()
+                    );
+                } else {
+                    eprintln!(
+                        "pounce: warning: warm_start_init_point=yes asks to start \
+                         from the .nl's primal and dual values, but \
+                         solver_selection={sel_str} forces the convex solver \
+                         (pounce-convex), which starts cold and does not read \
+                         them; the warm start will be ignored. Use \
+                         solver_selection=nlp or auto to honor it."
                     );
                 }
             }
@@ -2149,9 +2219,34 @@ fn real_main() -> ExitCode {
     // from the solution `CountingTnlp` captured at `finalize_solution`
     // (original-problem space, the same `x` / `lambda` the IPM hook would
     // have recorded). Only fills when empty, so the IPM path is untouched.
+    //
+    // The two flags record that a cell now holds that payload rather than
+    // `on_converged`'s, because the frames differ: `CountingTnlp` sits
+    // inside the gh#486 scaling wrapper (see **Frame** below), so this
+    // payload is already in the model's units and the variable-scaling undo
+    // further down must skip it. Before they existed an SQP solve under
+    // `nlp_scaling_method=user-scaling` with `scaling_factor[x1] = 10`
+    // wrote `x1 = 0.1` (correct 1) and `ipopt_zU_out = -10` (correct -1)
+    // to the `.sol`: the factor applied twice. The row duals are not
+    // touched by that undo, so `lambda` was right throughout.
+    let mut x_capture_from_finalize = false;
+    let mut z_capture_from_finalize = false;
     if nominal_capture.borrow().is_none() {
         if let Some(xl) = counting.borrow().captured_solution() {
             *nominal_capture.borrow_mut() = Some(xl);
+            x_capture_from_finalize = true;
+        }
+    }
+    // The bound multipliers too, from the same `finalize_solution` lift:
+    // without them an SQP `.sol` carried no `ipopt_zL_out` / `ipopt_zU_out`
+    // at all while every other engine's did. Empty blocks (a non-
+    // `OrigIpoptNlp` model) are left alone, as below.
+    if bound_mult_capture.borrow().is_none() {
+        if let Some((z_l, z_u)) = counting.borrow().captured_bound_mults() {
+            if !z_l.is_empty() || !z_u.is_empty() {
+                *bound_mult_capture.borrow_mut() = Some((z_l, z_u));
+                z_capture_from_finalize = true;
+            }
         }
     }
 
@@ -2194,10 +2289,10 @@ fn real_main() -> ExitCode {
     // factor, with the objective beside it unchanged and right. Silent,
     // plausible, wrong: the shape this whole block exists to remove, one
     // wrapper over.
-    let capture_is_already_in_model_units = app.answer_restored_from_floor();
-    if capture_is_already_in_model_units {
+    if app.answer_restored_from_floor() {
         if let Some(xl) = counting.borrow().captured_solution() {
             *nominal_capture.borrow_mut() = Some(xl);
+            x_capture_from_finalize = true;
         }
         // The bound multipliers are the same story one field over: they
         // also come from `on_converged`, they are also the loser's, and
@@ -2211,6 +2306,7 @@ fn real_main() -> ExitCode {
         if let Some((z_l, z_u)) = counting.borrow().captured_bound_mults() {
             if !z_l.is_empty() || !z_u.is_empty() {
                 *bound_mult_capture.borrow_mut() = Some((z_l, z_u));
+                z_capture_from_finalize = true;
             }
         }
     }
@@ -2235,7 +2331,12 @@ fn real_main() -> ExitCode {
         })
         .unwrap_or(false);
     if let Some(p) = &presolve_handle {
-        let lifted = if p.borrow().n_dropped_rows() > 0 || elim_reduced {
+        // `postsolve_rewrote_duals`: M24's derived-bound recovery can move a
+        // multiplier onto a kept row even when no row was dropped.
+        let lifted = if p.borrow().n_dropped_rows() > 0
+            || elim_reduced
+            || p.borrow().postsolve_rewrote_duals()
+        {
             p.borrow().finalized_full_solution()
         } else {
             None
@@ -2262,15 +2363,18 @@ fn real_main() -> ExitCode {
     // and report it as though it were in the model's units, which no
     // reader could detect. Both captures come from the same iterate the
     // factors were built against, so a mismatch is a wiring bug.
-    // Skipped when the captures came from the `finalize_solution` payload
-    // (see `capture_is_already_in_model_units` above): that payload is the
-    // output of this very substitution, so correcting it again squares the
-    // factor.
-    if let Some(d) = app
-        .variable_scaling()
-        .filter(|_| !capture_is_already_in_model_units)
-    {
-        if let Some((x, _lambda)) = nominal_capture.borrow_mut().as_mut() {
+    // Skipped, per cell, when the capture came from the `finalize_solution`
+    // payload (the SQP backfill or the floor-restore overwrite above): that
+    // payload is the output of this very substitution, so correcting it
+    // again squares the factor. Per cell rather than one flag because the
+    // two backfills are independent — a non-`OrigIpoptNlp` model yields an
+    // `x` capture and no bound multipliers.
+    if let Some(d) = app.variable_scaling() {
+        if let Some((x, _lambda)) = nominal_capture
+            .borrow_mut()
+            .as_mut()
+            .filter(|_| !x_capture_from_finalize)
+        {
             assert_eq!(
                 x.len(),
                 d.len(),
@@ -2282,7 +2386,11 @@ fn real_main() -> ExitCode {
                 *xi /= s;
             }
         }
-        if let Some((z_l, z_u)) = bound_mult_capture.borrow_mut().as_mut() {
+        if let Some((z_l, z_u)) = bound_mult_capture
+            .borrow_mut()
+            .as_mut()
+            .filter(|_| !z_capture_from_finalize)
+        {
             assert_eq!(
                 z_l.len(),
                 d.len(),
@@ -2311,6 +2419,31 @@ fn real_main() -> ExitCode {
                 if z_l.len() != full.z_l.len() {
                     *z_l = full.z_l;
                     *z_u = full.z_u;
+                }
+            }
+        }
+    }
+
+    // M24: `PresolveTnlp::finalize_solution` rewrites bound multipliers that
+    // belong to the original problem's rows — a dropped singleton row's bound
+    // handed back to the row, and a multiplier on a bound presolve *derived*
+    // from rows recovered onto the active rows and declared bounds it came
+    // from — and the full-length `lambda` swapped in above carries the other
+    // half. The bound capture was taken outside presolve, so it still holds
+    // the solver's numbers; overwrite the entries presolve changed so the
+    // `.sol` agrees with that `lambda`. `PresolveTnlp` sits inside the gh#486
+    // scaling wrapper, so its values are in the model's units, as this capture
+    // is after the scaling undo above; the objective-sense flip below applies
+    // to both alike.
+    if let Some(p) = &presolve_handle {
+        let overrides = p.borrow().bound_multiplier_overrides().to_vec();
+        if !overrides.is_empty() {
+            if let Some((z_l, z_u)) = bound_mult_capture.borrow_mut().as_mut() {
+                for (j, zl, zu) in overrides {
+                    if let (Some(a), Some(b)) = (z_l.get_mut(j), z_u.get_mut(j)) {
+                        *a = zl;
+                        *b = zu;
+                    }
                 }
             }
         }

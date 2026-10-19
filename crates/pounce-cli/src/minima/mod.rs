@@ -86,7 +86,7 @@ pub fn run(
     // Write the per-minimum `.sol` files: best → <stub>.sol, the rest →
     // ranked siblings <stub>.minNNN.sol.
     if let Some(sp) = sol_path {
-        write_sol_files(sp, minima, m, dual_sign);
+        write_sol_files(sp, minima, n, m, dual_sign);
     }
 
     // JSON report: the standard single-solve report for the best minimum,
@@ -169,7 +169,14 @@ fn print_table(
 /// `--minima` run on a maximize model writes marginals opposite in sign to the
 /// ones a plain solve of the same file writes. The same factor is applied to
 /// the reported objective, in `print_table` and `write_json_report`.
-fn write_sol_files(sol_path: &Path, minima: &[Minimum], m: usize, dual_sign: Number) {
+///
+/// Each file also carries the `ipopt_zL_out` / `ipopt_zU_out` suffix blocks a
+/// plain solve's `.sol` carries (gh #296), built from the bound multipliers
+/// recovered at that minimum with the plain solve's signs:
+/// `ipopt_zL_out = σ·z_l`, `ipopt_zU_out = −σ·z_u` (`σ = dual_sign`). Without
+/// them a Pyomo `model.ipopt_zL_out` / AMPL `.rc` read after `--minima` came
+/// back empty while the same read after a plain solve did not.
+fn write_sol_files(sol_path: &Path, minima: &[Minimum], n: usize, m: usize, dual_sign: Number) {
     let zeros = vec![0.0; m];
     for (rank, mn) in minima.iter().enumerate() {
         let path = if rank == 0 {
@@ -188,18 +195,44 @@ fn write_sol_files(sol_path: &Path, minima: &[Minimum], m: usize, dual_sign: Num
         } else {
             zeros.clone()
         };
+        let suffixes = bound_multiplier_suffixes(mn, n, dual_sign);
         let payload = crate::nl_writer::SolutionFile {
             message: &message,
             x: &mn.x,
             mult_g: &lambda,
             solve_result_num: status_to_solve_result_num(ApplicationReturnStatus::SolveSucceeded),
-            suffixes: &[],
+            suffixes: &suffixes,
         };
         match crate::nl_writer::write_sol_file(&path, &payload) {
             Ok(_) => eprintln!("pounce: wrote {}", path.display()),
             Err(e) => eprintln!("pounce: failed to write {}: {e}", path.display()),
         }
     }
+}
+
+/// The `ipopt_zL_out` / `ipopt_zU_out` blocks for one minimum, in the sign a
+/// plain solve writes them (`main.rs`, "Bound-multiplier suffixes"): the
+/// engine-frame `z_l, z_u ≥ 0` scaled by the sense `σ`, with the upper block
+/// negated — `σ·z_l` and `−σ·z_u`. Empty when the minimum carries no
+/// full-length pair, so a missing recovery writes no block rather than a
+/// block of zeros.
+fn bound_multiplier_suffixes(
+    mn: &Minimum,
+    n: usize,
+    sigma: Number,
+) -> Vec<crate::nl_writer::SolSuffix> {
+    if mn.z_l.len() != n || mn.z_u.len() != n {
+        return Vec::new();
+    }
+    let block = |name: &str, values: Vec<Number>| crate::nl_writer::SolSuffix {
+        name: name.to_string(),
+        target: crate::nl_writer::SolSuffixTarget::Var,
+        values: crate::nl_writer::SolSuffixValues::Real(values),
+    };
+    vec![
+        block("ipopt_zL_out", mn.z_l.iter().map(|&z| sigma * z).collect()),
+        block("ipopt_zU_out", mn.z_u.iter().map(|&z| -sigma * z).collect()),
+    ]
 }
 
 /// `<stub>.sol` → `<stub>.minNNN.sol` for rank ≥ 1.
@@ -245,6 +278,7 @@ fn write_json_report(
     builder.problem.n_objectives = 1;
     builder.problem.nnz_jac_g = Some(info.nnz_jac_g);
     builder.problem.nnz_h_lag = Some(info.nnz_h_lag);
+    builder.problem.minimize = obj_sign > 0.0;
     if let Some(best) = minima.first() {
         builder.solution.status = ApplicationReturnStatus::SolveSucceeded;
         builder.solution.solve_result_num =
@@ -255,9 +289,12 @@ fn write_json_report(
         builder.solution.objective = obj_sign * best.objective;
         builder.solution.x = best.x.clone();
         // Real base-problem duals for the best minimum (issue #196, related);
-        // `recover_duals` guarantees length `m`, guard defensively.
+        // `recover_duals` guarantees length `m`, guard defensively. Scaled
+        // by the sense like a plain solve's report (gh#959) and like this
+        // run's own `.sol` (`write_sol_files`), or a maximize model's JSON
+        // `lambda` disagrees with both.
         builder.solution.lambda = if best.lambda.len() == m {
-            best.lambda.clone()
+            best.lambda.iter().map(|&v| obj_sign * v).collect()
         } else {
             vec![0.0; m]
         };

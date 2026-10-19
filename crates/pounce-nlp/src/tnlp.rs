@@ -313,6 +313,27 @@ pub trait TNLP {
         true
     }
 
+    /// Will [`Self::intermediate_callback`] read the live iterate
+    /// ([`crate::live_iterate::with_current_user_iterate`], the C API's
+    /// `GetIpoptCurrentIterate` / `GetIpoptCurrentViolations`)?
+    ///
+    /// The interior-point arm materialises that iterate before each fire
+    /// only when this says yes, because doing so is not free: the bound
+    /// multipliers of fixed variables are recovered from `∇f + Jᵀλ`
+    /// (one gradient and one Jacobian evaluation), and a presolve layer
+    /// re-evaluates the model to restore its removed rows. Upstream pays
+    /// that on demand inside `get_curr_iterate`; pounce cannot, since the
+    /// callback holds the TNLP those evaluations need.
+    ///
+    /// Default `false`, so a callback that only reads its [`IterStats`]
+    /// (every Python solve fires one) costs nothing extra. The C
+    /// interface answers `true` whenever a callback is registered. A
+    /// decorator that forwards `intermediate_callback` must forward this
+    /// too. The active-set SQP arm installs its iterate unconditionally.
+    fn wants_current_iterate(&self) -> bool {
+        false
+    }
+
     /// Final metadata pass — called just before
     /// [`Self::finalize_solution`]. Default does nothing.
     fn finalize_metadata(&mut self, _var: &MetaData, _con: &MetaData) {}

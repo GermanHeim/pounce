@@ -2506,6 +2506,18 @@ impl IpoptApplication {
     /// The iterate is auto-cleared after use, so a follow-up
     /// solve without an intervening `set_sqp_warm_start` call
     /// cold-starts.
+    ///
+    /// `x`, `lambda_g` and `lambda_x` are in the **caller's** space — what
+    /// `finalize_solution` reports: full-`n` `x` in model units, `lambda_g`
+    /// in `g` order on the unscaled Lagrangian `f + λᵀg`, and
+    /// `lambda_x = z_L − z_U`. The solve maps them into the algorithm's
+    /// space (fixed variables dropped, `[y_c; y_d]` row order, objective,
+    /// constraint and per-variable scaling) itself, so a converged solve's
+    /// reported multipliers can be fed back unchanged. The working set is in
+    /// the same space: bound statuses full-`n` in variable order (fixed
+    /// variables' entries are ignored), constraint statuses one per `g` row
+    /// in the user's row order — exactly what [`Self::last_sqp_working_set`]
+    /// publishes, so a published set can be fed back as-is.
     pub fn set_sqp_warm_start(&mut self, warm: crate::sqp::SqpIterates) {
         self.sqp_warm_start = Some(warm);
     }
@@ -2656,27 +2668,41 @@ impl IpoptApplication {
     /// solve, or `None` if the last solve wasn't SQP, didn't
     /// produce a working set (cold-start declared the iterate
     /// optimal before solving any QP), or no SQP solve has run.
+    ///
+    /// The set is in the **caller's** index spaces, the ones
+    /// `finalize_solution` uses: `bounds[j]` is variable `j` of the full
+    /// `n` (a variable `fixed_variable_treatment = make_parameter` removed
+    /// reads `Fixed`), and `constraints[i]` is `g` row `i` in the model's
+    /// own row order — not the SQP's internal equalities-first order. It is
+    /// the form [`Self::set_sqp_warm_start`] takes back.
     pub fn last_sqp_working_set(&self) -> Option<&pounce_qp::WorkingSet> {
         self.sqp_last_working_set.as_ref()
     }
 
-    /// gh#986 review item 10: a working set computed in the solve's reduced
-    /// space (fixed variables eliminated), lifted to the caller's full
-    /// variable space. Fixed variables are `Fixed`; a working set that is not
-    /// reduced-sized is returned unchanged.
-    fn working_set_to_full(&self, ws: pounce_qp::WorkingSet) -> pounce_qp::WorkingSet {
-        match &self.x_elimination {
+    /// A working set computed in the solve's algorithm space, mapped to the
+    /// caller's: bound statuses lifted to the full variable vector (gh#986
+    /// review item 10 — fixed variables are `Fixed`), constraint statuses
+    /// moved from the algorithm's `[c; d]` row order (equalities first) to
+    /// the user's `g` row order through the NLP's `c_map` / `d_map`. A
+    /// bound vector that is not reduced-sized is left as it is.
+    fn working_set_to_user(
+        &self,
+        nlp: &dyn IpoptNlp,
+        ws: pounce_qp::WorkingSet,
+    ) -> pounce_qp::WorkingSet {
+        let bounds = match &self.x_elimination {
             Some((map, n_full)) if ws.bounds.len() == map.len() && map.len() != *n_full => {
                 let mut bounds = vec![pounce_qp::BoundStatus::Fixed; *n_full];
                 for (k, &j) in map.iter().enumerate() {
                     bounds[j as usize] = ws.bounds[k];
                 }
-                pounce_qp::WorkingSet {
-                    bounds,
-                    constraints: ws.constraints,
-                }
+                bounds
             }
-            _ => ws,
+            _ => ws.bounds,
+        };
+        pounce_qp::WorkingSet {
+            bounds,
+            constraints: working_set_rows_to_user(nlp, ws.constraints),
         }
     }
 
@@ -3277,7 +3303,7 @@ impl IpoptApplication {
         // gh#986 review item 10: map a warm start given in the caller's full
         // variable space through this problem's fixed-variable elimination.
         // The working set this application publishes is in that space
-        // (`working_set_to_full`), and so is what Python's
+        // (`working_set_to_user`), and so is what Python's
         // `solve(..., working_set=...)` decodes, so a child that fixes `x1`
         // gets the parent's statuses for exactly the columns it still has.
         // The first pass compared lengths only: a fixed variable made the
@@ -3293,16 +3319,10 @@ impl IpoptApplication {
         let reduced = x_map.len() != n_full;
         let prev_elimination = self.x_elimination.replace((x_map.clone(), n_full));
         if let Some(w) = warm.as_mut() {
+            // The staged iterate is in the caller's (user) space; the
+            // algorithm's is not. Converted here, once, for every frontend.
+            sqp_warm_start_to_algorithm(&*nlp_rc.borrow(), w);
             if reduced {
-                let pick = |v: &[Number]| -> Vec<Number> {
-                    x_map.iter().map(|&j| v[j as usize]).collect()
-                };
-                if w.x.len() == n_full {
-                    w.x = pick(&w.x);
-                }
-                if w.lambda_x.len() == n_full {
-                    w.lambda_x = pick(&w.lambda_x);
-                }
                 let mut drop_reason: Option<String> = None;
                 if let Some(ws) = w.working.as_mut() {
                     if ws.bounds.len() == n_full {
@@ -3330,6 +3350,21 @@ impl IpoptApplication {
                     w.working = None;
                 }
             }
+        }
+        // `warm_start_init_point=yes` with nothing staged: take the TNLP's
+        // own starting multipliers, as the interior-point arm does. They
+        // arrive through the same `IpoptNlp` projections the IPM's warm
+        // initializer uses, so they are already in algorithm space (scaled,
+        // compressed, `[y_c; y_d]`). Without this the SQP arm read only the
+        // primal: a `.nl` `d` segment or `ipopt_z*_in` suffix, or a Python
+        // `lagrange=` start, began from zero multipliers on this arm alone.
+        if warm.is_none()
+            && matches!(
+                self.options.get_bool_value("warm_start_init_point", ""),
+                Ok((true, _))
+            )
+        {
+            warm = sqp_tnlp_warm_start(&nlp_rc);
         }
         // gh#986: a warm start recorded on one problem is dimensioned for
         // that problem. A child that fixes a variable (branching) reaches
@@ -3371,15 +3406,20 @@ impl IpoptApplication {
             let hook_tnlp = Rc::clone(&tnlp);
             let fixed_var_duals = self.reports_fixed_var_duals();
             alg.set_iteration_hook(Box::new(move |info| {
-                let snapshot = sqp_user_iterate(
-                    &hook_nlp,
-                    info.x,
-                    info.lambda_g,
-                    info.lambda_x,
-                    info.c_vals,
-                    fixed_var_duals,
-                );
-                let _guard = crate::intermediate::UserIterateGuard::install(snapshot);
+                // Built only for a TNLP that reads it, as on the
+                // interior-point arm: the fixed-variable recovery is not
+                // free, and most callbacks read only the stats.
+                let _guard = hook_tnlp.borrow().wants_current_iterate().then(|| {
+                    crate::intermediate::UserIterateGuard::install(sqp_user_iterate(
+                        &hook_nlp,
+                        info.x,
+                        info.lambda_g,
+                        info.lambda_x,
+                        info.c_vals,
+                        info.grad_lag_x,
+                        fixed_var_duals,
+                    ))
+                });
                 let stats = pounce_nlp::tnlp::IterStats {
                     mode: pounce_nlp::return_codes::AlgorithmMode::RegularMode,
                     iter: info.iter as Index,
@@ -3425,7 +3465,7 @@ impl IpoptApplication {
         self.sqp_last_working_set = res
             .working_set
             .clone()
-            .map(|ws| self.working_set_to_full(ws));
+            .map(|ws| self.working_set_to_user(&*nlp_rc.borrow(), ws));
         // Populate the shared `SolveStatistics` so the Python /
         // C-API post-solve accessors (`GetIpoptIterCount`,
         // `info["iter_count"]`, etc.) report the SQP outer-iter
@@ -3938,7 +3978,7 @@ impl IpoptApplication {
             self.sqp_last_working_set = res
                 .working_set
                 .clone()
-                .map(|ws| self.working_set_to_full(ws));
+                .map(|ws| self.working_set_to_user(&*nlp_handle.borrow(), ws));
         }
         tracing::debug!(target: "pounce::crossover", "crossover: {report:?}");
         self.crossover_report = Some(report);
@@ -6179,6 +6219,7 @@ impl IpoptApplication {
             .with_nlp(Rc::clone(&nlp_handle))
             .with_tnlp(Rc::clone(&tnlp));
         alg.last_iter_stats_sink = Some(Rc::clone(&self.last_iter_stats));
+        alg.live_iterate_fixed_var_duals = self.reports_fixed_var_duals();
         // Mint a fresh restoration factory per inner solve if a
         // provider is configured (pounce#10 Phase 3). Falls back to
         // the legacy one-shot `restoration_factory` slot when no
@@ -9030,6 +9071,205 @@ fn apply_qp_subproblem_options(options: &OptionsList, opts: &mut pounce_qp::QpOp
     }
 }
 
+/// The TNLP's own starting point as an SQP warm start, in algorithm space,
+/// through the projections the IPM's warm initializer reads
+/// (`prepare_warm_start`, `get_starting_x/y/z`). `None` when the NLP
+/// declines. An unseeded bound multiplier (NaN, gh#622) counts as zero: the
+/// SQP has no `bound_mult_init_val` of its own to resolve it to.
+fn sqp_tnlp_warm_start(nlp_rc: &Rc<RefCell<dyn IpoptNlp>>) -> Option<crate::sqp::SqpIterates> {
+    use pounce_linalg::dense_vector::DenseVectorSpace;
+    let dense = |v: &dyn pounce_linalg::Vector| -> Vec<Number> {
+        v.as_any()
+            .downcast_ref::<pounce_linalg::dense_vector::DenseVector>()
+            .map(|d| d.expanded_values().to_vec())
+            .unwrap_or_default()
+    };
+    let (z_l, z_u, x, lambda_g) = {
+        let mut nlp = nlp_rc.borrow_mut();
+        if !nlp.prepare_warm_start() {
+            return None;
+        }
+        let (n, m_eq, m_ineq) = (nlp.n(), nlp.m_eq(), nlp.m_ineq());
+        let (n_xl, n_xu) = (nlp.x_l().dim(), nlp.x_u().dim());
+        let (n_dl, n_du) = (nlp.d_l().dim(), nlp.d_u().dim());
+        let mut x = DenseVectorSpace::new(n).make_new_dense();
+        let mut y_c = DenseVectorSpace::new(m_eq).make_new_dense();
+        let mut y_d = DenseVectorSpace::new(m_ineq).make_new_dense();
+        let mut z_l = DenseVectorSpace::new(n_xl).make_new_dense();
+        let mut z_u = DenseVectorSpace::new(n_xu).make_new_dense();
+        let mut v_l = DenseVectorSpace::new(n_dl).make_new_dense();
+        let mut v_u = DenseVectorSpace::new(n_du).make_new_dense();
+        let ok = nlp.get_starting_x(&mut x)
+            && nlp.get_starting_y(&mut y_c, &mut y_d)
+            && nlp.get_starting_z(&mut z_l, &mut z_u, &mut v_l, &mut v_u);
+        nlp.finish_warm_start();
+        if !ok {
+            return None;
+        }
+        let finite = |v: Vec<Number>| -> Vec<Number> {
+            v.into_iter()
+                .map(|a| if a.is_finite() { a } else { 0.0 })
+                .collect()
+        };
+        let mut lambda_g = finite(dense(&y_c));
+        lambda_g.extend(finite(dense(&y_d)));
+        (
+            finite(dense(&z_l)),
+            finite(dense(&z_u)),
+            dense(&x),
+            lambda_g,
+        )
+    };
+    let lambda_x = crate::sqp::ipopt_adapter::pack_bound_multipliers(nlp_rc, &z_l, &z_u);
+    Some(crate::sqp::SqpIterates {
+        x,
+        lambda_g,
+        lambda_x,
+        working: None,
+    })
+}
+
+/// Map a staged SQP warm start from the caller's space into the algorithm's:
+/// the exact inverse of what [`finalize_via_sqp`] / [`sqp_user_iterate`] do on
+/// the way out, so that the multipliers a solve reports, fed back unchanged,
+/// are the iterate the next solve starts from.
+///
+/// | field | user space (what callers stage) | algorithm space |
+/// |---|---|---|
+/// | `x` | full `n`, model units | fixed columns dropped, `x̃ = d ⊙ x` |
+/// | `lambda_x` | full `n`, `z_L − z_U` | fixed dropped, `· obj_scal ⊘ d` |
+/// | `lambda_g` | `m`, in `g` order | `[y_c; y_d]`, `y = λ · obj_scal / {c,d}_scale` |
+/// | `working.constraints` | `m`, in `g` order | `[c; d]` order |
+///
+/// (`working.bounds` goes from full `n` to the reduced columns in the
+/// caller, which also knows which elimination an already-reduced set came
+/// from.)
+///
+/// `d` is the per-variable factor of a `ScalingTnlp` below the NLP (gh#486;
+/// `z̃ = z ⊘ d`, its `get_starting_point` rule) and `obj_scal` includes the
+/// sign of a maximize. The `λ` rule is `OrigIpoptNlp::initialize_starting_point`'s,
+/// the IPM's inbound half of the same inverse.
+///
+/// Every frontend stages user space — the C API and `pounce-py` pass the
+/// caller's `x` / `mult_g` / `z_L − z_U` through untouched. Before this they
+/// went in as-is: on a model whose equality is not the first row, the two
+/// constraint multipliers landed on each other's rows, and any
+/// `obj_scaling_factor` ≠ 1 left them off by that factor.
+///
+/// An `x` / `lambda_x` already of the reduced length (a problem with fixed
+/// variables) is taken as user-unit values of the surviving columns, in
+/// order; any other length is left alone for the dimension check to reject.
+fn sqp_warm_start_to_algorithm(nlp: &dyn IpoptNlp, w: &mut crate::sqp::SqpIterates) {
+    let n_alg = nlp.n() as usize;
+    let n_full = nlp.n_full_x() as usize;
+    let m_full = nlp.n_full_g() as usize;
+    let m_eq = nlp.m_eq() as usize;
+    let obj_scal = nlp.obj_scaling_factor();
+    let d = nlp.variable_scaling();
+    // Algorithm column -> (user column, its x-scaling factor).
+    let cols: Vec<(usize, Number)> = (0..n_alg)
+        .map(|k| {
+            let j = nlp.var_x_to_full_x(k as Index) as usize;
+            let dj = d.as_ref().and_then(|d| d.get(j).copied()).unwrap_or(1.0);
+            (j, dj)
+        })
+        .collect();
+    let to_alg = |v: &[Number], f: &dyn Fn(Number, Number) -> Number| -> Option<Vec<Number>> {
+        if v.len() == n_full {
+            Some(cols.iter().map(|&(j, dj)| f(v[j], dj)).collect())
+        } else if v.len() == n_alg {
+            Some(cols.iter().zip(v).map(|(&(_, dj), &x)| f(x, dj)).collect())
+        } else {
+            None
+        }
+    };
+    if let Some(x) = to_alg(&w.x, &|x, dj| x * dj) {
+        w.x = x;
+    }
+    if let Some(lx) = to_alg(&w.lambda_x, &|z, dj| z * obj_scal / dj) {
+        w.lambda_x = lx;
+    }
+    if w.lambda_g.len() == m_full {
+        let cs = nlp.c_scale_vec();
+        let ds = nlp.d_scale_vec();
+        let mut y = vec![0.0; m_full];
+        for (i, &lam) in w.lambda_g.iter().enumerate() {
+            let i = i as Index;
+            if let Some(k) = nlp.full_g_to_c_block(i) {
+                let k = k as usize;
+                let s = cs.as_ref().map_or(1.0, |v| v[k]);
+                y[k] = lam / s * obj_scal;
+            } else if let Some(k) = nlp.full_g_to_d_block(i) {
+                let k = k as usize;
+                let s = ds.as_ref().map_or(1.0, |v| v[k]);
+                y[m_eq + k] = lam / s * obj_scal;
+            }
+        }
+        w.lambda_g = y;
+    }
+    if let Some(ws) = w.working.as_mut() {
+        ws.constraints = working_set_rows_to_algorithm(nlp, std::mem::take(&mut ws.constraints));
+    }
+}
+
+/// Algorithm row `k` of the `[c; d]` constraint vector → user `g` row, or
+/// `None` when the NLP's row count does not describe a full split.
+fn algorithm_rows_to_user(nlp: &dyn IpoptNlp) -> Option<Vec<usize>> {
+    let m_full = nlp.n_full_g() as usize;
+    let m_eq = nlp.m_eq() as usize;
+    let m_alg = m_eq + nlp.m_ineq() as usize;
+    if m_full != m_alg {
+        return None;
+    }
+    let mut map = vec![usize::MAX; m_alg];
+    for i in 0..m_full {
+        let k = if let Some(k) = nlp.full_g_to_c_block(i as Index) {
+            k as usize
+        } else if let Some(k) = nlp.full_g_to_d_block(i as Index) {
+            m_eq + k as usize
+        } else {
+            return None;
+        };
+        if k >= m_alg || map[k] != usize::MAX {
+            return None;
+        }
+        map[k] = i;
+    }
+    Some(map)
+}
+
+/// Constraint statuses of a working set, algorithm `[c; d]` order → user
+/// `g` order. The SQP stacks equalities first, so on a model whose first
+/// row is an inequality the statuses published positionally landed on the
+/// wrong rows (`[Equality, AtUpper]` for `g = [ineq, eq]`). A vector of
+/// any other length is returned unchanged for the dimension check to judge.
+fn working_set_rows_to_user(
+    nlp: &dyn IpoptNlp,
+    rows: Vec<pounce_qp::ConsStatus>,
+) -> Vec<pounce_qp::ConsStatus> {
+    match algorithm_rows_to_user(nlp) {
+        Some(map) if map.len() == rows.len() => {
+            let mut user = vec![pounce_qp::ConsStatus::Inactive; rows.len()];
+            for (k, &i) in map.iter().enumerate() {
+                user[i] = rows[k];
+            }
+            user
+        }
+        _ => rows,
+    }
+}
+
+/// Inverse of [`working_set_rows_to_user`]: user `g` order → `[c; d]`.
+fn working_set_rows_to_algorithm(
+    nlp: &dyn IpoptNlp,
+    rows: Vec<pounce_qp::ConsStatus>,
+) -> Vec<pounce_qp::ConsStatus> {
+    match algorithm_rows_to_user(nlp) {
+        Some(map) if map.len() == rows.len() => map.iter().map(|&i| rows[i]).collect(),
+        _ => rows,
+    }
+}
+
 /// The SQP iterate in the user's index spaces, for the live-inspector window
 /// (gh#1015). Same conversions as [`finalize_via_sqp`] — `λ_x` is packed
 /// signed (`z_L − z_U`) and is split by sign — minus the user-callback
@@ -9040,10 +9280,15 @@ fn sqp_user_iterate(
     lambda_g: &[Number],
     lambda_x: &[Number],
     c_vals: &[Number],
+    grad_lag_x: &[Number],
     fixed_var_duals: bool,
 ) -> crate::intermediate::UserIterate {
     use pounce_linalg::dense_vector::DenseVectorSpace;
 
+    // `finalize_solution_z_*` read the compressed x_l / x_u spaces (one
+    // entry per finite bound, via `x_l_map`), not one entry per variable;
+    // `split_bound_multipliers` does that split, as crossover does.
+    let (zl, zu) = crate::sqp::ipopt_adapter::split_bound_multipliers(nlp, lambda_x);
     let nlp = nlp.borrow();
     let n_alg = nlp.n() as usize;
     let m_eq = nlp.m_eq() as usize;
@@ -9063,13 +9308,11 @@ fn sqp_user_iterate(
     };
 
     let x_full = nlp.finalize_solution_x(&dv(&x_space, x));
-    let zl: Vec<Number> = lambda_x.iter().map(|v| v.max(0.0)).collect();
-    let zu: Vec<Number> = lambda_x.iter().map(|v| (-v).max(0.0)).collect();
-    let mut z_l = nlp.finalize_solution_z_l(&dv(&x_space, &zl));
+    let mut z_l = nlp.finalize_solution_z_l(&dv(&DenseVectorSpace::new(zl.len() as Index), &zl));
     if z_l.is_empty() {
         z_l = vec![0.0; n_user];
     }
-    let mut z_u = nlp.finalize_solution_z_u(&dv(&x_space, &zu));
+    let mut z_u = nlp.finalize_solution_z_u(&dv(&DenseVectorSpace::new(zu.len() as Index), &zu));
     if z_u.is_empty() {
         z_u = vec![0.0; n_user];
     }
@@ -9081,14 +9324,26 @@ fn sqp_user_iterate(
     if fixed_var_duals {
         nlp.complete_fixed_var_bound_multipliers(&x_full, &lambda, &mut z_l, &mut z_u);
     }
+    // Everything here is in the space of the TNLP the NLP wraps, which
+    // under per-variable `user-scaling` is a `ScalingTnlp` seeing
+    // `x̃ = d ⊙ x`; that wrapper undoes the substitution on the iterate's
+    // way through its `intermediate_callback`, by its `finalize_solution`'s
+    // rule (`x = x̃ ⊘ d`, `z = d ⊙ z̃`).
     let (c, d) = c_vals.split_at(m_eq.min(c_vals.len()));
     let g = nlp.pack_g_for_user(&dv(&c_space, c), &dv(&d_space, d));
+    // The SQP iterates against the same live bounds (widened only when
+    // `bound_relax_factor` is set by name on this arm).
+    let (x_l_alg, x_u_alg) = crate::intermediate::algorithm_x_bounds(&*nlp, &x_full);
     crate::intermediate::UserIterate {
         x: x_full,
         z_l,
         z_u,
         g,
         lambda,
+        scaling: Some(crate::intermediate::iterate_scaling(&*nlp)),
+        x_l_alg,
+        x_u_alg,
+        grad_lag_x: crate::intermediate::user_grad_lag(&*nlp, grad_lag_x),
     }
 }
 
@@ -9132,13 +9387,20 @@ fn finalize_via_sqp(
     let x_vec: Vec<Number> = nlp_borrow.finalize_solution_x(&x_dv);
     debug_assert_eq!(x_vec.len(), n);
 
-    // λ_x is packed signed (z_l − z_u). Split for lift.
-    let mut z_l_compressed = x_space.make_new_dense();
-    let mut z_u_compressed = x_space.make_new_dense();
-    let zl_vals: Vec<Number> = res.lambda_x.iter().map(|v| v.max(0.0)).collect();
-    let zu_vals: Vec<Number> = res.lambda_x.iter().map(|v| (-v).max(0.0)).collect();
-    z_l_compressed.set_values(&zl_vals);
-    z_u_compressed.set_values(&zu_vals);
+    // λ_x is packed signed (z_l − z_u), one entry per variable. Split it
+    // into the compressed x_l / x_u spaces `finalize_solution_z_*` read
+    // (one entry per finite bound): splitting per variable put each
+    // multiplier on the wrong variable whenever an unbounded one came
+    // first, as crossover's `split_bound_multipliers` call already avoids.
+    let (zl_vals, zu_vals) = crate::sqp::ipopt_adapter::split_bound_multipliers(nlp, &res.lambda_x);
+    let mut z_l_compressed = DenseVectorSpace::new(zl_vals.len() as Index).make_new_dense();
+    let mut z_u_compressed = DenseVectorSpace::new(zu_vals.len() as Index).make_new_dense();
+    if !zl_vals.is_empty() {
+        z_l_compressed.set_values(&zl_vals);
+    }
+    if !zu_vals.is_empty() {
+        z_u_compressed.set_values(&zu_vals);
+    }
     // `finalize_solution_*` (not `pack_*`): report unscaled-Lagrangian duals,
     // dividing out `obj_scale_factor` — see `finalize_via_orig_nlp` (F1).
     let mut z_l = nlp_borrow.finalize_solution_z_l(&z_l_compressed);

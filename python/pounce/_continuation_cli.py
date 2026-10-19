@@ -33,8 +33,13 @@ segment), and pounce's reader honours both, so the previous point's
 back into the next point's model. With ``warm_start_init_point yes``
 that is a genuine primal-dual warm start, the same state
 :class:`pounce.WarmStart` carries in process, minus the barrier
-parameter and the bound multipliers, which the ``.nl`` format has
-nowhere to put.
+parameter, which the ``.nl`` format has nowhere to put. The bound
+multipliers ride the ``ipopt_zL_in`` / ``ipopt_zU_in`` variable
+suffixes, which the reader honours (gh#1033): the driver copies the
+previous ``.sol``'s ``ipopt_zL_out`` / ``ipopt_zU_out`` blocks into
+them, because the ``_out`` and ``_in`` suffixes share one sign
+convention (``zL = sigma*z_L``, ``zU = -sigma*z_U``, ``sigma = -1`` for a
+maximize model), so the copy is exact for either sense.
 
 Manifest format (JSON, ``version: 1``)
 --------------------------------------
@@ -73,6 +78,7 @@ from typing import List
 __all__ = [
     "PathManifest",
     "parse_sol",
+    "parse_sol_suffixes",
     "rewrite_nl_initial_point",
     "trace_manifest",
 ]
@@ -152,6 +158,49 @@ def parse_sol(path, n, m):
     return vals[:m_sol], vals[m_sol:m_sol + n_sol]
 
 
+def parse_sol_suffixes(path):
+    """``{name: {index: value}}`` for the suffix blocks of an AMPL ``.sol``.
+
+    Each block is a header ``suffix <kind> <count> <namelen> <tablen>
+    <tabline>``, the suffix name on its own line, ``tablen`` lines of
+    value table (pounce writes none), then ``count`` ``index value``
+    lines. Entries the writer left out are zero. Values are read as
+    floats whatever the kind.
+    """
+    with open(path) as fh:
+        lines = fh.read().split("\n")
+    out = {}
+    i = 0
+    while i < len(lines):
+        parts = lines[i].split()
+        if len(parts) < 3 or parts[0] != "suffix":
+            i += 1
+            continue
+        count = int(parts[2])
+        tablen = int(parts[4]) if len(parts) > 4 else 0
+        name = lines[i + 1].strip()
+        i += 2 + tablen
+        entries = {}
+        for ln in lines[i:i + count]:
+            k, v = ln.split()[:2]
+            entries[int(k)] = float(v)
+        out[name] = entries
+        i += count
+    return out
+
+
+def _dense(entries, n):
+    v = [0.0] * n
+    for k, x in entries.items():
+        v[k] = x
+    return v
+
+
+#: The two ``.nl`` variable suffixes :func:`rewrite_nl_initial_point`
+#: owns: real-valued (``S4``), one entry per variable.
+_BOUND_SUFFIXES = ("ipopt_zL_in", "ipopt_zU_in")
+
+
 def _nl_counts(lines):
     """``(n, m)`` from an ASCII ``.nl`` header."""
     if not lines or not lines[0].startswith("g"):
@@ -163,7 +212,8 @@ def _nl_counts(lines):
     return int(parts[0]), int(parts[1])
 
 
-def rewrite_nl_initial_point(src, dst, primals=None, duals=None):
+def rewrite_nl_initial_point(src, dst, primals=None, duals=None,
+                             z_l=None, z_u=None):
     """Copy `src` to `dst` with its initial-point segments replaced.
 
     An ASCII ``.nl`` file states its initial primal point in an ``x``
@@ -172,6 +222,23 @@ def rewrite_nl_initial_point(src, dst, primals=None, duals=None):
     ``index value`` lines. Both are optional and both are honoured by
     pounce's reader, so replacing them is how a solved point is handed
     to the next model in the path.
+
+    `duals` are written as given, so they must be in the file's sign:
+    AMPL's dual, ``d obj / d b`` -- the sign a ``.sol`` dual block
+    carries, and the negation of pounce's multiplier for
+    ``L = f + lambda' g`` (the JSON report's ``lambda``). The reader
+    negates a ``d`` entry on the way in (gh#1033).
+
+    `z_l` / `z_u` are the initial bound multipliers, written as the real
+    variable suffixes ``ipopt_zL_in`` / ``ipopt_zU_in`` (an ``S4 <count>
+    <name>`` segment followed by ``index value`` lines; zero entries are
+    left out, which is the suffix default). They too are written as
+    given, in the sign of a ``.sol``'s ``ipopt_zL_out`` / ``ipopt_zU_out``
+    blocks: ``zL = sigma*z_L >= 0`` and ``zU = -sigma*z_U <= 0`` at an
+    active bound of a minimize model (``sigma = -1`` flips both for a
+    maximize one), which the reader inverts on the way in. Any existing
+    segment of either name in `src` is dropped, so the reader never sees
+    two; every other suffix is copied through.
     """
     with open(src) as fh:
         lines = fh.read().split("\n")
@@ -184,17 +251,31 @@ def rewrite_nl_initial_point(src, dst, primals=None, duals=None):
         raise ValueError(
             f"{src}: model has {m} constraints, got {len(duals)} duals"
         )
+    for name, z in zip(_BOUND_SUFFIXES, (z_l, z_u)):
+        if z is not None and len(z) != n:
+            raise ValueError(
+                f"{src}: model has {n} variables, got {len(z)} {name} values"
+            )
 
     out: List[str] = []
     i = 0
     # Segment headers are a single letter at column 0. `x` and `d` are
-    # the two we replace; everything else is copied through untouched.
+    # the two we replace, plus the `S` segments of the two bound-multiplier
+    # suffixes (`S<kind> <count> <name>`) when we write those; everything
+    # else is copied through untouched.
+    replaced = {name for name, z in zip(_BOUND_SUFFIXES, (z_l, z_u))
+                if z is not None}
     while i < len(lines):
         ln = lines[i]
         if ln[:1] in ("x", "d") and ln[1:2].isdigit():
             count = int(ln[1:].split()[0])
             i += 1 + count          # drop the old segment entirely
             continue
+        if ln[:1] == "S" and ln[1:2].isdigit():
+            parts = ln.split()
+            if len(parts) >= 3 and parts[2] in replaced:
+                i += 1 + int(parts[1])
+                continue
         out.append(ln)
         i += 1
 
@@ -205,6 +286,11 @@ def rewrite_nl_initial_point(src, dst, primals=None, duals=None):
     if duals is not None and m:
         seg.append(f"d{m}")
         seg.extend(f"{k} {v!r}" for k, v in enumerate(duals))
+    for name, z in zip(_BOUND_SUFFIXES, (z_l, z_u)):
+        if z is not None:
+            nz = [(k, float(v)) for k, v in enumerate(z) if v != 0.0]
+            seg.append(f"S4 {len(nz)} {name}")
+            seg.extend(f"{k} {v!r}" for k, v in nz)
 
     # The initial-point segments belong after the header block (the
     # first ten lines) and before the body; the reader accepts them
@@ -244,7 +330,8 @@ def trace_manifest(manifest, *, binary=None, cold=False, workdir=None,
     exe = _binary(binary)
     tmp = workdir or tempfile.mkdtemp(prefix="pounce-cont-")
     steps = []
-    prev = None            # (duals, primals) of the last accepted point
+    prev = None            # (duals, primals, z_l, z_u) of the last
+                           # accepted point
     prev_sig = None
     t_all = time.perf_counter()
 
@@ -254,8 +341,14 @@ def trace_manifest(manifest, *, binary=None, cold=False, workdir=None,
         run_model = model
         if warm:
             run_model = os.path.join(tmp, f"step{k:04d}.nl")
+            # `prev[0]` is the JSON report's `lambda`, in pounce's sign;
+            # a `d` segment is in AMPL's, so negate it (gh#1033).
+            # `prev[2:]` are the previous `.sol`'s `ipopt_zL_out` /
+            # `ipopt_zU_out`, already in the `_in` suffixes' sign.
             rewrite_nl_initial_point(model, run_model,
-                                     primals=prev[1], duals=prev[0])
+                                     primals=prev[1],
+                                     duals=[-v for v in prev[0]],
+                                     z_l=prev[2], z_u=prev[3])
 
         sol = os.path.join(tmp, f"step{k:04d}.sol")
         rep = os.path.join(tmp, f"step{k:04d}.json")
@@ -313,9 +406,12 @@ def trace_manifest(manifest, *, binary=None, cold=False, workdir=None,
         # path uses. It is coarser than the in-process bound-multiplier
         # signature and the trace says so rather than implying parity.
         # The solve report carries the primal point and the constraint
-        # multipliers directly, so the iterate is read from it rather
-        # than re-parsed out of the .sol -- one format instead of two,
-        # and the .sol stays purely an artifact for the modeling system.
+        # multipliers directly, so those are read from it. It carries no
+        # bound multipliers, so they come from the .sol's `ipopt_zL_out` /
+        # `ipopt_zU_out` blocks -- whose sign is exactly the one the next
+        # model's `ipopt_zL_in` / `ipopt_zU_in` want, so they are carried
+        # as read. A .sol without the blocks transfers none (`None`), and
+        # the next solve starts them from the engine's defaults.
         sig = None
         if ok:
             primals = sol_sec.get("x")
@@ -323,7 +419,15 @@ def trace_manifest(manifest, *, binary=None, cold=False, workdir=None,
             if primals is not None:
                 duals = duals or []
                 sig = tuple(int(d > 1e-6) - int(d < -1e-6) for d in duals)
-                prev = (list(duals), list(primals))
+                z_l = z_u = None
+                try:
+                    sfx = parse_sol_suffixes(sol)
+                    if "ipopt_zL_out" in sfx and "ipopt_zU_out" in sfx:
+                        z_l = _dense(sfx["ipopt_zL_out"], len(primals))
+                        z_u = _dense(sfx["ipopt_zU_out"], len(primals))
+                except (OSError, ValueError, IndexError):
+                    z_l = z_u = None
+                prev = (list(duals), list(primals), z_l, z_u)
             else:
                 prev = None
         else:

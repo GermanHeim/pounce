@@ -381,11 +381,22 @@ What *does* cross the boundary is more than the primal point. An AMPL
 `.nl` file carries an initial primal point (the `x` segment) *and*
 initial duals (the `d` segment), and pounce's reader honours both, so
 the driver folds the previous point's answer into the next model and
-turns on `warm_start_init_point`. The bound multipliers and the barrier
-parameter have nowhere to go in the `.nl` format, and that is the gap
-against the in-process driver.
+turns on `warm_start_init_point`. The bound multipliers ride the
+`ipopt_zL_in` / `ipopt_zU_in` variable suffixes, which the reader
+honours since gh#1033: the driver copies the previous `.sol`'s
+`ipopt_zL_out` / `ipopt_zU_out` blocks into them unchanged, because the
+`_out` and `_in` suffixes share one sign convention (`zL = σ·z_L`,
+`zU = −σ·z_U`, `σ = −1` for a maximize model) and the reader applies the
+sense on the way in. Under the default `warm_start_recentering=residual`
+the engine re-derives supplied bound multipliers from the transferred
+point, so they reach the first iterate verbatim only under
+`warm_start_recentering=none`. The barrier parameter has nowhere to go
+in the `.nl` format, and that is the remaining gap against the
+in-process driver.
 
-**Measured**, on a 20-point van der Pol NMPC path (horizon 40, n = 122):
+**Measured**, on a 20-point van der Pol NMPC path (horizon 40, n = 122),
+before the driver transferred bound multipliers (primal and `d`-segment
+duals only; not re-measured since):
 
 | | iterations | evaluations | wall |
 |---|---|---|---|

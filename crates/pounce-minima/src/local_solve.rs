@@ -63,6 +63,13 @@ pub struct LocalOutcome {
     /// Constraint duals in the user's `∇f + λ·∇g + z = 0` convention, length
     /// `m` (empty if the solve path cannot report them).
     pub lambda: Vec<Number>,
+    /// Lower / upper bound multipliers, length `n`, `≥ 0` at an active bound
+    /// (Ipopt's internal convention), in the frame of the problem the engine
+    /// solved -- for a `maximize` `.nl`, `min -f`. Empty if the solve path
+    /// cannot report them. The caller applies the `.sol` signs
+    /// (`ipopt_zL_out = σ·z_l`, `ipopt_zU_out = −σ·z_u`).
+    pub z_l: Vec<Number>,
+    pub z_u: Vec<Number>,
     pub quality: SolveQuality,
 }
 
@@ -91,7 +98,8 @@ pub trait LocalSolve {
 /// rereads the option every solve — and reads the answer from the
 /// `finalize_solution` payload, through a wrapper around the problem: the
 /// reported `x` (after `honor_original_bounds`, when set) and the user-space
-/// `lambda`, the same numbers a plain solve's `.sol` carries.
+/// `lambda` and bound multipliers, the same numbers a plain solve's `.sol`
+/// carries.
 ///
 /// It used to read them from the application's on-converged hook instead,
 /// which sees the algorithm's iterate: the un-projected `x`, so
@@ -182,16 +190,20 @@ impl LocalSolve for IpoptLocalSolve<'_> {
             start_obj_grad_max: stats.start_obj_grad_max,
         };
         match slot.borrow_mut().take() {
-            Some((x, lambda)) => LocalOutcome {
+            Some(f) => LocalOutcome {
                 converged: succeeded,
-                x,
-                lambda,
+                x: f.x,
+                lambda: f.lambda,
+                z_l: f.z_l,
+                z_u: f.z_u,
                 quality,
             },
             None => LocalOutcome {
                 converged: false,
                 x: Vec::new(),
                 lambda: Vec::new(),
+                z_l: Vec::new(),
+                z_u: Vec::new(),
                 quality,
             },
         }

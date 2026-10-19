@@ -69,11 +69,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use pounce_common::types::Number;
+use pounce_common::types::{Index, Number};
 
 use crate::tnlp::{
-    BoundsInfo, IndexStyle, IpoptCq, IpoptData, MetaData, NlpInfo, ScalingRequest, Solution,
-    SparsityRequest, StartingPoint, TNLP,
+    BoundsInfo, IndexStyle, InfeasibilityProof, IpoptCq, IpoptData, IterStats, MetaData, NlpInfo,
+    ScalingRequest, Solution, SparsityRequest, StartingPoint, TNLP,
 };
 
 /// Smallest variable factor accepted. Anything below this makes the
@@ -323,6 +323,39 @@ pub fn wrap_with_scaling(
         lo_inf,
         up_inf,
     }))))
+}
+
+/// Undo the substitution on an iterate read *below* the wrapper — the
+/// algorithm's own `x̃`, `z̃_L`, `z̃_U`, already lifted to the full
+/// variable vector — by the rule [`ScalingTnlp::finalize_solution`]
+/// applies: `x = x̃ ⊘ d`, `z = d ⊙ z̃`.
+///
+/// For readers that hand an iterate to the user without passing through
+/// `finalize_solution`: the intermediate-callback window
+/// (`GetIpoptCurrentIterate`, the SQP arm's user iterate). `d` is
+/// [`factors_of`] / `IpoptNlp::variable_scaling`; `None`, or a length that
+/// does not match a vector, leaves that vector alone (an empty slice
+/// means "not requested"). Constraint values and multipliers are not
+/// moved by the substitution and are not taken.
+pub fn unscale_iterate(
+    d: Option<&[Number]>,
+    x: &mut [Number],
+    z_l: &mut [Number],
+    z_u: &mut [Number],
+) {
+    let Some(d) = d else { return };
+    if x.len() == d.len() {
+        for (v, &s) in x.iter_mut().zip(d) {
+            *v /= s;
+        }
+    }
+    for z in [z_l, z_u] {
+        if z.len() == d.len() {
+            for (v, &s) in z.iter_mut().zip(d) {
+                *v *= s;
+            }
+        }
+    }
 }
 
 /// The factors a [`ScalingTnlp`] applies, if `tnlp` is one.
@@ -643,5 +676,82 @@ impl TNLP for ScalingTnlp {
         // does not add a second one. Answering `true` here would make
         // presolve decline every scaled problem.
         self.inner.borrow().is_presolve_wrapper()
+    }
+
+    // The forwards below were missing, so the trait defaults answered for
+    // the user's problem whenever per-variable factors installed this
+    // wrapper: no intermediate callback ever fired (on either arm), a
+    // `User_Requested_Stop` from it could not happen, a declared
+    // nonlinear-variable subset was dropped from the limited-memory
+    // Hessian, and a presolve infeasibility proof below was lost. None of
+    // them carries a value the substitution moves — the stats are the
+    // algorithm's own, and variable indices are unchanged by a diagonal
+    // scaling — so each is a plain forward. The iterate a callback reads
+    // through `GetIpoptCurrentIterate` / `with_current_user_iterate` is
+    // unscaled by its readers, which see the factors via
+    // `scaling_factors`.
+
+    fn get_number_of_nonlinear_variables(&mut self) -> Index {
+        self.inner.borrow_mut().get_number_of_nonlinear_variables()
+    }
+
+    fn get_list_of_nonlinear_variables(&mut self, pos_nonlin_vars: &mut [Index]) -> bool {
+        self.inner
+            .borrow_mut()
+            .get_list_of_nonlinear_variables(pos_nonlin_vars)
+    }
+
+    fn wants_intermediate_callback(&self) -> bool {
+        self.inner.borrow().wants_intermediate_callback()
+    }
+
+    fn wants_current_iterate(&self) -> bool {
+        self.inner.borrow().wants_current_iterate()
+    }
+
+    fn intermediate_callback(
+        &mut self,
+        stats: IterStats,
+        ip_data: &IpoptData,
+        ip_cq: &IpoptCq,
+    ) -> bool {
+        // The live iterate arrives in this layer's `x̃ = d ⊙ x` coordinates —
+        // the presolve layers beneath this wrapper (it is outermost; see the
+        // module doc) lifted it in those coordinates — and leaves in the inner TNLP's,
+        // by `finalize_solution`'s rule: `x = x̃ ⊘ d`, `z = d ⊙ z̃`. The
+        // algorithm's scaled space holds `x̃`, so a column it holds gains
+        // the factor `d` in the iterate's scaling. Done here, not where the
+        // algorithm builds the iterate: with presolve between the two the
+        // algorithm's NLP cannot see these factors, and the user read `x̃`.
+        let lifted = crate::live_iterate::current_user_iterate()
+            .filter(|it| it.x.len() == self.d.len())
+            .map(|mut it| {
+                unscale_iterate(Some(&self.d), &mut it.x, &mut it.z_l, &mut it.z_u);
+                // `∂L/∂x = d ⊙ ∂L/∂x̃`, the bound multipliers' rule.
+                unscale_iterate(Some(&self.d), &mut [], &mut it.grad_lag_x, &mut []);
+                // The algorithm's bounds are `x̃`-bounds too.
+                for b in [&mut it.x_l_alg, &mut it.x_u_alg] {
+                    unscale_iterate(Some(&self.d), b, &mut [], &mut []);
+                }
+                if let Some(s) = it.scaling.as_mut()
+                    && s.x.len() == self.d.len()
+                    && s.x_in_alg.len() == self.d.len()
+                {
+                    for (j, f) in s.x.iter_mut().enumerate() {
+                        if s.x_in_alg[j] {
+                            *f *= self.d[j];
+                        }
+                    }
+                }
+                it
+            });
+        let _lifted = lifted.map(crate::live_iterate::UserIterateGuard::install);
+        self.inner
+            .borrow_mut()
+            .intermediate_callback(stats, ip_data, ip_cq)
+    }
+
+    fn presolve_infeasibility_proof(&self) -> Option<InfeasibilityProof> {
+        self.inner.borrow().presolve_infeasibility_proof()
     }
 }
