@@ -101,6 +101,7 @@ pub mod inequality_projection;
 pub mod licq;
 pub mod linear_eq_elim;
 pub mod linear_eq_plan;
+mod live_lift;
 pub mod matching;
 pub mod options;
 pub mod reduction_frame;
@@ -2742,12 +2743,37 @@ impl TNLP for PresolveTnlp {
         self.inner.borrow().wants_intermediate_callback()
     }
 
+    fn wants_current_iterate(&self) -> bool {
+        self.inner.borrow().wants_current_iterate()
+    }
+
     fn intermediate_callback(
         &mut self,
         stats: IterStats,
         ip_data: &IpoptData,
         ip_cq: &IpoptCq,
     ) -> bool {
+        // The live iterate arrives in this layer's (row-dropped) space;
+        // hand the inner TNLP its own, lifted by `finalize_solution`'s
+        // rule. The lift runs that function, so the state it records about
+        // the *final* solution is put back afterwards.
+        let lifted = match self.get_nlp_info() {
+            Some(info) => {
+                let saved = (
+                    self.finalized_full_solution.take(),
+                    std::mem::take(&mut self.bound_multipliers_handed_to_rows),
+                );
+                let lifted =
+                    live_lift::lift(self, |s| &mut s.inner, (info.n as usize, info.m as usize));
+                (
+                    self.finalized_full_solution,
+                    self.bound_multipliers_handed_to_rows,
+                ) = saved;
+                lifted
+            }
+            None => None,
+        };
+        let _lifted = lifted.map(pounce_nlp::live_iterate::UserIterateGuard::install);
         self.inner
             .borrow_mut()
             .intermediate_callback(stats, ip_data, ip_cq)

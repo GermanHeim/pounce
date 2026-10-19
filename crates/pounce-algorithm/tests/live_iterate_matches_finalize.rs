@@ -16,12 +16,12 @@
 //! stationarity row `2K(1-4) + λ0` is carried by a bound multiplier.
 
 use pounce_algorithm::application::IpoptApplication;
-use pounce_algorithm::intermediate::with_current_user_iterate;
+use pounce_algorithm::intermediate::{with_current, with_current_user_iterate};
 use pounce_common::types::Number;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::{
-    BoundsInfo, IndexStyle, IpoptCq, IpoptData, IterStats, NlpInfo, ScalingRequest, Solution,
-    SparsityRequest, StartingPoint, TNLP,
+    BoundsInfo, IndexStyle, IpoptCq, IpoptData, IterStats, Linearity, NlpInfo, ScalingRequest,
+    Solution, SparsityRequest, StartingPoint, TNLP,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -44,6 +44,8 @@ struct Model {
     x_scaling: bool,
     fires: usize,
     last: Option<Point>,
+    /// `(n, m)` of the problem the interior-point algorithm solved.
+    solved_dims: Option<(usize, usize)>,
     out: Option<Point>,
 }
 
@@ -51,8 +53,8 @@ impl TNLP for Model {
     fn get_nlp_info(&mut self) -> Option<NlpInfo> {
         Some(NlpInfo {
             n: 4,
-            m: 2,
-            nnz_jac_g: 5,
+            m: 3,
+            nnz_jac_g: 7,
             nnz_h_lag: 4,
             index_style: IndexStyle::C,
         })
@@ -60,8 +62,8 @@ impl TNLP for Model {
     fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
         b.x_l.copy_from_slice(&[-1e19, -10.0, 0.0, 1.0]);
         b.x_u.copy_from_slice(&[1e19, 1.0, 1e19, 1.0]);
-        b.g_l.copy_from_slice(&[-1e19, 0.0]);
-        b.g_u.copy_from_slice(&[3.5, 0.0]);
+        b.g_l.copy_from_slice(&[-1e19, 0.0, -1e19]);
+        b.g_u.copy_from_slice(&[3.5, 0.0, 10.0]);
         true
     }
     fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
@@ -71,7 +73,7 @@ impl TNLP for Model {
     fn get_scaling_parameters(&mut self, r: ScalingRequest<'_>) -> bool {
         *r.obj_scaling = 3.0;
         *r.use_g_scaling = true;
-        r.g_scaling.copy_from_slice(&[0.01, 5.0]);
+        r.g_scaling.copy_from_slice(&[0.01, 5.0, 1.0]);
         *r.use_x_scaling = self.x_scaling;
         if self.x_scaling {
             r.x_scaling.copy_from_slice(&D);
@@ -97,16 +99,17 @@ impl TNLP for Model {
     fn eval_g(&mut self, x: &[Number], _n: bool, g: &mut [Number]) -> bool {
         g[0] = x[0] + x[1] + x[3];
         g[1] = x[0] - x[2];
+        g[2] = x[1] + x[3];
         true
     }
     fn eval_jac_g(&mut self, _x: Option<&[Number]>, _n: bool, mode: SparsityRequest<'_>) -> bool {
         match mode {
             SparsityRequest::Structure { irow, jcol } => {
-                irow.copy_from_slice(&[0, 0, 0, 1, 1]);
-                jcol.copy_from_slice(&[0, 1, 3, 0, 2]);
+                irow.copy_from_slice(&[0, 0, 0, 1, 1, 2, 2]);
+                jcol.copy_from_slice(&[0, 1, 3, 0, 2, 1, 3]);
             }
             SparsityRequest::Values { values } => {
-                values.copy_from_slice(&[1.0, 1.0, 1.0, 1.0, -1.0]);
+                values.copy_from_slice(&[1.0, 1.0, 1.0, 1.0, -1.0, 1.0, 1.0]);
             }
         }
         true
@@ -129,11 +132,27 @@ impl TNLP for Model {
         }
         true
     }
+    fn get_constraints_linearity(&mut self, t: &mut [Linearity]) -> bool {
+        t.fill(Linearity::Linear);
+        true
+    }
+    fn get_variables_linearity(&mut self, t: &mut [Linearity]) -> bool {
+        t.fill(Linearity::NonLinear);
+        true
+    }
     fn wants_current_iterate(&self) -> bool {
         true
     }
     fn intermediate_callback(&mut self, _st: IterStats, _d: &IpoptData, _q: &IpoptCq) -> bool {
         self.fires += 1;
+        // The dimensions of the problem the algorithm solves (interior-
+        // point arm only: the SQP arm installs no context).
+        if let Some(dims) = with_current(|c| {
+            let nlp = c.nlp.borrow();
+            (nlp.n_full_x() as usize, nlp.n_full_g() as usize)
+        }) {
+            self.solved_dims = Some(dims);
+        }
         self.last = with_current_user_iterate(|u| Point {
             x: u.x.clone(),
             z_l: u.z_l.clone(),
@@ -161,6 +180,10 @@ enum Scaling {
     GradientBased,
     /// `user-scaling` with non-unit per-variable factors (`ScalingTnlp`).
     UserX,
+    /// `presolve=yes` + `presolve_linear_eq_reduction=yes`: `g2` is
+    /// implied by the box and dropped, `g1 = x0 − x2 = 0` eliminates a
+    /// column, and the fixed `x3` leaves the problem.
+    Presolve,
 }
 
 fn solve(algorithm: &str, scaling: Scaling) -> Model {
@@ -172,6 +195,10 @@ fn solve(algorithm: &str, scaling: Scaling) -> Model {
         Scaling::UserX => Model {
             k: 1.0,
             x_scaling: true,
+            ..Default::default()
+        },
+        Scaling::Presolve => Model {
+            k: 1.0,
             ..Default::default()
         },
     };
@@ -191,6 +218,11 @@ fn solve(algorithm: &str, scaling: Scaling) -> Model {
         }
         Scaling::UserX => {
             o.set_string_value("nlp_scaling_method", "user-scaling", true, false)
+                .unwrap();
+        }
+        Scaling::Presolve => {
+            o.set_string_value("presolve", "yes", true, false).unwrap();
+            o.set_string_value("presolve_linear_eq_reduction", "yes", true, false)
                 .unwrap();
         }
     }
@@ -219,7 +251,7 @@ fn assert_close(what: &str, got: &[Number], want: &[Number]) {
     }
 }
 
-fn check(algorithm: &str, scaling: Scaling) {
+fn check(algorithm: &str, scaling: Scaling) -> Model {
     let m = solve(algorithm, scaling);
     assert!(m.fires > 1, "{algorithm} {scaling:?}: {} fires", m.fires);
     let last = m
@@ -238,6 +270,11 @@ fn check(algorithm: &str, scaling: Scaling) {
     assert_close("z_u", &last.z_u, &out.z_u);
     assert_close("g", &last.g, &out.g);
     assert_close("lambda", &last.lambda, &out.lambda);
+    Model {
+        last: Some(last),
+        out: Some(out),
+        ..m
+    }
 }
 
 #[test]
@@ -248,6 +285,23 @@ fn ipm_live_iterate_equals_finalize_under_gradient_scaling_with_a_fixed_variable
 #[test]
 fn ipm_live_iterate_equals_finalize_under_user_x_scaling_with_a_fixed_variable() {
     check("interior-point", Scaling::UserX);
+}
+
+/// With presolve in the stack the algorithm solves a smaller problem, and
+/// installs that problem's iterate; each presolve layer lifts it on its
+/// way to the user by its own `finalize_solution`. Unlifted, the user read
+/// reduced-space vectors: the wrong length, entries at the wrong indices.
+#[test]
+fn ipm_live_iterate_equals_finalize_with_a_dropped_row_and_an_eliminated_column() {
+    let m = check("interior-point", Scaling::Presolve);
+    let (n, rows) = m.solved_dims.expect("an interior-point context");
+    assert!(n < 3, "no column eliminated: the algorithm solved n = {n}");
+    assert!(rows < 3, "no row dropped: the algorithm solved m = {rows}");
+}
+
+#[test]
+fn sqp_live_iterate_equals_finalize_with_a_dropped_row_and_an_eliminated_column() {
+    check("active-set-sqp", Scaling::Presolve);
 }
 
 #[test]

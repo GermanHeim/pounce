@@ -215,6 +215,20 @@ changes.
   on its bounds. A singleton row coincident with a declared bound keeps its
   multiplier on the bound (row dual 0) — a degenerate pair, now pinned.
   `presolve` is off by default; `presolve=no` output is unchanged.
+- **With presolve on, the live iterate is lifted to the user's problem.**
+  The algorithm solves the reduced problem and installed that problem's
+  iterate, which reached the user's intermediate callback
+  (`with_current_user_iterate`) unexpanded: reduced length, entries at the
+  wrong indices. `PresolveTnlp` and `LinearEqElimTnlp` now lift it one layer
+  in their `intermediate_callback` forward, by running their own
+  `finalize_solution` against a stand-in inner TNLP that keeps the solution
+  instead of finalizing (`pounce-presolve/src/live_lift.rs`) — so
+  eliminated columns, dropped rows' `g` and their recovered multipliers are
+  exactly the final solution's at the last fire. Before: `x` of length 2
+  against the user's 4, `g` of length 2 against 3; after: equal to 1e-9
+  relative on both arms. Costs the finalize re-evaluations per fire, only
+  with presolve on and a TNLP that asks for the iterate. The C interface is
+  unaffected: presolve declines callback TNLPs, which declare no linearity.
 - **The interior-point live iterate carries fixed variables' bound
   multipliers, as the final solution does.** `GetIpoptCurrentIterate` on the
   interior-point arm read `z_L` / `z_U` straight off the algorithm, which
