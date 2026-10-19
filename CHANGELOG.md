@@ -197,6 +197,24 @@ changes.
   parity test's strict `xfail` on camel deflation is now a pass.
 
 ### Fixed
+- **Presolve reported multipliers on bounds the model does not have when a
+  bound it derived from rows was active (M24).** Phase 1 / FBBT derive
+  variable bounds from multi-variable rows (`x0 = 2·x1, x0 ≥ 4` ⇒ `x1 ≥ 2`),
+  and the reduced solve was free to put the multiplier there. On that model
+  `presolve=yes presolve_linear_eq_reduction=yes` wrote `.sol` dual `8` and
+  `ipopt_zL_out(x1) = 20` against `presolve=no`'s `-2` and `z_L(x0) = 10` —
+  duals `pounce verify --require-optimal` rejects (dual infeasibility
+  `3.2e1`); plain `presolve=yes` split it three ways (`1.2e1`). Postsolve now
+  zeroes a multiplier on a derived side the original model does not have
+  active and recovers the original problem's multipliers on the active rows
+  and declared bounds (sign-constrained least squares over the connected
+  component the residual reaches): the `presolve=no` duals wherever those are
+  unique, a valid KKT set otherwise, on both the NLP and SQP arms and in both
+  senses. A warm start seeds the reduced bounds from a dropped row's supplied
+  multiplier, so a `.sol` round-trips at `max_iter=0` while the primal stays
+  on its bounds. A singleton row coincident with a declared bound keeps its
+  multiplier on the bound (row dual 0) — a degenerate pair, now pinned.
+  `presolve` is off by default; `presolve=no` output is unchanged.
 - **The intermediate callback fires under per-variable `user-scaling`, and
   the iterate it reads is unscaled.** Non-unit `x` factors install a
   `ScalingTnlp` (`x̃ = d ⊙ x`, gh#486), which did not forward

@@ -2289,7 +2289,12 @@ fn real_main() -> ExitCode {
         })
         .unwrap_or(false);
     if let Some(p) = &presolve_handle {
-        let lifted = if p.borrow().n_dropped_rows() > 0 || elim_reduced {
+        // `postsolve_rewrote_duals`: M24's derived-bound recovery can move a
+        // multiplier onto a kept row even when no row was dropped.
+        let lifted = if p.borrow().n_dropped_rows() > 0
+            || elim_reduced
+            || p.borrow().postsolve_rewrote_duals()
+        {
             p.borrow().finalized_full_solution()
         } else {
             None
@@ -2370,21 +2375,25 @@ fn real_main() -> ExitCode {
         }
     }
 
-    // M24: a bound presolve made from a singleton row it then dropped had its
-    // multiplier handed back to that row inside `PresolveTnlp::finalize_solution`,
-    // and the full-length `lambda` swapped in above carries it. The bound
-    // capture was taken outside presolve, so it still holds the same number on
-    // a variable bound the model never declared; zero those entries so the
-    // `.sol` reports it once, on the row, as a presolve=no solve does.
-    // Zeroing is frame-free, so it is safe after the scaling undo above.
+    // M24: `PresolveTnlp::finalize_solution` rewrites bound multipliers that
+    // belong to the original problem's rows — a dropped singleton row's bound
+    // handed back to the row, and a multiplier on a bound presolve *derived*
+    // from rows recovered onto the active rows and declared bounds it came
+    // from — and the full-length `lambda` swapped in above carries the other
+    // half. The bound capture was taken outside presolve, so it still holds
+    // the solver's numbers; overwrite the entries presolve changed so the
+    // `.sol` agrees with that `lambda`. `PresolveTnlp` sits inside the gh#486
+    // scaling wrapper, so its values are in the model's units, as this capture
+    // is after the scaling undo above; the objective-sense flip below applies
+    // to both alike.
     if let Some(p) = &presolve_handle {
-        let handed = p.borrow().bound_multipliers_handed_to_rows().to_vec();
-        if !handed.is_empty() {
+        let overrides = p.borrow().bound_multiplier_overrides().to_vec();
+        if !overrides.is_empty() {
             if let Some((z_l, z_u)) = bound_mult_capture.borrow_mut().as_mut() {
-                for (j, upper) in handed {
-                    let side = if upper { &mut *z_u } else { &mut *z_l };
-                    if let Some(z) = side.get_mut(j) {
-                        *z = 0.0;
+                for (j, zl, zu) in overrides {
+                    if let (Some(a), Some(b)) = (z_l.get_mut(j), z_u.get_mut(j)) {
+                        *a = zl;
+                        *b = zu;
                     }
                 }
             }
