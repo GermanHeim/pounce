@@ -704,6 +704,63 @@ fn decode(irow: Index, jcol: Index, one_based: bool) -> (usize, usize) {
     }
 }
 
+/// The substitution coefficient `α` of `x_src = α·x_survivor + β` when the
+/// plan vouches that the reduced bound recorded against `survivor` was
+/// transferred from the eliminated column `src`, else `None`.
+///
+/// Shared by both directions of the gh#493 attribution, so the outbound
+/// [`attribute_bound_multiplier`] and the inbound
+/// [`gather_transferred_bound_multiplier`] cannot disagree about which
+/// bounds moved.
+fn transfer_coeff(plan: &EliminationPlan, src: usize, survivor: usize) -> Option<Number> {
+    if src == survivor || src >= plan.n_full {
+        return None;
+    }
+    let VarRecovery::Affine { rep, coeff, .. } = plan.recovery[src] else {
+        return None;
+    };
+    (rep == survivor && coeff.is_finite() && coeff != 0.0).then_some(coeff)
+}
+
+/// The inverse of [`attribute_bound_multiplier`], for a warm start: the
+/// reduced multiplier of the survivor's `upper` (or lower) bound, given the
+/// full-space multipliers a caller supplied.
+///
+/// When that reduced bound was transferred from an eliminated column `src`,
+/// the caller's multiplier for it sits on `src` — on the opposite side when
+/// `α < 0` — and comes back scaled by `|α|`, so a `.sol` written through
+/// this wrapper round-trips. Whatever the survivor's own entry carries is
+/// added (it is the same reduced bound's share the outbound residual
+/// attribution may have parked there). A NaN source means "unsupplied"
+/// (gh#622) and leaves the survivor's own entry, NaN included, untouched.
+fn gather_transferred_bound_multiplier(
+    plan: &EliminationPlan,
+    src: usize,
+    survivor: usize,
+    upper: bool,
+    z_l_full: &[Number],
+    z_u_full: &[Number],
+) -> Number {
+    let own = if upper {
+        z_u_full[survivor]
+    } else {
+        z_l_full[survivor]
+    };
+    let Some(coeff) = transfer_coeff(plan, src, survivor) else {
+        return own;
+    };
+    let moved = if upper != (coeff < 0.0) {
+        z_u_full[src]
+    } else {
+        z_l_full[src]
+    };
+    if moved.is_nan() {
+        return own;
+    }
+    let own = if own.is_nan() { 0.0 } else { own };
+    own + moved * coeff.abs()
+}
+
 /// Hand one reduced bound multiplier to the full-space column whose own
 /// declared bound produced that reduced bound (issue #493).
 ///
@@ -738,18 +795,14 @@ fn attribute_bound_multiplier(
             z_l_full[survivor] += z;
         }
     };
-    if src == survivor || src >= plan.n_full || z == 0.0 {
+    if z == 0.0 {
         keep_here(z_l_full, z_u_full);
         return;
     }
-    let VarRecovery::Affine { rep, coeff, .. } = plan.recovery[src] else {
+    let Some(coeff) = transfer_coeff(plan, src, survivor) else {
         keep_here(z_l_full, z_u_full);
         return;
     };
-    if rep != survivor || !coeff.is_finite() || coeff == 0.0 {
-        keep_here(z_l_full, z_u_full);
-        return;
-    }
     // `upper XOR (α < 0)`: the side flips exactly when the map reverses the
     // interval.
     if upper != (coeff < 0.0) {
@@ -1086,8 +1139,30 @@ impl TNLP for LinearEqElimTnlp {
         let s = self.state.as_ref().expect("inited");
         for (red, &full) in s.plan.vars_kept.iter().enumerate() {
             sp.x[red] = x_full[full];
-            sp.z_l[red] = z_l_full[full];
-            sp.z_u[red] = z_u_full[full];
+            if sp.init_z {
+                // A bound transferred onto this survivor carries the
+                // multiplier the caller supplied on the column it came from
+                // (gh#493, inbound half).
+                sp.z_l[red] = gather_transferred_bound_multiplier(
+                    &s.plan,
+                    s.plan.x_l_src.get(red).copied().unwrap_or(full),
+                    full,
+                    false,
+                    &z_l_full,
+                    &z_u_full,
+                );
+                sp.z_u[red] = gather_transferred_bound_multiplier(
+                    &s.plan,
+                    s.plan.x_u_src.get(red).copied().unwrap_or(full),
+                    full,
+                    true,
+                    &z_l_full,
+                    &z_u_full,
+                );
+            } else {
+                sp.z_l[red] = z_l_full[full];
+                sp.z_u[red] = z_u_full[full];
+            }
         }
         for (red, &full) in s.plan.rows_kept.iter().enumerate() {
             sp.lambda[red] = lambda_full[full];
@@ -1976,6 +2051,44 @@ mod tests {
         attribute_bound_multiplier(&plan, 0, 1, 12.0, false, &mut z_l, &mut z_u);
         assert_eq!(z_u, vec![6.0, 0.0]);
         assert_eq!(z_l, vec![0.0, 0.0]);
+    }
+
+    /// The warm-start inverse undoes the attribution exactly, for both signs
+    /// of `α` and both sides (gh#493, inbound half).
+    #[test]
+    fn a_transferred_multiplier_round_trips_through_the_inverse() {
+        for coeff in [2.0, -2.0, 0.25] {
+            let plan = plan_with_transferred_bound(coeff);
+            for upper in [false, true] {
+                let (mut z_l, mut z_u) = (vec![0.0; 2], vec![0.0; 2]);
+                attribute_bound_multiplier(&plan, 0, 1, 12.0, upper, &mut z_l, &mut z_u);
+                let back = gather_transferred_bound_multiplier(&plan, 0, 1, upper, &z_l, &z_u);
+                assert!(
+                    (back - 12.0).abs() < 1e-12,
+                    "α={coeff} upper={upper}: {back} after {z_l:?} / {z_u:?}"
+                );
+            }
+        }
+    }
+
+    /// A NaN on the source column means the caller supplied nothing there
+    /// (gh#622); the survivor keeps its own entry, NaN included.
+    #[test]
+    fn an_unsupplied_source_multiplier_leaves_the_survivor_unseeded() {
+        let plan = plan_with_transferred_bound(2.0);
+        let z = vec![Number::NAN; 2];
+        assert!(gather_transferred_bound_multiplier(&plan, 0, 1, false, &z, &z).is_nan());
+        let own = vec![Number::NAN, 3.0];
+        assert_eq!(
+            gather_transferred_bound_multiplier(&plan, 0, 1, true, &z, &own),
+            3.0
+        );
+        // A survivor's own bound reads straight through.
+        let z_l = vec![9.0, 4.0];
+        assert_eq!(
+            gather_transferred_bound_multiplier(&plan, 1, 1, false, &z_l, &z),
+            4.0
+        );
     }
 
     #[test]

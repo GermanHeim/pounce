@@ -292,6 +292,17 @@ changes.
   plain solve's carries no bound multipliers either. `scripts/sweep-minima.sh`
   now records the best `.sol`'s blocks; across its 54 lines only that column
   moves.
+- **A transferred bound multiplier survives a warm start through
+  `presolve_linear_eq_reduction` (gh#493, inbound half).** On the way out the
+  linear-equality pass reports the multiplier of a bound it moved onto a
+  surviving column against the eliminated column that declared it (scaled by
+  `1/|α|`, side-flipped for `α < 0`); on the way in `get_starting_point` read
+  only the survivor's own entry, so feeding that `.sol` back seeded the reduced
+  bound as unsupplied and `z_L` came back as `bound_mult_init_val` (1, against
+  10 supplied, on `min x0²+x1², x0 = 2·x1, x0 ≥ 4`). The inverse now gathers the
+  source column's value (times `|α|`, side-flipped); a NaN source still means
+  "unsupplied". Tests: `tests/linear_eq_elim_warm_bound_multipliers.rs` and two
+  crate unit tests.
 - **A `.nl` file's initial duals are read in the `.sol` sign (gh#1033).** The
   `d` segment carries AMPL's dual, `d obj / d b`, the sign `sol_writer`
   produces by negating pounce's multiplier; the reader stored it unnegated, so
