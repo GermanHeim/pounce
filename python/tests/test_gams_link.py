@@ -1268,6 +1268,10 @@ def test_solve_view_seeds_duals_only_under_warm_start(maximize):
     # requested, but GMO has none -> nothing seeded
     seen = _capture_solve_kwargs(_LPView(maximize, None), warm)
     assert not {"lagrange", "zl", "zu"} & set(seen)
+    # GAMS option files are case-insensitive, key and value alike
+    for opts in ({"Warm_Start_Init_Point": "Yes"}, {"WARM_START_INIT_POINT": "yes"}):
+        seen = _capture_solve_kwargs(_LPView(maximize, marg), opts)
+        np.testing.assert_allclose(seen["lagrange"], _LP_POUNCE["mult_g"])
 
 
 @pytest.mark.parametrize("maximize", [False, True])

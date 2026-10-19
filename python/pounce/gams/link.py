@@ -291,9 +291,18 @@ def solve_view(
 
 
 def _wants_warm_start(options: dict | None) -> bool:
-    """``warm_start_init_point yes`` in the (option-file) options."""
-    val = (options or {}).get("warm_start_init_point")
-    return isinstance(val, str) and val.strip().lower() == "yes"
+    """``warm_start_init_point yes`` in the (option-file) options.
+
+    Key and value both case-insensitive, as GAMS option files are and as the
+    engine's own option lookup is: ``Warm_Start_Init_Point Yes`` switched the
+    engine's warm start on while this check, matching the key exactly, left
+    the duals unseeded -- measured in a live GAMS 53.2 re-solve from the
+    optimum, 14 iterations against 8 seeded and 7 cold.
+    """
+    for key, val in (options or {}).items():
+        if isinstance(key, str) and key.strip().lower() == "warm_start_init_point":
+            return isinstance(val, str) and val.strip().lower() == "yes"
+    return False
 
 
 def problem_from_view(
