@@ -387,6 +387,7 @@ question:
 | `nlp_scaling_method=user-scaling` with `scaling_factor` suffixes | re-routes to the NLP path | warns; the scaling is skipped |
 | `--compute-red-hessian` (or `compute_red_hessian=yes`) | re-routes to the NLP path | warns; the step is skipped |
 | sIPOPT `sens_*` suffixes whose pin is **not** a unit equality row | re-routes to the NLP path | warns; the step is skipped |
+| `warm_start_init_point=yes` (start from the `.nl`'s `x0`, `d` segment and `ipopt_zL_in`/`ipopt_zU_in`) | re-routes to the NLP path | warns; the solve starts cold |
 
 A *positive* `obj_scaling_factor` is not in this table: it only rescales
 conditioning, and the convex path reports natural units either way, so

@@ -947,11 +947,31 @@ fn real_main() -> ExitCode {
         // this is refused outright below rather than warned about.
         let decline_convex_for_obj_scaling =
             maximize_via_obj_scaling && matches!(selection, SolverSelection::Auto);
+        // And for a requested warm start. `warm_start_init_point=yes` asks the
+        // solve to begin from the `.nl`'s primal and dual starting values
+        // (`x0`, the `d` segment, the `ipopt_zL_in`/`ipopt_zU_in` suffixes),
+        // and the convex dispatch below reads none of them: it re-parses the
+        // model into a `QpProblem` and runs a cold self-dual start, so with
+        // `max_iter=0` it reported `x = 0` and zero duals instead of the
+        // supplied point. `pounce_convex::solve_qp_ipm_warm` exists, but it is
+        // not that contract either: it recenters the slacks and multipliers
+        // into the interior by design (`QpWarmStart`), needs the direct KKT
+        // driver, and the conic and active-set engines take no dual seed at
+        // all. So under `auto` the general path, which honors every part of
+        // the request, takes the model.
+        let wants_warm_start = app
+            .options()
+            .get_string_value("warm_start_init_point", "")
+            .map(|(v, _)| v == "yes")
+            .unwrap_or(false);
+        let decline_convex_for_warm_start =
+            wants_warm_start && matches!(selection, SolverSelection::Auto);
         // Any of these declines the fast path; the messages below say which.
         let decline_convex = decline_convex_for_postopt
             || decline_convex_for_user_scaling
             || decline_convex_for_curvature_scaling
-            || decline_convex_for_obj_scaling;
+            || decline_convex_for_obj_scaling
+            || decline_convex_for_warm_start;
 
         // Same bargain for a conic solve that finishes without a verified KKT
         // point: under `auto` the class was our inference, not the user's
@@ -1172,6 +1192,29 @@ fn real_main() -> ExitCode {
                          internally and does not read them; the requested \
                          scaling will be skipped. Use solver_selection=nlp or \
                          auto to apply it."
+                    );
+                }
+            }
+            // The warm-start decline, or, under a forced convex engine, a
+            // warning that the starting point will not be read.
+            if wants_warm_start {
+                if decline_convex_for_warm_start {
+                    eprintln!(
+                        "pounce: note: this problem classifies as {} but \
+                         warm_start_init_point=yes asks to start from the .nl's \
+                         primal and dual values, which the convex solver \
+                         (pounce-convex) does not read; routing to the general \
+                         NLP interior-point path so the warm start is honored.",
+                        class.name()
+                    );
+                } else {
+                    eprintln!(
+                        "pounce: warning: warm_start_init_point=yes asks to start \
+                         from the .nl's primal and dual values, but \
+                         solver_selection={sel_str} forces the convex solver \
+                         (pounce-convex), which starts cold and does not read \
+                         them; the warm start will be ignored. Use \
+                         solver_selection=nlp or auto to honor it."
                     );
                 }
             }

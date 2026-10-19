@@ -292,6 +292,15 @@ changes.
   plain solve's carries no bound multipliers either. `scripts/sweep-minima.sh`
   now records the best `.sol`'s blocks; across its 54 lines only that column
   moves.
+- **A requested warm start is no longer silently discarded on the convex
+  arms.** Under `solver_selection=auto` an LP / convex QP / convex QCQP went to
+  `pounce-convex`, which re-parses the model and starts cold, so
+  `warm_start_init_point=yes max_iter=0` wrote `x = 0` and zero duals instead of
+  the `.nl`'s `x0`, `d` segment and `ipopt_z*_in` suffixes. `auto` now routes
+  such a run to the NLP interior point (with a note on stderr), as it already
+  does for user scaling and sensitivity requests; a forced convex
+  `solver_selection` keeps its engine and warns that the warm start is ignored.
+  Cold starts are unaffected. Test: `tests/convex_warm_start_routes_to_nlp.rs`.
 - **Presolve hands a dropped singleton row's dual back to the row (M24).**
   Phase 1 turns a row like `x0 <= 0.5` into a variable bound and Phase 2 drops
   the row, so the solver's multiplier came out as `ipopt_zU_out` on a variable
