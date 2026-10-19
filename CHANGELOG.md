@@ -197,6 +197,15 @@ changes.
   parity test's strict `xfail` on camel deflation is now a pass.
 
 ### Fixed
+- **A `.nl` file's initial duals are read in the `.sol` sign (gh#1033).** The
+  `d` segment carries AMPL's dual, `d obj / d b`, the sign `sol_writer`
+  produces by negating pounce's multiplier; the reader stored it unnegated, so
+  a `warm_start_init_point=yes max_iter=0` run handed a `d` entry of 5 back as
+  -5 (Ipopt: 5). The reader now negates on the way in. `pounce-continuation`,
+  which wrote the JSON report's `lambda` straight into the next point's `d`
+  segment and so relied on the old behaviour, now negates it on the way out;
+  its transfer is unchanged. A full solve ends at the same multipliers either
+  way.
 - **LPs with duplicated, round-off-conflicting cuts solve again on both convex
   engines (gh#1023).** An outer-approximation master LP (67 columns, 426 rows)
   repeats its cuts with right-hand sides that differ by `~1e-14`, so no point

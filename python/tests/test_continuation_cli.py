@@ -226,6 +226,36 @@ def test_trace_manifest_solves_every_point(tmp_path):
 
 
 @needs_cli
+def test_warm_transfer_writes_duals_in_the_sol_sign(tmp_path):
+    """gh#1033: a `.nl` `d` segment is in AMPL's dual sign, the sign of a
+    `.sol` dual block, and the reader negates it into pounce's multiplier.
+    The trace takes the previous point's duals from the JSON report, in
+    pounce's sign, so it must negate them on the way into the next `.nl`:
+    the transferred `d` entry equals the previous `.sol` dual.
+    `convex_qp.nl` has one equality with a nonzero multiplier (pounce
+    lambda = -2, AMPL dual = +2), so a sign slip cannot hide at zero."""
+    src = os.path.join(_FIXTURES, "convex_qp.nl")
+    if not os.path.exists(src):
+        pytest.skip("fixture not present")
+    for name in ("p0.nl", "p1.nl"):
+        shutil.copy(src, tmp_path / name)
+    man = PathManifest.load(_write(tmp_path, {
+        "version": 1,
+        "points": [{"model": "p0.nl"}, {"model": "p1.nl"}],
+        "options": {"print_level": "0", "sb": "yes",
+                    "solver_selection": "nlp"},
+    }))
+    trace = trace_manifest(man, binary=_CLI, workdir=str(tmp_path))
+    assert trace["n_converged"] == 2
+    sol_duals, _ = parse_sol(str(tmp_path / "step0000.sol"), 1, 2)
+    lines = (tmp_path / "step0001.nl").read_text().split("\n")
+    d = lines.index("d1")
+    transferred = float(lines[d + 1].split()[1])
+    assert sol_duals[0] == pytest.approx(2.0, abs=1e-6)
+    assert transferred == pytest.approx(sol_duals[0], abs=1e-12)
+
+
+@needs_cli
 def test_cold_mode_does_not_transfer(tmp_path):
     src = os.path.join(_FIXTURES, "boxed_qp_min.nl")
     if not os.path.exists(src):

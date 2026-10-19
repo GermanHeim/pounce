@@ -172,6 +172,12 @@ def rewrite_nl_initial_point(src, dst, primals=None, duals=None):
     ``index value`` lines. Both are optional and both are honoured by
     pounce's reader, so replacing them is how a solved point is handed
     to the next model in the path.
+
+    `duals` are written as given, so they must be in the file's sign:
+    AMPL's dual, ``d obj / d b`` -- the sign a ``.sol`` dual block
+    carries, and the negation of pounce's multiplier for
+    ``L = f + lambda' g`` (the JSON report's ``lambda``). The reader
+    negates a ``d`` entry on the way in (gh#1033).
     """
     with open(src) as fh:
         lines = fh.read().split("\n")
@@ -254,8 +260,11 @@ def trace_manifest(manifest, *, binary=None, cold=False, workdir=None,
         run_model = model
         if warm:
             run_model = os.path.join(tmp, f"step{k:04d}.nl")
+            # `prev[0]` is the JSON report's `lambda`, in pounce's sign;
+            # a `d` segment is in AMPL's, so negate it (gh#1033).
             rewrite_nl_initial_point(model, run_model,
-                                     primals=prev[1], duals=prev[0])
+                                     primals=prev[1],
+                                     duals=[-v for v in prev[0]])
 
         sol = os.path.join(tmp, f"step{k:04d}.sol")
         rep = os.path.join(tmp, f"step{k:04d}.json")

@@ -691,6 +691,9 @@ pub struct NlProblem {
     pub g_l: Vec<Number>,
     pub g_u: Vec<Number>,
     pub x0: Vec<Number>,
+    /// Initial constraint multipliers from the `d` segment, in pounce's
+    /// sign (`L = f + lambda' g`): the negation of the AMPL duals the
+    /// file carries (gh#1033).
     pub lambda0: Vec<Number>,
     /// AMPL suffix dictionaries. Variable / constraint / objective
     /// suffixes are stored as dense vectors (length n / m / num_obj)
@@ -1460,7 +1463,13 @@ pub fn parse_nl_string(txt: String, use_quadratic: bool) -> Result<NlProblem, St
                             "d-segment constraint index {idx} out of range (m={m})"
                         ));
                     }
-                    lambda0[idx] = val;
+                    // A `d` entry is in AMPL's dual sign (`d obj / d b`, the
+                    // sign a `.sol` dual block carries), and pounce's
+                    // multiplier is that of `L = f + lambda' g`, i.e. `-dual`.
+                    // `sol_writer` negates on the way out; negate on the way
+                    // in so a `.nl` start and a `.sol` result share one sign
+                    // (gh#1033; matches Ipopt's AMPL driver).
+                    lambda0[idx] = -val;
                 }
             }
             'V' => p.parse_v_segment()?,
@@ -7788,7 +7797,8 @@ J0 2
         // untouched when it does not.
         let nl = format!("{EQ_LIN}\nd1\n0 2.5\n");
         let p = parse_nl_text(&nl).expect("parse");
-        assert_eq!(p.lambda0, vec![2.5], "the `d` segment fills lambda0");
+        // gh#1033: a `d` entry is an AMPL dual, so it is stored negated.
+        assert_eq!(p.lambda0, vec![-2.5], "the `d` segment fills lambda0");
 
         let mut t = NlTnlp::new(p);
         let info = t.get_nlp_info().unwrap();
@@ -7811,7 +7821,7 @@ J0 2
         }));
         assert_eq!(
             lambda,
-            vec![2.5],
+            vec![-2.5],
             "a warm start must use the `.nl` initial duals, not zero"
         );
 
