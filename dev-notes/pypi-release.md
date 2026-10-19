@@ -64,16 +64,18 @@ for human confirmation before uploading.
 
 ## Cutting a release
 
+Both PyPI projects release in lockstep with the crates — same X.Y.Z, cut from
+one release PR — and `scripts/check-release-consistency.sh` fails CI if
+`python/pyproject.toml`, `pyomo-pounce/pyproject.toml` and the workspace
+version disagree. The full checklist (benchmarks, version bumps, tag order)
+is `cargo-release.md`, "Cutting a release"; this section is only what each
+PyPI tag does. Do not `git push origin main --tags`: that pushes to `main`
+directly and pushes every local tag, including a `v*` that must not go out
+before the PyPI tags.
+
 ### `pounce-solver` (the maturin wheel)
 
-```sh
-# 1. Bump version in python/pyproject.toml AND
-#    workspace `version` in Cargo.toml if you want crates+python in lockstep.
-# 2. Commit and tag:
-git commit -am "release: pounce-solver v0.1.1"
-git tag python-v0.1.1
-git push origin main --tags
-```
+Tag `python-vX.Y.Z` on the merged release commit.
 
 The `release-pounce` workflow fires on the tag, builds wheels for
 linux x86_64 + aarch64, macOS x86_64 + arm64, and Windows x86_64, plus
@@ -84,13 +86,7 @@ a per-Python-version matrix.
 
 ### `pyomo-pounce` (binary-bundling wheel)
 
-```sh
-# 1. Bump version in pyomo-pounce/pyproject.toml.
-# 2. Commit and tag:
-git commit -am "release: pyomo-pounce v0.1.1"
-git tag pyomo-pounce-v0.1.1
-git push origin main --tags
-```
+Tag `pyomo-pounce-vX.Y.Z` on the same commit.
 
 The `release-pyomo-pounce` workflow per platform: builds the `pounce`
 CLI from source, drops it into `pyomo_pounce/bin/`, builds the wheel,
