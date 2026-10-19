@@ -2219,9 +2219,22 @@ fn real_main() -> ExitCode {
     // from the solution `CountingTnlp` captured at `finalize_solution`
     // (original-problem space, the same `x` / `lambda` the IPM hook would
     // have recorded). Only fills when empty, so the IPM path is untouched.
+    //
+    // The two flags record that a cell now holds that payload rather than
+    // `on_converged`'s, because the frames differ: `CountingTnlp` sits
+    // inside the gh#486 scaling wrapper (see **Frame** below), so this
+    // payload is already in the model's units and the variable-scaling undo
+    // further down must skip it. Before they existed an SQP solve under
+    // `nlp_scaling_method=user-scaling` with `scaling_factor[x1] = 10`
+    // wrote `x1 = 0.1` (correct 1) and `ipopt_zU_out = -10` (correct -1)
+    // to the `.sol`: the factor applied twice. The row duals are not
+    // touched by that undo, so `lambda` was right throughout.
+    let mut x_capture_from_finalize = false;
+    let mut z_capture_from_finalize = false;
     if nominal_capture.borrow().is_none() {
         if let Some(xl) = counting.borrow().captured_solution() {
             *nominal_capture.borrow_mut() = Some(xl);
+            x_capture_from_finalize = true;
         }
     }
     // The bound multipliers too, from the same `finalize_solution` lift:
@@ -2232,6 +2245,7 @@ fn real_main() -> ExitCode {
         if let Some((z_l, z_u)) = counting.borrow().captured_bound_mults() {
             if !z_l.is_empty() || !z_u.is_empty() {
                 *bound_mult_capture.borrow_mut() = Some((z_l, z_u));
+                z_capture_from_finalize = true;
             }
         }
     }
@@ -2275,10 +2289,10 @@ fn real_main() -> ExitCode {
     // factor, with the objective beside it unchanged and right. Silent,
     // plausible, wrong: the shape this whole block exists to remove, one
     // wrapper over.
-    let capture_is_already_in_model_units = app.answer_restored_from_floor();
-    if capture_is_already_in_model_units {
+    if app.answer_restored_from_floor() {
         if let Some(xl) = counting.borrow().captured_solution() {
             *nominal_capture.borrow_mut() = Some(xl);
+            x_capture_from_finalize = true;
         }
         // The bound multipliers are the same story one field over: they
         // also come from `on_converged`, they are also the loser's, and
@@ -2292,6 +2306,7 @@ fn real_main() -> ExitCode {
         if let Some((z_l, z_u)) = counting.borrow().captured_bound_mults() {
             if !z_l.is_empty() || !z_u.is_empty() {
                 *bound_mult_capture.borrow_mut() = Some((z_l, z_u));
+                z_capture_from_finalize = true;
             }
         }
     }
@@ -2348,15 +2363,18 @@ fn real_main() -> ExitCode {
     // and report it as though it were in the model's units, which no
     // reader could detect. Both captures come from the same iterate the
     // factors were built against, so a mismatch is a wiring bug.
-    // Skipped when the captures came from the `finalize_solution` payload
-    // (see `capture_is_already_in_model_units` above): that payload is the
-    // output of this very substitution, so correcting it again squares the
-    // factor.
-    if let Some(d) = app
-        .variable_scaling()
-        .filter(|_| !capture_is_already_in_model_units)
-    {
-        if let Some((x, _lambda)) = nominal_capture.borrow_mut().as_mut() {
+    // Skipped, per cell, when the capture came from the `finalize_solution`
+    // payload (the SQP backfill or the floor-restore overwrite above): that
+    // payload is the output of this very substitution, so correcting it
+    // again squares the factor. Per cell rather than one flag because the
+    // two backfills are independent — a non-`OrigIpoptNlp` model yields an
+    // `x` capture and no bound multipliers.
+    if let Some(d) = app.variable_scaling() {
+        if let Some((x, _lambda)) = nominal_capture
+            .borrow_mut()
+            .as_mut()
+            .filter(|_| !x_capture_from_finalize)
+        {
             assert_eq!(
                 x.len(),
                 d.len(),
@@ -2368,7 +2386,11 @@ fn real_main() -> ExitCode {
                 *xi /= s;
             }
         }
-        if let Some((z_l, z_u)) = bound_mult_capture.borrow_mut().as_mut() {
+        if let Some((z_l, z_u)) = bound_mult_capture
+            .borrow_mut()
+            .as_mut()
+            .filter(|_| !z_capture_from_finalize)
+        {
             assert_eq!(
                 z_l.len(),
                 d.len(),
