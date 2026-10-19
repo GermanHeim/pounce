@@ -86,6 +86,35 @@ impl TNLP for Capture {
 pub(crate) struct LiftMaps<'a> {
     pub cols: &'a [usize],
     pub rows: &'a [usize],
+    /// The inner problem's declared variable bounds, for a column this
+    /// layer removed (empty: none removed).
+    pub declared_x_l: &'a [Number],
+    pub declared_x_u: &'a [Number],
+}
+
+/// The algorithm's variable bounds carried to the inner shape: a kept
+/// column keeps the bound the algorithm measures its slack to (whatever this
+/// layer made of the declared one — the slack the algorithm has *is* to that
+/// bound); a removed column, which the algorithm never held, its declared
+/// bound — the only one there is, unwidened.
+fn lift_alg_bounds(
+    outer: &[Number],
+    maps: &LiftMaps<'_>,
+    declared: &[Number],
+    n_in: usize,
+) -> Vec<Number> {
+    if outer.len() != maps.cols.len() {
+        return Vec::new();
+    }
+    let mut out: Vec<Number> = (0..n_in)
+        .map(|j| declared.get(j).copied().unwrap_or(Number::NAN))
+        .collect();
+    for (k, &j) in maps.cols.iter().enumerate() {
+        if j < n_in {
+            out[j] = outer[k];
+        }
+    }
+    out
 }
 
 /// The outer iterate's [`IterateScaling`] carried to the inner shape: a
@@ -176,5 +205,7 @@ pub(crate) fn lift<T: TNLP>(
         .scaling
         .as_ref()
         .and_then(|s| lift_scaling(s, &maps, n_in, m_in));
+    lifted.x_l_alg = lift_alg_bounds(&it.x_l_alg, &maps, maps.declared_x_l, n_in);
+    lifted.x_u_alg = lift_alg_bounds(&it.x_u_alg, &maps, maps.declared_x_u, n_in);
     Some(lifted)
 }

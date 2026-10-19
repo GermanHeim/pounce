@@ -385,10 +385,48 @@ const X_U: [Number; N] = [2e19, 1.0, 2e19, 1.0];
 const G_L: [Number; M] = [-2e19, 0.0, -2e19];
 const G_U: [Number; M] = [3.5, 0.0, 10.0];
 
+/// The bounds the algorithm iterates against under `solve_relaxed`, from the
+/// declared ones by `bound_relax_factor`'s rule, independently of the
+/// solver: the widening `min(1e-3·max(1, |b̃|), constr_viol_tol = 1e-4)` is
+/// applied in the coordinates the algorithm sees, `b̃ = d·b` (user scaling's
+/// `x̃ = d ⊙ x`; `d = 1` under gradient-based scaling, which scales no
+/// variable), and taken back, `b ∓ δ/d`. The fixed `x3` is not in the
+/// algorithm: its bound stays its value.
+fn relaxed_bounds(cfg: Cfg) -> ([Number; N], [Number; N]) {
+    let d = match cfg {
+        Cfg::UserX => [2.0, 0.5, 4.0, 3.0],
+        Cfg::GradientBased => [1.0; N],
+    };
+    let (mut l, mut u) = (X_L, X_U);
+    for j in 0..N {
+        if X_L[j] == X_U[j] {
+            continue;
+        }
+        let delta = |b: Number| (1e-3 * (d[j] * b).abs().max(1.0)).min(1e-4) / d[j];
+        if X_L[j] > -1e19 {
+            l[j] -= delta(X_L[j]);
+        }
+        if X_U[j] < 1e19 {
+            u[j] += delta(X_U[j]);
+        }
+    }
+    (l, u)
+}
+
 /// Upstream `get_curr_violations(scaled = false)` recomputed by hand on the
 /// original problem from `(x, z_L, z_U, g, λ)` — none of it read from the
-/// solver: the model's own gradient and Jacobian, its declared bounds.
-fn recompute(x: &[Number; N], z_l: &[Number; N], z_u: &[Number; N], lambda: &[Number; M]) -> Viol {
+/// solver: the model's own gradient and Jacobian, its declared bounds for
+/// the violations, and for `compl_x_*` the relaxed bounds the algorithm's
+/// slack is measured to ([`relaxed_bounds`]; upstream's
+/// `curr_compl_x_L / obj`).
+fn recompute(
+    cfg: Cfg,
+    x: &[Number; N],
+    z_l: &[Number; N],
+    z_u: &[Number; N],
+    lambda: &[Number; M],
+) -> Viol {
+    let (rl, ru) = relaxed_bounds(cfg);
     let kk = k();
     let c = [3.0, 3.0, 1.0, 4.0];
     let g = [x[0] + x[1] + x[3], x[0] - x[2], x[1] + x[3]];
@@ -404,11 +442,11 @@ fn recompute(x: &[Number; N], z_l: &[Number; N], z_u: &[Number; N], lambda: &[Nu
         v.grad_lag_x[j] = if X_L[j] == X_U[j] { 0.0 } else { gl };
         if X_L[j] > -1e19 {
             v.x_l[j] = (X_L[j] - x[j]).max(0.0);
-            v.compl_x_l[j] = (x[j] - X_L[j]) * z_l[j];
+            v.compl_x_l[j] = (x[j] - rl[j]) * z_l[j];
         }
         if X_U[j] < 1e19 {
             v.x_u[j] = (x[j] - X_U[j]).max(0.0);
-            v.compl_x_u[j] = (X_U[j] - x[j]) * z_u[j];
+            v.compl_x_u[j] = (ru[j] - x[j]) * z_u[j];
         }
     }
     for i in 0..M {
@@ -479,7 +517,7 @@ fn check_violations(algorithm: &str, cfg: Cfg) {
         let v = f.viol.as_ref().unwrap_or_else(|| {
             panic!("{algorithm} {cfg:?}: GetIpoptCurrentViolations refused at fire {k}")
         });
-        let want = recompute(&f.x, &f.z_l, &f.z_u, &f.lambda);
+        let want = recompute(cfg, &f.x, &f.z_l, &f.z_u, &f.lambda);
         close_viol(&format!("{algorithm} {cfg:?} fire {k}"), v, &want);
         moved |= want.grad_lag_x.iter().any(|g| g.abs() > 1e-2 * self::k())
             && want.g.iter().any(|g| g.abs() > 1e-3);
@@ -490,7 +528,7 @@ fn check_violations(algorithm: &str, cfg: Cfg) {
     );
     // The last fire, against the final x, λ, z IpoptSolve wrote back.
     let last = fires.last().unwrap().viol.clone().unwrap();
-    let want = recompute(&out.x, &out.z_l, &out.z_u, &out.lambda);
+    let want = recompute(cfg, &out.x, &out.z_l, &out.z_u, &out.lambda);
     close_viol(
         &format!("{algorithm} {cfg:?} last fire vs IpoptSolve"),
         &last,

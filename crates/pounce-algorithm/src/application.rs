@@ -9325,6 +9325,9 @@ fn sqp_user_iterate(
     // rule (`x = x̃ ⊘ d`, `z = d ⊙ z̃`).
     let (c, d) = c_vals.split_at(m_eq.min(c_vals.len()));
     let g = nlp.pack_g_for_user(&dv(&c_space, c), &dv(&d_space, d));
+    // The SQP iterates against the same live bounds (widened only when
+    // `bound_relax_factor` is set by name on this arm).
+    let (x_l_alg, x_u_alg) = crate::intermediate::algorithm_x_bounds(&*nlp, &x_full);
     crate::intermediate::UserIterate {
         x: x_full,
         z_l,
@@ -9332,6 +9335,8 @@ fn sqp_user_iterate(
         g,
         lambda,
         scaling: Some(crate::intermediate::iterate_scaling(&*nlp)),
+        x_l_alg,
+        x_u_alg,
     }
 }
 

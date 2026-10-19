@@ -1042,14 +1042,13 @@ pub unsafe extern "C" fn GetIpoptCurrentIterate(
 ///   `g` order. Computed from the live iterate [`GetIpoptCurrentIterate`]
 ///   reads (so with presolve on, the user's own rows and columns) against
 ///   the declared bounds: `x_L_violation = max(0, x_L − x)`,
-///   `compl_x_L = (x − x_L)·z_L`, `grad_lag_x = ∇f + Jᵀλ − z_L + z_U`
+///   `compl_x_L = (x − x_L^alg)·z_L` with `x_L^alg` the bound the
+///   algorithm's slack is measured to (declared, widened by
+///   `bound_relax_factor`: upstream's `curr_compl_x_L / obj`), `grad_lag_x = ∇f + Jᵀλ − z_L + z_U`
 ///   (`0` at fixed variables, as upstream's `ResortX` leaves them; `∇f` and
 ///   `J` come from this problem's `eval_grad_f` / `eval_jac_g`, called only
 ///   when `grad_lag_x` is requested), per-row violation `|g − g_L|` /
-///   `max(0, g_L − g, g − g_U)` and `compl_g` with upstream's signs. The one
-///   deliberate difference: upstream's `compl_x_*` multiply the algorithm's
-///   slack, measured to the bound `bound_relax_factor` widened, so the two
-///   differ by at most `bound_relax_factor·max(1,|x_L|)·z_L`. Both arms.
+///   `max(0, g_L − g, g − g_U)` and `compl_g` with upstream's signs. Both arms.
 /// * `TRUE` — upstream's `get_curr_violations(scaled = true)`: the same
 ///   quantities in the algorithm's scaled space, each a fixed factor of its
 ///   unscaled counterpart ([`pounce_nlp::live_iterate::scale_violations`]):

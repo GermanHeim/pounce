@@ -268,9 +268,16 @@ changes.
   (where it refused; a removed column or row carries factor 1). Before: `compl_x_L[1]` at the first fire
   read `10.0` against the original problem's `200` under gradient-based
   scaling (×20) and `5.0` against `1.67` under user scaling (×3). After:
-  equal to 1e-9 at every fire, both arms. `compl_x_*` use the slack to the
-  declared bound, not to the `bound_relax_factor`-widened one upstream's
-  internal slack measures (≤ `bound_relax_factor·max(1,|x_L|)·z_L` apart).
+  equal to 1e-9 at every fire, both arms. `compl_x_*` are upstream's: the
+  algorithm's slack times the multiplier, measured to the bound it iterates
+  against — the declared one widened by `bound_relax_factor` (and moved by
+  safe-slack adjustments), carried with the live iterate
+  (`UserIterate::x_l_alg` / `x_u_alg`, lifted through `ScalingTnlp` and
+  presolve; a column presolve removed keeps its declared bound). Measured to
+  the declared bound they were `δ·z` off (`1e-4·z_U` at
+  `bound_relax_factor = 1e-3`), of the wrong sign once the iterate sat in
+  the widening; now equal to an independent recomputation with the relaxed
+  bounds, both arms, both scalings, and under presolve.
 - **With presolve on, the live iterate is lifted to the user's problem.**
   The algorithm solves the reduced problem and installed that problem's
   iterate, which reached the user's intermediate callback

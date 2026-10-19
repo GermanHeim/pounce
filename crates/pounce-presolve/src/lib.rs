@@ -2924,9 +2924,12 @@ impl TNLP for PresolveTnlp {
                     self,
                     |s| &mut s.inner,
                     (info.n as usize, info.m as usize),
+                    // Every column is kept, so no declared bound is needed.
                     live_lift::LiftMaps {
                         cols: &cols,
                         rows: &rows,
+                        declared_x_l: &[],
+                        declared_x_u: &[],
                     },
                 );
                 (

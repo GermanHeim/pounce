@@ -38,6 +38,19 @@ pub struct UserIterate {
     /// `scaled = TRUE` multiply by. `None`: not known (the scaled readers
     /// then report the unscaled values, scale 1).
     pub scaling: Option<IterateScaling>,
+    /// The variable bounds the algorithm measures its slacks to, in this
+    /// iterate's units and shape: the declared box widened by
+    /// `bound_relax_factor` (and moved by any safe-slack adjustment) for a
+    /// column the algorithm holds; the declared bound for one it does not
+    /// (a fixed variable: its value; a column presolve removed); `±∞` where
+    /// the column has no such bound. Upstream's `compl_x_*` is the
+    /// algorithm's `slack·z`, so it is measured to these. Empty: not known
+    /// (the declared bounds are used). One residual difference: under
+    /// `honor_original_bounds` (off by default) the reported `x` is projected
+    /// into the declared box, so `x − x_L^alg` is the projected point's
+    /// slack, not the algorithm's.
+    pub x_l_alg: Vec<Number>,
+    pub x_u_alg: Vec<Number>,
 }
 
 /// Per-entry factors taking a [`UserIterate`] (and the violations measured
@@ -104,6 +117,9 @@ pub fn scaled_iterate(it: &UserIterate) -> UserIterate {
             .map(|(v, d)| s.obj * v / d)
             .collect(),
         scaling: Some(s.clone()),
+        // The algorithm's bounds are scaled like `x`.
+        x_l_alg: it.x_l_alg.iter().zip(&s.x).map(|(v, d)| v * d).collect(),
+        x_u_alg: it.x_u_alg.iter().zip(&s.x).map(|(v, d)| v * d).collect(),
     };
     for j in 0..n.min(it.z_l.len()).min(it.z_u.len()) {
         let f = s.obj / s.x[j];
@@ -216,10 +232,11 @@ pub fn lagrangian_gradient(
 ///
 /// * `x_L_violation = max(0, x_L − x)` (upstream's
 ///   `unscaled_curr_orig_x_L_violation`: the *original*, unrelaxed bound);
-/// * `compl_x_L = (x − x_L) · z_L`, the bound's slack times its multiplier.
-///   Upstream multiplies the algorithm's slack, which is measured to the
-///   bound `bound_relax_factor` widened, by `z_L / obj_scal`; the two differ
-///   by at most `bound_relax_factor · max(1, |x_L|) · z_L`;
+/// * `compl_x_L = (x − x_L^alg) · z_L`: upstream's `curr_compl_x_L / obj`,
+///   the algorithm's slack — measured to the bound it iterates against, the
+///   declared one widened by `bound_relax_factor` ([`UserIterate::x_l_alg`])
+///   — times its multiplier. The declared bound when the iterate carries no
+///   algorithm bound for the column;
 /// * `grad_lag_x = ∇f + Jᵀλ − z_L + z_U` (`grad_lag`; the caller evaluates
 ///   it), zeroed at fixed variables when `zero_fixed` — upstream's
 ///   `ResortX(…, usefixedvals=false)` under `make_parameter`;
@@ -246,16 +263,23 @@ pub fn user_violations(
         constraint_violation: vec![0.0; m],
         compl_g: vec![0.0; m],
     };
+    // The bound the algorithm's slack is measured to, where it has one.
+    let alg = |v: &[Number], j: usize, declared: Number| {
+        v.get(j)
+            .copied()
+            .filter(|b| b.is_finite() && v.len() == n)
+            .unwrap_or(declared)
+    };
     for j in 0..n {
         let x = it.x[j];
         let (lo, up) = (b.x_l[j], b.x_u[j]);
         if lo > b.lower_inf {
             v.x_l_violation[j] = (lo - x).max(0.0);
-            v.compl_x_l[j] = (x - lo) * it.z_l[j];
+            v.compl_x_l[j] = (x - alg(&it.x_l_alg, j, lo)) * it.z_l[j];
         }
         if up < b.upper_inf {
             v.x_u_violation[j] = (x - up).max(0.0);
-            v.compl_x_u[j] = (up - x) * it.z_u[j];
+            v.compl_x_u[j] = (alg(&it.x_u_alg, j, up) - x) * it.z_u[j];
         }
         if zero_fixed
             && lo == up
@@ -366,6 +390,7 @@ mod tests {
                 x_in_alg: vec![true, false],
                 g: vec![10.0],
             }),
+            ..Default::default()
         };
         let s = scaled_iterate(&it);
         assert_eq!(s.x, vec![8.0, 1.0]);

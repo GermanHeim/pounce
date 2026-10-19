@@ -1838,13 +1838,19 @@ impl TNLP for LinearEqElimTnlp {
                 let saved = self.finalized.take();
                 // Outer column/row `k` is inner `vars_kept[k]` /
                 // `rows_kept[k]`; a passthrough layer is the identity.
-                let (cols, rows): (Vec<usize>, Vec<usize>) = match self.state.as_ref() {
-                    Some(s) if !s.passthrough => {
-                        (s.plan.vars_kept.clone(), s.plan.rows_kept.clone())
-                    }
+                type Maps = (Vec<usize>, Vec<usize>, Vec<Number>, Vec<Number>);
+                let (cols, rows, decl_l, decl_u): Maps = match self.state.as_ref() {
+                    Some(s) if !s.passthrough => (
+                        s.plan.vars_kept.clone(),
+                        s.plan.rows_kept.clone(),
+                        s.x_l_full.clone(),
+                        s.x_u_full.clone(),
+                    ),
                     _ => (
                         (0..info.n as usize).collect(),
                         (0..info.m as usize).collect(),
+                        Vec::new(),
+                        Vec::new(),
                     ),
                 };
                 let lifted = crate::live_lift::lift(
@@ -1854,6 +1860,8 @@ impl TNLP for LinearEqElimTnlp {
                     crate::live_lift::LiftMaps {
                         cols: &cols,
                         rows: &rows,
+                        declared_x_l: &decl_l,
+                        declared_x_u: &decl_u,
                     },
                 );
                 self.finalized = saved;

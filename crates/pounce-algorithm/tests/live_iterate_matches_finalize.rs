@@ -31,6 +31,11 @@ use std::rc::Rc;
 
 const D: [Number; 4] = [2.0, 0.5, 4.0, 3.0];
 
+thread_local! {
+    /// `bound_relax_factor` for the next solve, when positive.
+    static RELAX: std::cell::Cell<Number> = const { std::cell::Cell::new(0.0) };
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Point {
     x: Vec<Number>,
@@ -322,6 +327,11 @@ fn solve_with(algorithm: &str, scaling: Scaling, obj_factor: Option<Number>) -> 
     o.set_integer_value("print_level", 0, true, false).unwrap();
     o.set_string_value("algorithm", algorithm, true, false)
         .unwrap();
+    let relax = RELAX.with(|r| r.replace(0.0));
+    if relax > 0.0 {
+        o.set_numeric_value("bound_relax_factor", relax, true, false)
+            .unwrap();
+    }
     if let Some(f) = obj_factor {
         o.set_numeric_value("obj_scaling_factor", f, true, false)
             .unwrap();
@@ -750,4 +760,39 @@ fn ipm_live_iterate_equals_finalize_under_presolve_and_user_x_scaling() {
 #[test]
 fn sqp_live_iterate_equals_finalize_under_presolve_and_user_x_scaling() {
     check("active-set-sqp", Scaling::PresolveUserX);
+}
+
+/// Under presolve, `compl_x_*` is the algorithm's slack times the
+/// multiplier, measured to the bound it iterates against: for the kept
+/// `x1`, its declared upper bound `1` widened by `bound_relax_factor`
+/// (`1e-3`, capped at `constr_viol_tol = 1e-4`: `1 + 1e-4`). Measured to the
+/// declared bound it read `(1 − x1)·z_U` instead, `1e-4·z_U` off — and of
+/// the wrong sign once `x1` sits past `1`.
+fn check_presolve_compl_to_the_relaxed_bound(algorithm: &str) {
+    RELAX.with(|r| r.set(1e-3));
+    let m = solve_with(algorithm, Scaling::Presolve, None);
+    let mut seen = false;
+    for (k, ((u, _), it)) in m.violations.iter().zip(&m.unscaled).enumerate() {
+        let want = (1.0 + 1e-4 - it.x[1]) * it.z_u[1];
+        assert!(
+            (u.compl_x_u[1] - want).abs() <= 1e-9 * (1.0 + want.abs()),
+            "{algorithm} fire {k}: compl_x_U[1] {} vs (1 + 1e-4 − x1)·z_U = {want}",
+            u.compl_x_u[1]
+        );
+        seen |= it.z_u[1] > 1e-3 && it.x[1] > 1.0;
+    }
+    assert!(
+        seen,
+        "{algorithm}: x1 never past its declared bound with z_U > 0"
+    );
+}
+
+#[test]
+fn ipm_presolve_compl_is_measured_to_the_relaxed_bound() {
+    check_presolve_compl_to_the_relaxed_bound("interior-point");
+}
+
+#[test]
+fn sqp_presolve_compl_is_measured_to_the_relaxed_bound() {
+    check_presolve_compl_to_the_relaxed_bound("active-set-sqp");
 }

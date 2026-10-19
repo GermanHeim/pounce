@@ -101,6 +101,7 @@ pub fn ipm_user_iterate(
     }
     let g = nlp.pack_g_for_user(&*c, &*d);
     let scaling = Some(iterate_scaling(&*nlp));
+    let (x_l_alg, x_u_alg) = algorithm_x_bounds(&*nlp, &x);
     Some(UserIterate {
         x,
         z_l,
@@ -108,7 +109,46 @@ pub fn ipm_user_iterate(
         g,
         lambda,
         scaling,
+        x_l_alg,
+        x_u_alg,
     })
+}
+
+/// The variable bounds `nlp` iterates against — its live `x_L` / `x_U`,
+/// i.e. the declared box after `bound_relax_factor` widened it and any
+/// safe-slack adjustment moved it (upstream `IpoptNLP::x_L()`, what
+/// `curr_slack_x_L` is measured to) — in the shape of the TNLP it wraps
+/// ([`UserIterate::x_l_alg`]): `±∞` at a column with no such bound, and at a
+/// fixed variable the algorithm does not hold, its value `x[j]`.
+pub fn algorithm_x_bounds(nlp: &dyn IpoptNlp, x: &[Number]) -> (Vec<Number>, Vec<Number>) {
+    use pounce_linalg::dense_vector::DenseVectorSpace;
+    let n = nlp.n_full_x() as usize;
+    let side = |live: &dyn pounce_linalg::Vector,
+                upper: bool,
+                packed: &dyn Fn(&dyn pounce_linalg::Vector) -> Vec<Number>| {
+        let mut ones = DenseVectorSpace::new(live.dim()).make_new_dense();
+        if live.dim() > 0 {
+            ones.set_values(&vec![1.0; live.dim() as usize]);
+        }
+        let (vals, mask) = (packed(live), packed(&ones));
+        (0..n)
+            .map(|j| {
+                if nlp.full_x_to_var_x(j as Index).is_none() {
+                    x.get(j).copied().unwrap_or(Number::NAN)
+                } else if mask.get(j).copied().unwrap_or(0.0) != 0.0 {
+                    vals[j]
+                } else if upper {
+                    Number::INFINITY
+                } else {
+                    Number::NEG_INFINITY
+                }
+            })
+            .collect::<Vec<Number>>()
+    };
+    (
+        side(nlp.x_l(), false, &|v| nlp.pack_z_l_for_user(v)),
+        side(nlp.x_u(), true, &|v| nlp.pack_z_u_for_user(v)),
+    )
 }
 
 /// The [`IterateScaling`](pounce_nlp::live_iterate::IterateScaling) of the

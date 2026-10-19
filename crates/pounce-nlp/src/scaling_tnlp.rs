@@ -727,6 +727,10 @@ impl TNLP for ScalingTnlp {
             .filter(|it| it.x.len() == self.d.len())
             .map(|mut it| {
                 unscale_iterate(Some(&self.d), &mut it.x, &mut it.z_l, &mut it.z_u);
+                // The algorithm's bounds are `x̃`-bounds too.
+                for b in [&mut it.x_l_alg, &mut it.x_u_alg] {
+                    unscale_iterate(Some(&self.d), b, &mut [], &mut []);
+                }
                 if let Some(s) = it.scaling.as_mut()
                     && s.x.len() == self.d.len()
                     && s.x_in_alg.len() == self.d.len()
