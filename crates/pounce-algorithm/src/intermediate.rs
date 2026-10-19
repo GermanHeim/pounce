@@ -17,7 +17,6 @@
 use crate::ipopt_cq::IpoptCqHandle;
 use crate::ipopt_data::IpoptDataHandle;
 use crate::ipopt_nlp::IpoptNlp;
-use pounce_common::types::Number;
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -30,51 +29,88 @@ pub struct IntermediateContext {
     pub nlp: Rc<RefCell<dyn IpoptNlp>>,
 }
 
-/// Iterate of the user's problem, already in the user's index spaces
-/// (full `n`, full `m`, original `g` order).
+/// The materialised iterate of the user's problem (full `n`, full `m`,
+/// original `g` order), and its window. Defined in
+/// [`pounce_nlp::live_iterate`] so the decorators that lift it one layer
+/// per `intermediate_callback` forward — presolve's above all — can reach
+/// it; re-exported here, where callers have always found it.
 ///
-/// The active-set SQP arm has no `IpoptData` / `IpoptCq` to stash handles
-/// to, so it hands the callback window a materialised copy instead. The
-/// interior-point arm never installs one.
-#[derive(Clone, Debug)]
-pub struct UserIterate {
-    pub x: Vec<Number>,
-    pub z_l: Vec<Number>,
-    pub z_u: Vec<Number>,
-    pub g: Vec<Number>,
-    pub lambda: Vec<Number>,
-}
+/// The active-set SQP arm installs one at every fire. The interior-point
+/// arm installs one when the TNLP asks for it
+/// ([`pounce_nlp::tnlp::TNLP::wants_current_iterate`]), built by
+/// [`ipm_user_iterate`].
+pub use pounce_nlp::live_iterate::{UserIterate, UserIterateGuard, with_current_user_iterate};
 
 thread_local! {
     static CURRENT_CTX: RefCell<Option<IntermediateContext>> = const { RefCell::new(None) };
-    static CURRENT_USER_ITERATE: RefCell<Option<UserIterate>> = const { RefCell::new(None) };
 }
 
-/// RAII guard for a [`UserIterate`] — the SQP counterpart of [`CtxGuard`].
-pub struct UserIterateGuard {
-    _private: (),
-}
-
-impl UserIterateGuard {
-    pub fn install(it: UserIterate) -> Self {
-        CURRENT_USER_ITERATE.with(|c| *c.borrow_mut() = Some(it));
-        Self { _private: () }
+/// The interior-point iterate in the space of the TNLP the NLP wraps, by
+/// the conversions `finalize_via_orig_nlp` applies to the final one, so the
+/// iterate read at the last fire is the solution `finalize_solution`
+/// reports:
+///
+/// * `x` through `finalize_solution_x` (fixed variables spliced back in);
+/// * `z_L`, `z_U`, `λ` through the `finalize_solution_*` lifts, which
+///   divide out `obj_scale_factor` (the unscaled-Lagrangian convention);
+/// * the bound multipliers of variables `make_parameter` removed recovered
+///   from `z_L − z_U = ∇f + Jᵀλ` when `fixed_var_duals` — upstream
+///   `TNLP::get_curr_iterate` does the same through
+///   `TNLPAdapter::ResortBoundMultipliers` for every treatment but
+///   `make_parameter_nodual`. Left at `0` they were not a zero multiplier
+///   but a missing one;
+/// * per-variable `user-scaling` (`x̃ = d ⊙ x` in a `ScalingTnlp` below the
+///   NLP) undone, `x = x̃ ⊘ d`, `z = d ⊙ z̃`;
+/// * `g` from the iterate's own `c` / `d` values, unscaled.
+///
+/// The fixed-variable recovery evaluates the TNLP, so this must run before
+/// the callback borrows it, never from inside the callback.
+pub fn ipm_user_iterate(
+    nlp: &Rc<RefCell<dyn IpoptNlp>>,
+    data: &IpoptDataHandle,
+    cq: &IpoptCqHandle,
+    fixed_var_duals: bool,
+) -> Option<UserIterate> {
+    let curr = data.borrow().curr.clone()?;
+    // `curr_c` / `curr_d` evaluate through the NLP when not cached; no NLP
+    // borrow may be alive across them.
+    let (c, d) = {
+        let cq = cq.borrow();
+        (cq.curr_c(), cq.curr_d())
+    };
+    let nlp = nlp.borrow();
+    let n = nlp.n_full_x() as usize;
+    let m = nlp.n_full_g() as usize;
+    let mut x = nlp.finalize_solution_x(&*curr.x);
+    let mut z_l = nlp.finalize_solution_z_l(&*curr.z_l);
+    if z_l.is_empty() {
+        z_l = vec![0.0; n];
     }
-}
-
-impl Drop for UserIterateGuard {
-    fn drop(&mut self) {
-        CURRENT_USER_ITERATE.with(|c| *c.borrow_mut() = None);
+    let mut z_u = nlp.finalize_solution_z_u(&*curr.z_u);
+    if z_u.is_empty() {
+        z_u = vec![0.0; n];
     }
-}
-
-/// Read access to the SQP arm's current iterate; `None` outside its
-/// callback window.
-pub fn with_current_user_iterate<F, R>(f: F) -> Option<R>
-where
-    F: FnOnce(&UserIterate) -> R,
-{
-    CURRENT_USER_ITERATE.with(|c| c.borrow().as_ref().map(f))
+    let mut lambda = nlp.finalize_solution_lambda(&*curr.y_c, &*curr.y_d);
+    if lambda.is_empty() {
+        lambda = vec![0.0; m];
+    }
+    if fixed_var_duals {
+        nlp.complete_fixed_var_bound_multipliers(&x, &lambda, &mut z_l, &mut z_u);
+    }
+    pounce_nlp::scaling_tnlp::unscale_iterate(
+        nlp.variable_scaling().as_deref(),
+        &mut x,
+        &mut z_l,
+        &mut z_u,
+    );
+    let g = nlp.pack_g_for_user(&*c, &*d);
+    Some(UserIterate {
+        x,
+        z_l,
+        z_u,
+        g,
+        lambda,
+    })
 }
 
 /// RAII guard — installs `ctx` on construction, clears on drop. Used
@@ -108,6 +144,5 @@ where
 
 /// Whether a context is currently installed.
 pub fn is_active() -> bool {
-    CURRENT_CTX.with(|c| c.borrow().is_some())
-        || CURRENT_USER_ITERATE.with(|c| c.borrow().is_some())
+    CURRENT_CTX.with(|c| c.borrow().is_some()) || pounce_nlp::live_iterate::is_installed()
 }

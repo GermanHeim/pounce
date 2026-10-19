@@ -344,6 +344,10 @@ impl TNLP for WarmInjector {
         self.inner.borrow().wants_intermediate_callback()
     }
 
+    fn wants_current_iterate(&self) -> bool {
+        self.inner.borrow().wants_current_iterate()
+    }
+
     fn intermediate_callback(
         &mut self,
         stats: IterStats,

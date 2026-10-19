@@ -215,6 +215,21 @@ changes.
   on its bounds. A singleton row coincident with a declared bound keeps its
   multiplier on the bound (row dual 0) — a degenerate pair, now pinned.
   `presolve` is off by default; `presolve=no` output is unchanged.
+- **The interior-point live iterate carries fixed variables' bound
+  multipliers, as the final solution does.** `GetIpoptCurrentIterate` on the
+  interior-point arm read `z_L` / `z_U` straight off the algorithm, which
+  holds none for a variable `make_parameter` removed, so they read `0` where
+  `IpoptSolve` reports the recovered `z_L − z_U = ∇f + Jᵀλ` — upstream's
+  `get_curr_iterate` recovers them too (`TNLPAdapter::ResortBoundMultipliers`).
+  The arm now materialises the user-space iterate before each fire, by
+  `finalize_via_orig_nlp`'s conversions, and installs it where the SQP arm
+  already installed its own (`with_current_user_iterate`, now defined in
+  `pounce_nlp::live_iterate`). It does so only for a TNLP that asks
+  (`TNLP::wants_current_iterate`, default `false`; the C interface answers
+  `true` when a callback is registered), since the recovery evaluates `∇f`
+  and `J` each fire. Before: fixed `x3`'s `z_U` read `0` against a final
+  `4.0` (`4.0e3` under gradient-based scaling with `obj_scaling_factor=3`);
+  after: equal to 1e-9 relative, both arms. Reporting only, no step moved.
 - **The intermediate callback fires under per-variable `user-scaling`, and
   the iterate it reads is unscaled.** Non-unit `x` factors install a
   `ScalingTnlp` (`x̃ = d ⊙ x`, gh#486), which did not forward

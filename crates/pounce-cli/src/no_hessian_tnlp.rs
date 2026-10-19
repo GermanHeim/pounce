@@ -134,6 +134,10 @@ impl TNLP for NoHessianTnlp {
         self.inner.borrow().wants_intermediate_callback()
     }
 
+    fn wants_current_iterate(&self) -> bool {
+        self.inner.borrow().wants_current_iterate()
+    }
+
     fn intermediate_callback(&mut self, s: IterStats, d: &IpoptData, cq: &IpoptCq) -> bool {
         self.inner.borrow_mut().intermediate_callback(s, d, cq)
     }

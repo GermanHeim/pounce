@@ -864,6 +864,15 @@ pub unsafe extern "C" fn SetIntermediateCallback(
 /// `x_scaling`) scaling all undone, on both the interior-point and the
 /// active-set SQP arm. Honoring `scaled` is a follow-up.
 ///
+/// Both arms answer from the iterate the algorithm materialises before
+/// each fire ([`pounce_algorithm::intermediate::UserIterate`]), built by
+/// the conversions `finalize_solution` applies — so at the last fire this
+/// reads what `IpoptSolve` writes back. That includes the bound
+/// multipliers of fixed variables, recovered from `∇f + Jᵀλ` as upstream's
+/// `TNLPAdapter::ResortBoundMultipliers` does (not under
+/// `fixed_variable_treatment=make_parameter_nodual`), and, with presolve on,
+/// the rows and columns it removed.
+///
 /// Returns `FALSE` when called outside an active intermediate
 /// callback (no live iterate to inspect).
 ///
@@ -2248,6 +2257,13 @@ impl TNLP for CCallbackTnlp {
     /// Only a registered `SetIntermediateCallback` reads the payload, and
     /// the `GetIpoptCurrent*` inspectors are valid only inside it (gh#965).
     fn wants_intermediate_callback(&self) -> bool {
+        self.intermediate_cb.is_some()
+    }
+
+    /// A registered callback may call `GetIpoptCurrentIterate` /
+    /// `GetIpoptCurrentViolations`, and nothing says whether it will, so
+    /// the iterate is materialised for every fire it receives.
+    fn wants_current_iterate(&self) -> bool {
         self.intermediate_cb.is_some()
     }
 

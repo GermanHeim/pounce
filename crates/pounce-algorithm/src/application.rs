@@ -6199,6 +6199,7 @@ impl IpoptApplication {
             .with_nlp(Rc::clone(&nlp_handle))
             .with_tnlp(Rc::clone(&tnlp));
         alg.last_iter_stats_sink = Some(Rc::clone(&self.last_iter_stats));
+        alg.live_iterate_fixed_var_duals = self.reports_fixed_var_duals();
         // Mint a fresh restoration factory per inner solve if a
         // provider is configured (pounce#10 Phase 3). Falls back to
         // the legacy one-shot `restoration_factory` slot when no
