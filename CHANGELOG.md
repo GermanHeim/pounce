@@ -213,6 +213,13 @@ changes.
   re-derives supplied bound multipliers, so they survive verbatim only under
   `warm_start_recentering=none`. A full solve ends at the same multipliers
   either way.
+- **`pounce verify` and `--minima` read maximize models in the right frame.**
+  `verify` compared the `.sol` bound blocks (`sigma*z_L` / `-sigma*z_U`,
+  gh#959) against the negated objective's gradient, so pounce's own optimal
+  maximize `.sol` read as dual infeasibility `2(z_L - z_U)` and failed
+  `--require-optimal`. `--minima` wrote the best minimum's JSON `lambda`
+  without the sense factor its `.sol` and a plain solve apply, and reported
+  `problem.minimize: true`.
 - **GAMS C link: the active-set-SQP warm start reads maximize marginals with
   the right sign.** The working-set reconstruction classified persisted
   marginals without `obj_sign`, so every active side of a maximize model came

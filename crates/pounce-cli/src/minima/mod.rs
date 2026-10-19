@@ -245,6 +245,7 @@ fn write_json_report(
     builder.problem.n_objectives = 1;
     builder.problem.nnz_jac_g = Some(info.nnz_jac_g);
     builder.problem.nnz_h_lag = Some(info.nnz_h_lag);
+    builder.problem.minimize = obj_sign > 0.0;
     if let Some(best) = minima.first() {
         builder.solution.status = ApplicationReturnStatus::SolveSucceeded;
         builder.solution.solve_result_num =
@@ -255,9 +256,12 @@ fn write_json_report(
         builder.solution.objective = obj_sign * best.objective;
         builder.solution.x = best.x.clone();
         // Real base-problem duals for the best minimum (issue #196, related);
-        // `recover_duals` guarantees length `m`, guard defensively.
+        // `recover_duals` guarantees length `m`, guard defensively. Scaled
+        // by the sense like a plain solve's report (gh#959) and like this
+        // run's own `.sol` (`write_sol_files`), or a maximize model's JSON
+        // `lambda` disagrees with both.
         builder.solution.lambda = if best.lambda.len() == m {
-            best.lambda.clone()
+            best.lambda.iter().map(|&v| obj_sign * v).collect()
         } else {
             vec![0.0; m]
         };

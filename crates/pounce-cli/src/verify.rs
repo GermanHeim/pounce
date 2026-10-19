@@ -423,6 +423,10 @@ fn evaluate(args: &VerifyArgs) -> Result<VerifyOutcome, String> {
     let var_names = prob.var_names.clone();
     let prob_discrete = prob.n_discrete;
     let prob_nl_counts = prob.nl_counts;
+    // `NlTnlp` evaluates a maximize objective negated, while the `.sol`
+    // bound blocks are `sigma*z_L` / `-sigma*z_U` (gh#959); the exact
+    // dual-infeasibility check has to bring them into the same frame.
+    let obj_sigma: Number = if prob.minimize { 1.0 } else { -1.0 };
     let mut tnlp = nl_reader::NlTnlp::new(prob);
 
     let info = tnlp
@@ -623,7 +627,7 @@ fn evaluate(args: &VerifyArgs) -> Result<VerifyOutcome, String> {
         // gates on it whenever it exists.
         if bound_multipliers_present {
             stationarity_with_bound_multipliers =
-                Some(exact_dual_infeasibility(s, &z_l_suf, &z_u_suf));
+                Some(exact_dual_infeasibility(s, &z_l_suf, &z_u_suf, obj_sigma));
         }
         let gate = stationarity_with_bound_multipliers.unwrap_or(best_resid);
         optimal = Some(gate <= args.opt_tol);
@@ -754,10 +758,16 @@ fn bound_projected_residual(
 ///
 /// Unlike [`bound_projected_residual`] this sees a bound multiplier that is
 /// missing or wrong, because nothing is projected away.
-fn exact_dual_infeasibility(s: &[Number], z_l_suf: &[Number], z_u_suf: &[Number]) -> Number {
+fn exact_dual_infeasibility(
+    s: &[Number],
+    z_l_suf: &[Number],
+    z_u_suf: &[Number],
+    obj_sigma: Number,
+) -> Number {
     let mut dual_inf = 0.0_f64;
     for (j, &s_j) in s.iter().enumerate() {
-        let z = z_l_suf.get(j).copied().unwrap_or(0.0) + z_u_suf.get(j).copied().unwrap_or(0.0);
+        let z = obj_sigma
+            * (z_l_suf.get(j).copied().unwrap_or(0.0) + z_u_suf.get(j).copied().unwrap_or(0.0));
         dual_inf = dual_inf.max((s_j - z).abs());
     }
     dual_inf
@@ -1714,16 +1724,16 @@ mod tests {
         let x = [1.0];
         let x_l = [NLP_LOWER_BOUND_INF];
         let x_u = [1.0];
-        assert_eq!(exact_dual_infeasibility(&s, &[0.0], &[-4.0]), 0.0);
+        assert_eq!(exact_dual_infeasibility(&s, &[0.0], &[-4.0], 1.0), 0.0);
 
         // Projection: x sits on its upper bound, so a valid z_U absorbs the
         // whole negative gradient and the residual reads zero — with *no*
         // multiplier supplied at all.
         assert_eq!(bound_projected_residual(&s, &x, &x_l, &x_u, 1e-6), 0.0);
         // The exact check does not get to assume one exists.
-        assert_eq!(exact_dual_infeasibility(&s, &[0.0], &[0.0]), 4.0);
+        assert_eq!(exact_dual_infeasibility(&s, &[0.0], &[0.0], 1.0), 4.0);
         // Nor that it has the right sign.
-        assert_eq!(exact_dual_infeasibility(&s, &[0.0], &[4.0]), 8.0);
+        assert_eq!(exact_dual_infeasibility(&s, &[0.0], &[4.0], 1.0), 8.0);
     }
 
     /// An interior-point answer stops `μ/z` short of an active bound, not on
