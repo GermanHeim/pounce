@@ -1861,3 +1861,93 @@ fn the_cap_legs_compose_at_the_fixed_and_scaled_corner() {
         );
     }
 }
+
+// ---------------------------------------------------------------
+// `bound_multiplier_rows` in every leg
+// ---------------------------------------------------------------
+
+/// The `z` slopes of the logical variables `[k, w]` from the plain
+/// full step, as `(z_L, z_U)` pairs, read through `bound_multiplier_rows`
+/// with the full-x offset `off` of `k`. `p` carries no bound, so its pair
+/// must be `(None, None)`, as must a leading fixed variable's.
+fn z_slopes(s: &Solver, off: usize, d_hi: Number, d_lo: Number) -> Vec<Number> {
+    let n = s.n_full_x().expect("n_full_x") as usize;
+    let idx: Vec<Index> = (0..n as Index).collect();
+    let rows = s.bound_multiplier_rows(&idx).expect("bound rows");
+    assert_eq!(rows[off + 2], (None, None), "p is free: no z rows");
+    if off == 1 {
+        assert_eq!(rows[0], (None, None), "a fixed variable has no z rows");
+    }
+    let at = |d: Number| s.parametric_step_full(&[0], &[d]).expect("full step");
+    let (hi, lo) = (at(d_hi), at(d_lo));
+    let mut out = Vec::new();
+    for v in [off, off + 1] {
+        let (l, u) = rows[v];
+        for r in [l.expect("bounded below"), u.expect("bounded above")] {
+            let r = r as usize;
+            out.push((hi[r] - lo[r]) / (d_hi - d_lo));
+        }
+    }
+    out
+}
+
+/// `[z_L(k), z_U(k), z_L(w), z_U(w)]`. The plain step is the two-sided
+/// average at a kink (the directional mode exists to repair that), so
+/// `k`'s lower multiplier moves at `-A/2` on both sides -- the mean of the
+/// holding side's `-A` and the leaving side's `0`. Every other multiplier
+/// sits on an inactive bound and does not move. A map that put `k`'s step
+/// on `w`, or on the fixed variable, moves the `-A/2` off its slot.
+fn exact_z_slopes() -> [Number; 4] {
+    [-A / 2.0, 0.0, 0.0, 0.0]
+}
+
+#[test]
+fn leg_scaling_the_bound_multiplier_rows_are_unmoved_by_the_change_of_variables() {
+    let plain = solved(None, false);
+    let scaled = solved(Some(D_PLAIN.to_vec()), false);
+    assert_eq!(
+        plain.bound_multiplier_rows(&[0, 1, 2]).expect("plain rows"),
+        scaled
+            .bound_multiplier_rows(&[0, 1, 2])
+            .expect("scaled rows"),
+        "the z rows moved under the change of variables",
+    );
+    for (what, s) in [("plain", &plain), ("scaled", &scaled)] {
+        assert_close(
+            &format!("{what} z slopes"),
+            &z_slopes(s, 0, 1.0e-3, 1.0e-6),
+            &exact_z_slopes(),
+            1e-5,
+        );
+    }
+}
+
+#[test]
+fn leg_magnitude_the_bound_multiplier_slopes_do_not_depend_on_the_step_size() {
+    let s = solved(None, false);
+    for sign in [1.0, -1.0] {
+        for w in DELTAS.windows(2) {
+            assert_close(
+                &format!("z slopes between {:e} and {:e}", sign * w[0], sign * w[1]),
+                &z_slopes(&s, 0, sign * w[0], sign * w[1]),
+                &exact_z_slopes(),
+                1e-4,
+            );
+        }
+    }
+}
+
+#[test]
+fn leg_fixed_the_bound_multipliers_are_unmoved_by_a_fixed_variable_ahead_of_the_kink() {
+    for (what, s) in [
+        ("fixed", solved(None, true)),
+        ("fixed and scaled", solved(Some(D_FIXED.to_vec()), true)),
+    ] {
+        assert_close(
+            &format!("{what} z slopes"),
+            &z_slopes(&s, 1, 1.0e-3, 1.0e-6),
+            &exact_z_slopes(),
+            1e-5,
+        );
+    }
+}
