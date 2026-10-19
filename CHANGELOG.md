@@ -42,7 +42,7 @@ changes.
   as on the interior-point arm), `GetIpoptCurrentIterate` returns that
   iterate's `x`, `z_L`, `z_U`, `g` and `lambda` in the user's index spaces,
   and returning `false` ends the solve with `User_Requested_Stop`.
-  `GetIpoptCurrentViolations` is not served on this arm and returns `FALSE`.
+  `GetIpoptCurrentViolations` is served on this arm too, `scaled` either way.
   The hook only observes the iterate, so no trajectory moves.
 - **`objective_scaling.total_factor`: the whole objective multiplier of the
   returned run (gh#1001 item 3).** `objective_scaling.factor` is the
@@ -261,7 +261,11 @@ changes.
   problem's own `eval_grad_f` / `eval_jac_g` (`0` at fixed variables, as
   upstream's `ResortX` leaves them), per-row violation and `compl_g` with
   upstream's signs, on both arms. `scaled = TRUE` returns the algorithm's own
-  space (interior-point arm only). Before: `compl_x_L[1]` at the first fire
+  space: each entry a fixed factor of the unscaled one (bound violation `×d`,
+  complementarities `×obj`, `grad_lag_x ×obj/d`, row violation `×s`,
+  `live_iterate::scale_violations`), by the factors the live iterate carries
+  — so it is served on the SQP arm (where it refused) and under presolve
+  (where it refused; a removed column or row carries factor 1). Before: `compl_x_L[1]` at the first fire
   read `10.0` against the original problem's `200` under gradient-based
   scaling (×20) and `5.0` against `1.67` under user scaling (×3). After:
   equal to 1e-9 at every fire, both arms. `compl_x_*` use the slack to the

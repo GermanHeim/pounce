@@ -89,6 +89,8 @@ unsafe fn violations(p: IpoptProblem, scaled: Bool) -> Option<Viol> {
 thread_local! {
     static FIRES: RefCell<Vec<It>> = const { RefCell::new(Vec::new()) };
     static K: Cell<Number> = const { Cell::new(1.0) };
+    /// `bound_relax_factor` for the next solve, when positive.
+    static RELAX: Cell<Number> = const { Cell::new(0.0) };
 }
 
 fn k() -> Number {
@@ -236,6 +238,14 @@ enum Cfg {
 }
 
 /// `(IpoptSolve's output, every fire's iterate)`.
+/// [`solve`] with `bound_relax_factor = 1e-3` (a `1e-4` widening, capped
+/// by `constr_viol_tol`), so the iterate visibly leaves the declared box and
+/// the relaxed and declared bounds are visibly apart.
+fn solve_relaxed(algorithm: &str, cfg: Cfg) -> (It, Vec<It>) {
+    RELAX.with(|r| r.set(1e-3));
+    solve(algorithm, cfg)
+}
+
 fn solve(algorithm: &str, cfg: Cfg) -> (It, Vec<It>) {
     FIRES.with(|f| f.borrow_mut().clear());
     K.with(|k| {
@@ -271,6 +281,11 @@ fn solve(algorithm: &str, cfg: Cfg) -> (It, Vec<It>) {
             assert_ne!(AddIpoptStrOption(p, k.as_ptr(), v.as_ptr()), 0);
         };
         opt("algorithm", algorithm);
+        let relax = RELAX.with(|r| r.replace(0.0));
+        if relax > 0.0 {
+            let k = CString::new("bound_relax_factor").unwrap();
+            assert_ne!(AddIpoptNumOption(p, k.as_ptr(), relax), 0);
+        }
         let kp = CString::new("print_level").unwrap();
         assert_ne!(AddIpoptIntOption(p, kp.as_ptr(), 0), 0);
         match cfg {
@@ -454,7 +469,7 @@ fn close_viol(tag: &str, got: &Viol, want: &Viol) {
 }
 
 fn check_violations(algorithm: &str, cfg: Cfg) {
-    let (out, fires) = solve(algorithm, cfg);
+    let (out, fires) = solve_relaxed(algorithm, cfg);
     assert!(!fires.is_empty(), "{algorithm} {cfg:?}");
     // Every fire: what the inspector reports is the original problem's
     // violation at the iterate `GetIpoptCurrentIterate` reports. The early
@@ -504,53 +519,88 @@ fn sqp_violations_are_the_original_problems_under_user_x_scaling() {
 }
 
 /// `scaled = TRUE` keeps upstream's meaning: the algorithm's own space.
-/// Under user scaling (obj 3, x `d`, g `s`) every entry is a fixed factor
-/// of its unscaled counterpart: `∂L̃/∂x̃ = 3·∂L/∂x / d`, a row's violation
-/// `s·viol`, `compl_g = 3·compl_g` (`c̃ỹ = s c · 3λ/s`). Served on the
-/// interior-point arm only.
-#[test]
-fn scaled_violations_are_the_algorithms_own_space() {
-    let d = [2.0, 0.5, 4.0, 3.0];
-    let s = [0.01, 5.0, 1.0];
-    let (_, fires) = solve("interior-point", Cfg::UserX);
-    let f = &fires[1];
-    let (u, sc) = (
-        f.viol.clone().unwrap(),
-        f.viol_scaled.clone().expect("scaled refused"),
-    );
-    for j in 0..3 {
-        let want = 3.0 * u.grad_lag_x[j] / d[j];
-        assert!(
-            (sc.grad_lag_x[j] - want).abs() <= 1e-8 * (1.0 + want.abs()),
-            "grad_lag_x[{j}]: scaled {} vs 3·{}/{}",
-            sc.grad_lag_x[j],
-            u.grad_lag_x[j],
-            d[j]
+/// Under user scaling (obj 3, x `d`, g `s` on the interior-point arm; the
+/// SQP arm solves with `d` only) every entry is a fixed factor of its
+/// unscaled counterpart: a bound violation `d·viol` (`orig_x_L_violation`),
+/// `compl_x = obj·compl_x` (`s̃z̃ = obj·sz`), `∂L̃/∂x̃ = obj·∂L/∂x / d`, a
+/// row's violation `s·viol`, `compl_g = obj·compl_g` (`c̃ỹ = s c · obj λ/s`),
+/// and at the fixed `x3` (not in the algorithm) factor 1. Checked at every
+/// fire, on both arms; the SQP arm used to refuse.
+fn check_scaled_violations(algorithm: &str) {
+    let d = [2.0, 0.5, 4.0, 1.0];
+    let (obj, s) = if algorithm == "interior-point" {
+        (3.0, [0.01, 5.0, 1.0])
+    } else {
+        (1.0, [1.0; M])
+    };
+    let (_, fires) = solve_relaxed(algorithm, Cfg::UserX);
+    let mut seen = [false; 4];
+    for (k, f) in fires.iter().enumerate() {
+        let (u, sc) = (
+            f.viol.clone().unwrap(),
+            f.viol_scaled
+                .clone()
+                .unwrap_or_else(|| panic!("{algorithm} fire {k}: scaled refused")),
         );
+        let tag = format!("{algorithm} fire {k} scaled");
+        let by = |v: &[Number], f: &dyn Fn(usize) -> Number| -> Vec<Number> {
+            v.iter().enumerate().map(|(j, x)| f(j) * x).collect()
+        };
+        close_abs(&format!("{tag} x_L"), &sc.x_l, &by(&u.x_l, &|j| d[j]), 1e-6);
+        close_abs(&format!("{tag} x_U"), &sc.x_u, &by(&u.x_u, &|j| d[j]), 1e-6);
+        close_abs(
+            &format!("{tag} compl_x_L"),
+            &sc.compl_x_l,
+            &by(&u.compl_x_l, &|_| obj),
+            1e-6,
+        );
+        close_abs(
+            &format!("{tag} compl_x_U"),
+            &sc.compl_x_u,
+            &by(&u.compl_x_u, &|_| obj),
+            1e-6,
+        );
+        close_abs(
+            &format!("{tag} grad_lag_x"),
+            &sc.grad_lag_x,
+            &by(&u.grad_lag_x, &|j| obj / d[j]),
+            1e-6,
+        );
+        close_abs(
+            &format!("{tag} constraint"),
+            &sc.g,
+            &by(&u.g, &|i| s[i]),
+            1e-6,
+        );
+        close_abs(
+            &format!("{tag} compl_g"),
+            &sc.compl_g,
+            &by(&u.compl_g, &|_| obj),
+            1e-6,
+        );
+        assert_eq!(sc.grad_lag_x[3], 0.0, "fixed variable");
+        // Each factor has to show at some fire. The active-set arm's
+        // complementarity is exactly 0 at every fire (its multipliers vanish
+        // off the working set), so it shows `d` and `s` only.
+        seen[0] |= u.x_u[1] > 1e-6;
+        seen[1] |= u.grad_lag_x[..3].iter().any(|g| g.abs() > 1e-3);
+        seen[2] |= algorithm != "interior-point" || u.compl_x_u[1].abs() > 1e-6;
+        seen[3] |= u.g.iter().any(|g| g.abs() > 1e-6);
     }
-    assert_eq!(sc.grad_lag_x[3], 0.0, "fixed variable");
-    for i in 0..M {
-        let want = s[i] * u.g[i];
-        assert!(
-            (sc.g[i] - want).abs() <= 1e-8 * (1e-12 + want.abs()),
-            "constraint violation[{i}]: scaled {} vs {}·{}",
-            sc.g[i],
-            s[i],
-            u.g[i]
-        );
-        let want = 3.0 * u.compl_g[i];
-        assert!(
-            (sc.compl_g[i] - want).abs() <= 1e-8 * (1e-12 + want.abs()),
-            "compl_g[{i}]: scaled {} vs 3·{}",
-            sc.compl_g[i],
-            u.compl_g[i]
-        );
-    }
-    let (_, fires) = solve("active-set-sqp", Cfg::UserX);
     assert!(
-        fires.iter().all(|f| f.viol_scaled.is_none()),
-        "SQP served scaled"
+        seen.iter().all(|&b| b),
+        "{algorithm}: factors never show: {seen:?}"
     );
+}
+
+#[test]
+fn ipm_scaled_violations_are_the_algorithms_own_space() {
+    check_scaled_violations("interior-point");
+}
+
+#[test]
+fn sqp_scaled_violations_are_the_algorithms_own_space() {
+    check_scaled_violations("active-set-sqp");
 }
 
 // ---------------------------------------------------------------------

@@ -18,6 +18,9 @@
 use pounce_algorithm::application::IpoptApplication;
 use pounce_algorithm::intermediate::{with_current, with_current_user_iterate};
 use pounce_common::types::Number;
+use pounce_nlp::live_iterate::{
+    DeclaredBounds, Violations, current_violations, lagrangian_gradient,
+};
 use pounce_nlp::return_codes::ApplicationReturnStatus;
 use pounce_nlp::tnlp::{
     BoundsInfo, IndexStyle, IpoptCq, IpoptData, IterStats, Linearity, NlpInfo, ScalingRequest,
@@ -51,6 +54,8 @@ struct Model {
     scaled: Vec<Point>,
     /// The unscaled live iterate at every fire.
     unscaled: Vec<Point>,
+    /// `current_violations(…, scaled)` at every fire: `(FALSE, TRUE)`.
+    violations: Vec<(Violations, Violations)>,
     /// The interior-point algorithm's own iterate at every fire, scattered
     /// to the TNLP's shape by hand (`NaN` at a column / row it does not
     /// hold), with its objective factor.
@@ -187,6 +192,37 @@ impl TNLP for Model {
         }) {
             self.unscaled.push(u);
             self.scaled.push(sc);
+        }
+        if let Some(v) = with_current_user_iterate(|u| {
+            let b = DeclaredBounds {
+                x_l: &[-1e19, -10.0, 0.0, 1.0],
+                x_u: &[1e19, 1.0, 1e19, 1.0],
+                g_l: &[-1e19, 0.0, -1e19],
+                g_u: &[3.5, 0.0, 10.0],
+                lower_inf: -1e19,
+                upper_inf: 1e19,
+            };
+            // The model's own ∇f and J at the iterate (K = 1 here).
+            let x = &u.x;
+            let gf = [
+                2.0 * (x[0] - 3.0),
+                2.0 * (x[1] - 3.0),
+                2.0 * (x[2] - 1.0),
+                2.0 * (x[3] - 4.0),
+            ];
+            let gl = lagrangian_gradient(
+                u,
+                &gf,
+                &[0, 0, 0, 1, 1, 2, 2],
+                &[0, 1, 3, 0, 2, 1, 3],
+                &[1.0, 1.0, 1.0, 1.0, -1.0, 1.0, 1.0],
+            );
+            (
+                current_violations(u, &b, Some(gl.clone()), true, false),
+                current_violations(u, &b, Some(gl), true, true),
+            )
+        }) {
+            self.violations.push(v);
         }
         if let Some(raw) = with_current(|c| {
             let curr = c.data.borrow().curr.clone()?;
@@ -567,6 +603,72 @@ fn check_presolve_scaled(algorithm: &str) {
     }
     let out = m.out.unwrap();
     assert!(out.z_u[3] > 1e-3 && out.lambda.iter().any(|l| l.abs() > 1e-3));
+}
+
+/// `GetIpoptCurrentViolations(scaled = TRUE)` under presolve (not reachable
+/// from the C interface, which presolve declines; this is the function it
+/// calls): with only `obj_scaling_factor = 3` scaling, the scaled
+/// complementarities and `grad_lag_x` are `3×` the unscaled ones and every other entry is
+/// unchanged — kept and removed entries alike, both arms. Used to refuse.
+fn check_presolve_scaled_violations(algorithm: &str) {
+    let m = solve_with(algorithm, Scaling::Presolve, Some(3.0));
+    assert!(m.violations.len() > 1);
+    let mut seen = false;
+    for (k, (u, sc)) in m.violations.iter().enumerate() {
+        assert_eq!(u.x_l_violation.len(), 4);
+        assert_eq!(u.constraint_violation.len(), 3);
+        for j in 0..4 {
+            assert_rel(
+                &format!("{algorithm} {k} x_L[{j}]"),
+                sc.x_l_violation[j],
+                u.x_l_violation[j],
+            );
+            assert_rel(
+                &format!("{algorithm} {k} compl_x_L[{j}]"),
+                sc.compl_x_l[j],
+                3.0 * u.compl_x_l[j],
+            );
+            assert_rel(
+                &format!("{algorithm} {k} compl_x_U[{j}]"),
+                sc.compl_x_u[j],
+                3.0 * u.compl_x_u[j],
+            );
+        }
+        for j in 0..4 {
+            assert_rel(
+                &format!("{algorithm} {k} grad_lag_x[{j}]"),
+                sc.grad_lag_x[j],
+                3.0 * u.grad_lag_x[j],
+            );
+        }
+        for i in 0..3 {
+            assert_rel(
+                &format!("{algorithm} {k} viol[{i}]"),
+                sc.constraint_violation[i],
+                u.constraint_violation[i],
+            );
+            assert_rel(
+                &format!("{algorithm} {k} compl_g[{i}]"),
+                sc.compl_g[i],
+                3.0 * u.compl_g[i],
+            );
+        }
+        seen |= u.grad_lag_x.iter().any(|g| g.abs() > 1e-3);
+    }
+    assert!(
+        seen,
+        "{algorithm}: no fire with a visible Lagrangian gradient"
+    );
+}
+
+#[test]
+fn ipm_scaled_violations_under_presolve() {
+    check_presolve_scaled_violations("interior-point");
+}
+
+#[test]
+fn sqp_scaled_violations_under_presolve() {
+    check_presolve_scaled_violations("active-set-sqp");
 }
 
 #[test]

@@ -8,8 +8,8 @@
 //! (iteration 0 and the converged iterate included), a live iterate in the
 //! user's index spaces, and `false` ending the solve.
 //!
-//! `GetIpoptCurrentViolations` is served on this arm for `scaled = FALSE` only
-//! (see `live_iterate_matches_solution.rs`).
+//! `GetIpoptCurrentViolations` is served on this arm for both values of
+//! `scaled` (see `live_iterate_matches_solution.rs`).
 
 use pounce_cinterface::*;
 use pounce_nlp::return_codes::ApplicationReturnStatus;

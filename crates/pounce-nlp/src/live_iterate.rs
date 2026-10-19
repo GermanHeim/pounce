@@ -288,6 +288,56 @@ pub fn user_violations(
     v
 }
 
+/// The violations of upstream `get_curr_violations(scaled = true)` from the
+/// unscaled ones at `it`, by the iterate's [`IterateScaling`] (unit when it
+/// carries none) — every entry is a fixed factor of its unscaled
+/// counterpart (`IpTNLP.cpp` 745-1040, `curr_*(…, scaled)`):
+///
+/// * `x_L_violation`, `x_U_violation`: `x_scale ·` (`orig_x_L_violation`,
+///   the declared bound scaled like `x`);
+/// * `compl_x_*`, `compl_g`: `obj ·` (upstream's unscaled ones divide the
+///   algorithm's `s·z`, `c·y` by `obj`; the `d` and row factors cancel);
+/// * `grad_lag_x`: `obj / x_scale ·` (`unapply_grad_obj_scaling`);
+/// * constraint violation: `g_scale ·` (`|c̃|`, and the `d` violation is
+///   formed scaled and unscaled by `unapply_vector_scaling_d`).
+///
+/// One rule for both arms and for presolve, whose removed entries carry
+/// factor 1 (objective factor for the complementarities and `grad_lag_x`).
+pub fn scale_violations(mut v: Violations, it: &UserIterate) -> Violations {
+    let (n, m) = (v.x_l_violation.len(), v.constraint_violation.len());
+    let s = match it.scaling.as_ref().filter(|s| s.fits(n, m)) {
+        Some(s) => s.clone(),
+        None => IterateScaling::unit(1.0, n, m),
+    };
+    for j in 0..n {
+        v.x_l_violation[j] *= s.x[j];
+        v.x_u_violation[j] *= s.x[j];
+        v.compl_x_l[j] *= s.obj;
+        v.compl_x_u[j] *= s.obj;
+        if let Some(g) = v.grad_lag_x.get_mut(j) {
+            *g *= s.obj / s.x[j];
+        }
+    }
+    for i in 0..m {
+        v.constraint_violation[i] *= s.g[i];
+        v.compl_g[i] *= s.obj;
+    }
+    v
+}
+
+/// What `GetIpoptCurrentViolations` reports: [`user_violations`] at `it`,
+/// and with `scaled` [`scale_violations`] of them.
+pub fn current_violations(
+    it: &UserIterate,
+    b: &DeclaredBounds<'_>,
+    grad_lag: Option<Vec<Number>>,
+    zero_fixed: bool,
+    scaled: bool,
+) -> Violations {
+    let v = user_violations(it, b, grad_lag, zero_fixed);
+    if scaled { scale_violations(v, it) } else { v }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

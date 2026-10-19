@@ -1050,10 +1050,14 @@ pub unsafe extern "C" fn GetIpoptCurrentIterate(
 ///   deliberate difference: upstream's `compl_x_*` multiply the algorithm's
 ///   slack, measured to the bound `bound_relax_factor` widened, so the two
 ///   differ by at most `bound_relax_factor·max(1,|x_L|)·z_L`. Both arms.
-/// * `TRUE` — the algorithm's own scaled quantities (interior-point arm
-///   only; `FALSE` on the SQP arm, which has no such space to report, and
-///   when the algorithm solves a presolve-reduced problem, whose rows and
-///   columns are not the user's).
+/// * `TRUE` — upstream's `get_curr_violations(scaled = true)`: the same
+///   quantities in the algorithm's scaled space, each a fixed factor of its
+///   unscaled counterpart ([`pounce_nlp::live_iterate::scale_violations`]):
+///   bound violations `× d`, complementarities `× obj`, `grad_lag_x
+///   × obj/d`, row violations `× s` — the factors `GetIpoptCurrentIterate`
+///   (`scaled = TRUE`) applies. Both arms (the SQP arm's scaled space is
+///   `d` and the `obj_scaling_factor` option: it runs no other scaling),
+///   and under presolve, where a removed column or row carries factor 1.
 ///
 /// # Safety
 ///
@@ -1084,59 +1088,45 @@ pub unsafe extern "C" fn GetIpoptCurrentViolations(
         }
         let n_us = n as usize;
         let m_us = m as usize;
-        let violations = if scaled != FALSE {
-            ip_intermediate::with_current(|ctx| {
-                let fits = {
-                    let nlp = ctx.nlp.borrow();
-                    nlp.n_full_x() == n && nlp.n_full_g() == m
-                };
-                if fits {
-                    ip_intermediate::ipm_scaled_violations(ctx)
-                } else {
-                    None
-                }
-            })
-            .flatten()
-        } else {
-            let Some(it) = ip_intermediate::with_current_user_iterate(|it| it.clone()) else {
-                return FALSE;
-            };
-            let bridge = CURRENT_BRIDGE.with(|c| c.get());
-            if bridge.is_null() {
-                return FALSE;
-            }
-            let bridge = &*bridge;
-            if it.x.len() != n_us
-                || it.z_l.len() != n_us
-                || it.z_u.len() != n_us
-                || it.g.len() != m_us
-                || it.lambda.len() != m_us
-            {
-                return FALSE;
-            }
-            let grad_lag = if grad_lag_x.is_null() || n_us == 0 {
-                None
-            } else {
-                match bridge.user_grad_lag(&it) {
-                    Some(g) => Some(g),
-                    None => return FALSE,
-                }
-            };
-            let bounds = pounce_nlp::live_iterate::DeclaredBounds {
-                x_l: &bridge.x_l,
-                x_u: &bridge.x_u,
-                g_l: &bridge.g_l,
-                g_u: &bridge.g_u,
-                lower_inf: bridge.lower_inf,
-                upper_inf: bridge.upper_inf,
-            };
-            Some(pounce_nlp::live_iterate::user_violations(
-                &it,
-                &bounds,
-                grad_lag,
-                bridge.zero_fixed_grad_lag,
-            ))
+        let Some(it) = ip_intermediate::with_current_user_iterate(|it| it.clone()) else {
+            return FALSE;
         };
+        let bridge = CURRENT_BRIDGE.with(|c| c.get());
+        if bridge.is_null() {
+            return FALSE;
+        }
+        let bridge = &*bridge;
+        if it.x.len() != n_us
+            || it.z_l.len() != n_us
+            || it.z_u.len() != n_us
+            || it.g.len() != m_us
+            || it.lambda.len() != m_us
+        {
+            return FALSE;
+        }
+        let grad_lag = if grad_lag_x.is_null() || n_us == 0 {
+            None
+        } else {
+            match bridge.user_grad_lag(&it) {
+                Some(g) => Some(g),
+                None => return FALSE,
+            }
+        };
+        let bounds = pounce_nlp::live_iterate::DeclaredBounds {
+            x_l: &bridge.x_l,
+            x_u: &bridge.x_u,
+            g_l: &bridge.g_l,
+            g_u: &bridge.g_u,
+            lower_inf: bridge.lower_inf,
+            upper_inf: bridge.upper_inf,
+        };
+        let violations = Some(pounce_nlp::live_iterate::current_violations(
+            &it,
+            &bounds,
+            grad_lag,
+            bridge.zero_fixed_grad_lag,
+            scaled != FALSE,
+        ));
         let Some(v) = violations else {
             return FALSE;
         };
