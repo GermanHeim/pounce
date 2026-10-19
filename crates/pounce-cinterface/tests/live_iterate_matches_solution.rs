@@ -426,7 +426,9 @@ fn relaxed_bounds(cfg: Cfg) -> ([Number; N], [Number; N]) {
 /// solver: the model's own gradient and Jacobian, its declared bounds for
 /// the violations, and for `compl_x_*` the relaxed bounds the algorithm's
 /// slack is measured to ([`relaxed_bounds`]; upstream's
-/// `curr_compl_x_L / obj`).
+/// `curr_compl_x_L / obj` at `d = 1` — under user scaling `relaxed_bounds`
+/// is pounce's scaled-frame rule, which Ipopt's unscaled-frame relaxation
+/// does not share).
 fn recompute(
     cfg: Cfg,
     x: &[Number; N],

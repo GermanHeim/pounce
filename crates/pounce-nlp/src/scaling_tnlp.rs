@@ -716,8 +716,8 @@ impl TNLP for ScalingTnlp {
         ip_cq: &IpoptCq,
     ) -> bool {
         // The live iterate arrives in this layer's `x̃ = d ⊙ x` coordinates —
-        // whatever sits between it and the algorithm (presolve above all)
-        // lifted it in those coordinates — and leaves in the inner TNLP's,
+        // the presolve layers beneath this wrapper (it is outermost; see the
+        // module doc) lifted it in those coordinates — and leaves in the inner TNLP's,
         // by `finalize_solution`'s rule: `x = x̃ ⊘ d`, `z = d ⊙ z̃`. The
         // algorithm's scaled space holds `x̃`, so a column it holds gains
         // the factor `d` in the iterate's scaling. Done here, not where the

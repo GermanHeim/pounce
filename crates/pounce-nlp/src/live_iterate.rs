@@ -244,7 +244,13 @@ pub fn lagrangian_gradient(
 ///   the algorithm's slack — measured to the bound it iterates against, the
 ///   declared one widened by `bound_relax_factor` ([`UserIterate::x_l_alg`])
 ///   — times its multiplier. The declared bound when the iterate carries no
-///   algorithm bound for the column;
+///   algorithm bound for the column. **Not upstream's number under per-variable
+///   user scaling:** Ipopt relaxes the *unscaled* bound before scaling it
+///   (`IpOrigIpoptNLP.cpp`, relax then scale), so its widening is
+///   `min(brf·max(1,|b|), cvt)`; pounce relaxes in `ScalingTnlp`'s `x̃ = d ⊙ x`
+///   frame, `min(brf·max(1,|d·b|), cvt)/d`. They agree at `d = 1`. This
+///   reports pounce's own slack, which is the consistent choice; the
+///   relaxation frame itself predates the live iterate;
 /// * `grad_lag_x = ∇f + Jᵀλ − z_L + z_U` (`grad_lag`; the caller evaluates
 ///   it), zeroed at fixed variables when `zero_fixed` — upstream's
 ///   `ResortX(…, usefixedvals=false)` under `make_parameter`;
