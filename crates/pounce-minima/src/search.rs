@@ -307,14 +307,23 @@ impl<'a> Driver<'a> {
             x.to_vec(),
         )));
         let out = self.solver.solve(t, HessianMode::Exact);
+        // A recovery that failed leaves the bound multipliers *empty*, not
+        // zero: the `.sol` writer skips an empty pair, while a zero pair is a
+        // claim that no bound is active, and `pounce verify` then holds the
+        // point to the exact (not the projected) stationarity test, which a
+        // correct minimum on a bound fails.
         if !out.converged || out.lambda.len() != self.m {
-            return zeros();
+            return Duals {
+                z_l: Vec::new(),
+                z_u: Vec::new(),
+                ..zeros()
+            };
         }
         let ok_z = out.z_l.len() == n && out.z_u.len() == n;
         Duals {
             lambda: out.lambda,
-            z_l: if ok_z { out.z_l } else { vec![0.0; n] },
-            z_u: if ok_z { out.z_u } else { vec![0.0; n] },
+            z_l: if ok_z { out.z_l } else { Vec::new() },
+            z_u: if ok_z { out.z_u } else { Vec::new() },
         }
     }
 
@@ -890,8 +899,9 @@ pub struct Minimum {
     /// in the frame of the problem the engine solved (for a `maximize` `.nl`,
     /// `min -f`), so a writer applies the `.sol` signs
     /// `ipopt_zL_out = σ·z_l`, `ipopt_zU_out = −σ·z_u` exactly as a plain
-    /// solve does. Zeros if unavailable, or at an interior minimum of a
-    /// problem without constraints (see `recover_duals`).
+    /// solve does. Zeros at an interior minimum of a problem without
+    /// constraints (see `recover_duals`); empty if the recovery re-solve
+    /// failed, so nothing is written rather than a false "no bound active".
     pub z_l: Vec<Number>,
     pub z_u: Vec<Number>,
 }

@@ -557,6 +557,11 @@ fn real_main() -> ExitCode {
     // `(0, 1.5, 1)` and `solver_selection=nlp` wrote `(-0, -1.5, -1)`.
     // Builtins are always minimize, so this stays `1.0` for them.
     let mut nl_dual_sign: f64 = 1.0;
+    // Does the `.nl` carry anything a warm start would read — a nonzero `x`
+    // or `d` entry, or a nonzero `ipopt_zL_in` / `ipopt_zU_in` value? Gates the
+    // convex-arm decline below: an all-zero or absent start is what the
+    // convex engines' cold start already uses.
+    let mut nl_supplies_start = false;
     // The model's own AMPL option words, echoed back in the `.sol`
     // `Options` block the way an ASL solver does. Empty for problems
     // that did not come from a `.nl` header.
@@ -598,6 +603,19 @@ fn real_main() -> ExitCode {
                     nl_suffixes = Some(prob.suffixes.clone());
                     nl_dims = Some((prob.n, prob.m));
                     nl_dual_sign = if prob.minimize { 1.0 } else { -1.0 };
+                    nl_supplies_start = prob.x0.iter().any(|v| *v != 0.0)
+                        || prob.lambda0.iter().any(|v| *v != 0.0)
+                        || ["ipopt_zL_in", "ipopt_zU_in"].iter().any(|k| {
+                            prob.suffixes
+                                .var_real
+                                .get(*k)
+                                .is_some_and(|v| v.iter().any(|x| *x != 0.0))
+                                || prob
+                                    .suffixes
+                                    .var_int
+                                    .get(*k)
+                                    .is_some_and(|v| v.iter().any(|x| *x != 0))
+                        });
                     nl_ampl_options = prob.ampl_options.clone();
                     // gh#987: pounce is a continuous solver. A `.nl` that
                     // declares binary / integer variables is solved as its
@@ -959,11 +977,20 @@ fn real_main() -> ExitCode {
         // driver, and the conic and active-set engines take no dual seed at
         // all. So under `auto` the general path, which honors every part of
         // the request, takes the model.
-        let wants_warm_start = app
-            .options()
-            .get_string_value("warm_start_init_point", "")
-            .map(|(v, _)| v == "yes")
-            .unwrap_or(false);
+        //
+        // Only when the `.nl` supplies something to start from, though — the
+        // same test the curvature-scaling gate above applies, for the same
+        // reason. Pyomo users often set `warm_start_init_point=yes` globally;
+        // on a model with no `x`/`d` entries and no `_in` suffixes the reroute
+        // buys a different engine and nothing else. Measured on `lp_israel`
+        // before this test: 29 iterations on the convex arm, 210 on the NLP
+        // one.
+        let wants_warm_start = nl_supplies_start
+            && app
+                .options()
+                .get_string_value("warm_start_init_point", "")
+                .map(|(v, _)| v == "yes")
+                .unwrap_or(false);
         let decline_convex_for_warm_start =
             wants_warm_start && matches!(selection, SolverSelection::Auto);
         // Any of these declines the fast path; the messages below say which.

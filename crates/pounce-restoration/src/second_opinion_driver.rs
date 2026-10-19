@@ -528,6 +528,14 @@ impl TNLP for SecondOpinionTnlp {
         self.inner.borrow().wants_intermediate_callback()
     }
 
+    // A decorator that forwards `intermediate_callback` must forward this too
+    // (the trait's own rule): without it a retry solve never materialises the
+    // user-space iterate, and `GetIpoptCurrentViolations(scaled=FALSE)` read
+    // FALSE inside every retry `IpoptSolve` runs by default.
+    fn wants_current_iterate(&self) -> bool {
+        self.inner.borrow().wants_current_iterate()
+    }
+
     fn intermediate_callback(
         &mut self,
         stats: IterStats,
