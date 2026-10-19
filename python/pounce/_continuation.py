@@ -141,6 +141,21 @@ class StepController:
 # ---------------------------------------------------------------------------
 
 
+def _gather(vec, rows, length) -> np.ndarray:
+    """Scatter ``vec[rows[i]]`` into slot ``i`` of a zero ``length`` array.
+
+    ``rows`` comes from one of the solver's row maps (``primal_rows``,
+    ``multiplier_rows`` ...); a ``None`` row -- a fixed variable, a
+    missing bound -- leaves a zero step, and an out-of-range row raises
+    rather than reading a neighbour.
+    """
+    out = np.zeros(length)
+    for i, row in enumerate(rows):
+        if row is not None:
+            out[i] = vec[int(row)]
+    return out
+
+
 def _apply_transfer(ws: WarmStart, problem, mapper) -> WarmStart:
     """Map `ws` onto `problem` through `mapper`.
 
@@ -397,34 +412,33 @@ class Continuation:
                 "rows must correspond one-to-one with theta"
             )
         n = int(problem.n)
+        m = int(problem.m)
+        # Every block of the factor is in its own index space, none of
+        # them the user's: the x block is var-x (a `make_parameter`
+        # fixed variable has no row), z_l / z_u hold one entry per
+        # *bounded* variable, and y_c / y_d split g by kind. So each
+        # entry is read through its row map, never by offset; a fixed
+        # variable or a missing bound reads as a zero step.
         try:
+            x_rows = solver.primal_rows(list(range(n)))
             if not self._predict_duals:
-                dx = np.asarray(solver.parametric_step(self._pins, deltas), float)
-                return dx[:n], None, None, None
+                var = np.asarray(solver.parametric_step(self._pins, deltas), float)
+                return _gather(var, x_rows, n), None, None, None
             full = np.asarray(
                 solver.parametric_step_full(self._pins, deltas), float
             )
+            g_rows = list(range(m))
+            eq_rows = solver.multiplier_rows(g_rows)
+            ineq_rows = solver.inequality_multiplier_rows(g_rows)
+            z_rows = solver.bound_multiplier_rows(list(range(n)))
+            dx = _gather(full, x_rows, n)
+            lam_rows = [e if e is not None else d
+                        for e, d in zip(eq_rows, ineq_rows)]
+            dlam = _gather(full, lam_rows, m)
+            dzl = _gather(full, [lo for lo, _ in z_rows], n)
+            dzu = _gather(full, [hi for _, hi in z_rows], n)
         except Exception:
             return none4
-
-        dims = list(solver.block_dims)
-        dx = full[:n]
-        m = int(problem.m)
-        dlam = np.zeros(m)
-        for i, row in enumerate(solver.multiplier_rows(list(range(m)))):
-            if row is not None and 0 <= row < full.size:
-                dlam[i] = full[row]
-        # z_l / z_u sit after (x, s, y_c, y_d) in the compound vector.
-        off = dims[0] + dims[1] + dims[2] + dims[3]
-        dzl = dzu = None
-        if off + dims[4] <= full.size:
-            dzl = np.zeros(n)
-            k = min(n, dims[4])
-            dzl[:k] = full[off:off + k]
-        if off + dims[4] + dims[5] <= full.size:
-            dzu = np.zeros(n)
-            k = min(n, dims[5])
-            dzu[:k] = full[off + dims[4]:off + dims[4] + k]
         return dx, dlam, dzl, dzu
 
     # -- monitor ------------------------------------------------------

@@ -827,6 +827,45 @@ impl PySolver {
         Ok(rows.into_iter().map(|r| r.map(|v| v as i64)).collect())
     }
 
+    /// Rows of the compound KKT vector holding the bound multipliers
+    /// `(z_l, z_u)` for the given 0-based **user-space** variable
+    /// indices; either side is `None` where the variable has no finite
+    /// bound on it, or where the solve removed the column as fixed.
+    ///
+    /// The `z` counterpart of `primal_rows`. The `z_l` / `z_u` blocks
+    /// of `parametric_step_full` hold one entry per *bounded*
+    /// variable, not one per variable, so offsetting into them by the
+    /// variable index reads a neighbour's multiplier as soon as one
+    /// unbounded variable sits ahead of it.
+    fn bound_multiplier_rows(
+        &self,
+        x_indices: Vec<i64>,
+    ) -> PyResult<Vec<(Option<i64>, Option<i64>)>> {
+        let s = self.state.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "bound_multiplier_rows: no converged factor (call solve() first)",
+            )
+        })?;
+        let n_full = s.inner.n_full_x().map_err(solver_error_to_py)?;
+        let mut xs = Vec::with_capacity(x_indices.len());
+        for &i in &x_indices {
+            if i < 0 || (i as usize) >= n_full {
+                return Err(PyValueError::new_err(format!(
+                    "bound_multiplier_rows: variable index {i} out of range [0, n={n_full})"
+                )));
+            }
+            xs.push(i as Index);
+        }
+        let rows = s
+            .inner
+            .bound_multiplier_rows(&xs)
+            .map_err(solver_error_to_py)?;
+        Ok(rows
+            .into_iter()
+            .map(|(l, u)| (l.map(|v| v as i64), u.map(|v| v as i64)))
+            .collect())
+    }
+
     /// Reduced Hessian `obj_scal · B K⁻¹ Bᵀ` over the pinned rows, in
     /// **natural (unscaled) units**: any NLP scaling baked into the
     /// converged factor is undone, so `-inv(...)` of the returned

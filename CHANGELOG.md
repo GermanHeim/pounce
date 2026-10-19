@@ -197,6 +197,21 @@ changes.
   parity test's strict `xfail` on camel deflation is now a pass.
 
 ### Fixed
+- **`Continuation(predict_duals=True)` reads the dual step through the row
+  maps.** `_tangent` sliced the compound KKT step by offset: it assigned the
+  `k`-th entry of the `z_l` / `z_u` blocks to variable `k`, but those blocks
+  hold one entry per *bounded* variable, so any unbounded variable ahead of a
+  bounded one credited it a neighbour's multiplier step; it took `dx =
+  full[:n]`, which under `make_parameter` runs past the shorter var-x block
+  into the slacks; and it read every inequality's `dλ` as zero because
+  `multiplier_rows` answers `None` there. Each block is now gathered through
+  `primal_rows`, `multiplier_rows` / `inequality_multiplier_rows` and a new
+  `Solver.bound_multiplier_rows` (Rust `Solver::bound_multiplier_rows`), which
+  maps a user-space variable to its `(z_l, z_u)` rows. The primal-only path
+  (`predict_duals=False`) also scatters its var-x step back to user space; with
+  a fixed variable it previously came back one short. Checked against
+  finite differences of re-solved duals, with and without
+  `obj_scaling_factor`, in `python/tests/test_continuation_tangent_duals.py`.
 - **A `.nl` file's initial duals are read in the `.sol` sign (gh#1033).** The
   `d` segment carries AMPL's dual, `d obj / d b`, the sign `sol_writer`
   produces by negating pounce's multiplier; the reader stored it unnegated, so
