@@ -689,7 +689,9 @@ pub unsafe extern "C" fn IpoptSolve(
                 let z_l = read_in(mult_x_L as *const Number, n_us);
                 let z_u = read_in(mult_x_U as *const Number, n_us);
                 // SQP packs the bound multipliers signed, as
-                // `lambda_x = z_l − z_u` (see `sqp::warm_start`).
+                // `lambda_x = z_l − z_u` (see `sqp::warm_start`). All three
+                // stay in the caller's space (`g` order, unscaled, full `n`);
+                // `set_sqp_warm_start` maps them into the algorithm's.
                 let lambda_x = z_l.iter().zip(&z_u).map(|(l, u)| l - u).collect();
                 info.app
                     .set_sqp_warm_start(pounce_algorithm::sqp::SqpIterates {

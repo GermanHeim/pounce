@@ -11,6 +11,13 @@
 use pounce_common::Number;
 use pounce_qp::WorkingSet;
 
+///
+/// Inside the algorithm the fields are in its own space: `x` over the
+/// non-fixed variables (per-variable scaled), `lambda_g = [y_c; y_d]`
+/// (equality rows first) and both multipliers times the objective /
+/// constraint scale. What a caller hands
+/// `IpoptApplication::set_sqp_warm_start` is the *user* space instead —
+/// the layout `finalize_solution` reports — and the application converts.
 #[derive(Debug, Clone)]
 pub struct SqpIterates {
     pub x: Vec<Number>,

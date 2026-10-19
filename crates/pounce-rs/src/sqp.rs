@@ -64,6 +64,11 @@
 //! # }
 //! ```
 //!
+//! `x`, `lambda_g` and `lambda_x` are in the space `finalize_solution`
+//! reports — full `n`, `g` row order, `lambda_x = z_L − z_U`, unscaled — and
+//! the solve maps them into the algorithm's own space, so a reported solution
+//! can be fed back as-is.
+//!
 //! The warm start is consumed by the solve that follows it, so each
 //! iteration of a sequence installs a fresh one;
 //! [`IpoptApplication::clear_sqp_warm_start`] drops an unused one.

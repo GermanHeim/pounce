@@ -309,7 +309,9 @@ impl PyProblem {
             let zu_warm = bridge_ref.state.z_u0.as_deref();
             // SQP's `lambda_x` follows IPOPT's user-facing
             // convention `lambda_x = z_l − z_u`. When the caller
-            // supplies neither, leave it at zero.
+            // supplies neither, leave it at zero. Everything here is in
+            // the caller's space (`g` order, unscaled, full `n`);
+            // `set_sqp_warm_start` maps it into the algorithm's.
             let lambda_x_warm = match (zl_warm, zu_warm) {
                 (Some(zl), Some(zu)) => zl.iter().zip(zu).map(|(l, u)| l - u).collect(),
                 (Some(zl), None) => zl.to_vec(),

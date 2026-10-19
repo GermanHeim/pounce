@@ -2506,6 +2506,16 @@ impl IpoptApplication {
     /// The iterate is auto-cleared after use, so a follow-up
     /// solve without an intervening `set_sqp_warm_start` call
     /// cold-starts.
+    ///
+    /// `x`, `lambda_g` and `lambda_x` are in the **caller's** space — what
+    /// `finalize_solution` reports: full-`n` `x` in model units, `lambda_g`
+    /// in `g` order on the unscaled Lagrangian `f + λᵀg`, and
+    /// `lambda_x = z_L − z_U`. The solve maps them into the algorithm's
+    /// space (fixed variables dropped, `[y_c; y_d]` row order, objective,
+    /// constraint and per-variable scaling) itself, so a converged solve's
+    /// reported multipliers can be fed back unchanged. The working set is
+    /// unchanged by this: its bound statuses are full-`n`, its constraint
+    /// statuses in the order `last_sqp_working_set` publishes them.
     pub fn set_sqp_warm_start(&mut self, warm: crate::sqp::SqpIterates) {
         self.sqp_warm_start = Some(warm);
     }
@@ -3293,16 +3303,10 @@ impl IpoptApplication {
         let reduced = x_map.len() != n_full;
         let prev_elimination = self.x_elimination.replace((x_map.clone(), n_full));
         if let Some(w) = warm.as_mut() {
+            // The staged iterate is in the caller's (user) space; the
+            // algorithm's is not. Converted here, once, for every frontend.
+            sqp_warm_start_to_algorithm(&*nlp_rc.borrow(), w);
             if reduced {
-                let pick = |v: &[Number]| -> Vec<Number> {
-                    x_map.iter().map(|&j| v[j as usize]).collect()
-                };
-                if w.x.len() == n_full {
-                    w.x = pick(&w.x);
-                }
-                if w.lambda_x.len() == n_full {
-                    w.lambda_x = pick(&w.lambda_x);
-                }
                 let mut drop_reason: Option<String> = None;
                 if let Some(ws) = w.working.as_mut() {
                     if ws.bounds.len() == n_full {
@@ -9027,6 +9031,81 @@ fn apply_qp_subproblem_options(options: &OptionsList, opts: &mut pounce_qp::QpOp
             "sqp_qp_* options were rejected after the registry accepted them; \
              the QP subproblem is running on pounce-qp defaults"
         ),
+    }
+}
+
+/// Map a staged SQP warm start from the caller's space into the algorithm's:
+/// the exact inverse of what [`finalize_via_sqp`] / [`sqp_user_iterate`] do on
+/// the way out, so that the multipliers a solve reports, fed back unchanged,
+/// are the iterate the next solve starts from.
+///
+/// | field | user space (what callers stage) | algorithm space |
+/// |---|---|---|
+/// | `x` | full `n`, model units | fixed columns dropped, `x̃ = d ⊙ x` |
+/// | `lambda_x` | full `n`, `z_L − z_U` | fixed dropped, `· obj_scal ⊘ d` |
+/// | `lambda_g` | `m`, in `g` order | `[y_c; y_d]`, `y = λ · obj_scal / {c,d}_scale` |
+///
+/// `d` is the per-variable factor of a `ScalingTnlp` below the NLP (gh#486;
+/// `z̃ = z ⊘ d`, its `get_starting_point` rule) and `obj_scal` includes the
+/// sign of a maximize. The `λ` rule is `OrigIpoptNlp::initialize_starting_point`'s,
+/// the IPM's inbound half of the same inverse.
+///
+/// Every frontend stages user space — the C API and `pounce-py` pass the
+/// caller's `x` / `mult_g` / `z_L − z_U` through untouched. Before this they
+/// went in as-is: on a model whose equality is not the first row, the two
+/// constraint multipliers landed on each other's rows, and any
+/// `obj_scaling_factor` ≠ 1 left them off by that factor.
+///
+/// An `x` / `lambda_x` already of the reduced length (a problem with fixed
+/// variables) is taken as user-unit values of the surviving columns, in
+/// order; any other length is left alone for the dimension check to reject.
+fn sqp_warm_start_to_algorithm(nlp: &dyn IpoptNlp, w: &mut crate::sqp::SqpIterates) {
+    let n_alg = nlp.n() as usize;
+    let n_full = nlp.n_full_x() as usize;
+    let m_full = nlp.n_full_g() as usize;
+    let m_eq = nlp.m_eq() as usize;
+    let obj_scal = nlp.obj_scaling_factor();
+    let d = nlp.variable_scaling();
+    // Algorithm column -> (user column, its x-scaling factor).
+    let cols: Vec<(usize, Number)> = (0..n_alg)
+        .map(|k| {
+            let j = nlp.var_x_to_full_x(k as Index) as usize;
+            let dj = d.as_ref().and_then(|d| d.get(j).copied()).unwrap_or(1.0);
+            (j, dj)
+        })
+        .collect();
+    let to_alg = |v: &[Number], f: &dyn Fn(Number, Number) -> Number| -> Option<Vec<Number>> {
+        if v.len() == n_full {
+            Some(cols.iter().map(|&(j, dj)| f(v[j], dj)).collect())
+        } else if v.len() == n_alg {
+            Some(cols.iter().zip(v).map(|(&(_, dj), &x)| f(x, dj)).collect())
+        } else {
+            None
+        }
+    };
+    if let Some(x) = to_alg(&w.x, &|x, dj| x * dj) {
+        w.x = x;
+    }
+    if let Some(lx) = to_alg(&w.lambda_x, &|z, dj| z * obj_scal / dj) {
+        w.lambda_x = lx;
+    }
+    if w.lambda_g.len() == m_full {
+        let cs = nlp.c_scale_vec();
+        let ds = nlp.d_scale_vec();
+        let mut y = vec![0.0; m_full];
+        for (i, &lam) in w.lambda_g.iter().enumerate() {
+            let i = i as Index;
+            if let Some(k) = nlp.full_g_to_c_block(i) {
+                let k = k as usize;
+                let s = cs.as_ref().map_or(1.0, |v| v[k]);
+                y[k] = lam / s * obj_scal;
+            } else if let Some(k) = nlp.full_g_to_d_block(i) {
+                let k = k as usize;
+                let s = ds.as_ref().map_or(1.0, |v| v[k]);
+                y[m_eq + k] = lam / s * obj_scal;
+            }
+        }
+        w.lambda_g = y;
     }
 }
 

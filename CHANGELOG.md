@@ -252,6 +252,22 @@ changes.
   C link, which passes zeroed buffers, now marks its bound multipliers NaN
   so a `warm_start_init_point=yes` option file keeps reading them as
   unseeded. Pinned by `crates/pounce-cinterface/tests/ipm_dual_warm_start.rs`.
+- **An active-set SQP warm start is taken in the caller's space.** The C
+  API (`IpoptSolve` after `IpoptSetWarmStartWorkingSet`) and `pounce-py`'s
+  `solve(working_set=...)` stage the user's `x`, `mult_g` and `z_L − z_U`,
+  and `set_sqp_warm_start` installed them as the algorithm's own iterate,
+  whose `lambda_g` is `[y_c; y_d]` (equality rows first) times
+  `obj_scaling_factor`, and whose `x` / `lambda_x` carry the per-variable
+  factors of `user-scaling`. Fed its own converged multipliers back, a model
+  with an inequality before its equality started from `λ = [3.667, 6.667]`
+  instead of `[6.667, 3.667]`, and under `obj_scaling_factor=10` from
+  `[0.3667, 6.667e-5]` instead of `[6.667e-4, 3.667]`. The application now
+  maps the staged iterate into algorithm space, as the exact inverse of
+  what `finalize_solution` reports (row order, objective and constraint
+  scale, fixed-variable elimination, `x̃ = d ⊙ x`, `z̃ = z ⊘ d`); the
+  iteration-0 iterate equals the seed and the re-solve takes 0 iterations.
+  Pinned by `crates/pounce-algorithm/tests/sqp_warm_start_user_space.rs`.
+  The working set is unchanged.
 - **A `.nl` file's initial duals are read in the `.sol` sign (gh#1033).** The
   `d` segment carries AMPL's dual, `d obj / d b`, the sign `sol_writer`
   produces by negating pounce's multiplier; the reader stored it unnegated, so
