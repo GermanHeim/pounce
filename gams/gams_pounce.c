@@ -1007,6 +1007,19 @@ DllExport int STDCALL pouCallSolver(void *Cptr)
     if (!x || (m > 0 && (!g_vals || !mult_g)) || !mult_xl || !mult_xu)
         goto oom;
 
+    /* The multiplier buffers are in/out: under warm_start_init_point=yes
+     * IpoptSolve reads them as the starting duals (upstream Ipopt's
+     * contract). This link supplies no duals, so mark the bound
+     * multipliers NaN — POUNCE's "unseeded" marker (gh#622), resolved to
+     * bound_mult_init_val — rather than zero, which would read as a
+     * supplied multiplier of 0 and be floored at
+     * warm_start_mult_bound_push. lambda stays zero, which is already its
+     * unseeded value. */
+    for (int j = 0; j < n; j++) {
+        mult_xl[j] = NAN;
+        mult_xu[j] = NAN;
+    }
+
     gmoGetVarL(gmo, x);
 
     /* ---------------------------------------------------------------

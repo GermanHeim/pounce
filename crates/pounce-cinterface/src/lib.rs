@@ -607,9 +607,12 @@ pub unsafe extern "C" fn SetIpoptProblemScaling(
 /// # Safety
 ///
 /// All pointer arguments are read/written per the
-/// `IpStdCInterface.h` contract: `x` is in/out (size `n`); `g`,
-/// `mult_g`, `mult_x_L`, `mult_x_U` are out-only (sizes `m, m, n, n`)
-/// and may be NULL when the corresponding output is not desired.
+/// `IpStdCInterface.h` contract: `x` is in/out (size `n`); `g` is
+/// out-only (size `m`); `mult_g`, `mult_x_L`, `mult_x_U` (sizes
+/// `m, n, n`) are out, and are also *read* as the starting multipliers
+/// when `warm_start_init_point=yes` (upstream's `start_lam`, `start_z_L`,
+/// `start_z_U`). Any of them may be NULL; a NULL multiplier buffer under
+/// a warm start means "not supplied" and that block starts unseeded.
 #[allow(clippy::too_many_arguments)]
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn IpoptSolve(
@@ -708,6 +711,9 @@ pub unsafe extern "C" fn IpoptSolve(
                 g_l: info.g_l.clone(),
                 g_u: info.g_u.clone(),
                 initial_x,
+                start_lambda: mult_g as *const Number,
+                start_z_l: mult_x_L as *const Number,
+                start_z_u: mult_x_U as *const Number,
                 eval_f: info.eval_f,
                 eval_grad_f: info.eval_grad_f,
                 eval_g: info.eval_g,
@@ -1948,6 +1954,23 @@ pub(crate) struct CCallbackTnlp {
     pub(crate) g_l: Vec<Number>,
     pub(crate) g_u: Vec<Number>,
     pub(crate) initial_x: Vec<Number>,
+    /// The caller's `mult_g` buffer (length `m`), or NULL. Read only by
+    /// [`TNLP::get_starting_point`] under `init_lambda`, i.e. when the
+    /// solve was asked for a dual warm start (`warm_start_init_point=yes`)
+    /// — upstream `StdInterfaceTNLP`'s `start_lam`. A caller that has not
+    /// opted in may pass an uninitialized buffer, which is why this is a
+    /// pointer read lazily under the flag rather than a snapshot taken
+    /// up front. Valid for the whole `IpoptSolve` call: the buffer is
+    /// overwritten with the solution only after the solve (and any
+    /// second-opinion re-solve, which calls `get_starting_point` again)
+    /// has finished.
+    pub(crate) start_lambda: *const Number,
+    /// The caller's `mult_x_L` buffer (length `n`), or NULL. Read under
+    /// `init_z`; see [`CCallbackTnlp::start_lambda`].
+    pub(crate) start_z_l: *const Number,
+    /// The caller's `mult_x_U` buffer (length `n`), or NULL. Read under
+    /// `init_z`; see [`CCallbackTnlp::start_lambda`].
+    pub(crate) start_z_u: *const Number,
     pub(crate) eval_f: Option<Eval_F_CB>,
     pub(crate) eval_grad_f: Option<Eval_Grad_F_CB>,
     pub(crate) eval_g: Option<Eval_G_CB>,
@@ -2029,6 +2052,33 @@ impl TNLP for CCallbackTnlp {
     fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
         if !self.initial_x.is_empty() {
             sp.x.copy_from_slice(&self.initial_x);
+        }
+        // Dual warm start, as upstream `StdInterfaceTNLP::get_starting_point`:
+        // under `init_z` / `init_lambda` the caller's `mult_x_L` / `mult_x_U`
+        // / `mult_g` buffers are the starting multipliers. Same sign
+        // convention as the values `finalize_solution` writes back into those
+        // buffers (L = f + lambda'g, z_L, z_U >= 0), so a solve's output feeds
+        // the next solve's input unchanged.
+        //
+        // One deliberate departure: upstream fails the solve when a requested
+        // buffer is NULL. Here NULL means "not supplied" and the slot is left
+        // untouched, so `OrigIpoptNlp`'s NaN "unseeded" marker (gh#622) stands
+        // and the warm-start initializer resolves it, rather than a primal-only
+        // warm start becoming an error.
+        let copy_in = |dst: &mut [Number], src: *const Number| {
+            if !src.is_null() && !dst.is_empty() {
+                // SAFETY: `src` is the caller's buffer of the documented
+                // length (`n` for the bound multipliers, `m` for `mult_g`),
+                // valid for the duration of the enclosing `IpoptSolve`.
+                dst.copy_from_slice(unsafe { std::slice::from_raw_parts(src, dst.len()) });
+            }
+        };
+        if sp.init_z {
+            copy_in(sp.z_l, self.start_z_l);
+            copy_in(sp.z_u, self.start_z_u);
+        }
+        if sp.init_lambda {
+            copy_in(sp.lambda, self.start_lambda);
         }
         true
     }

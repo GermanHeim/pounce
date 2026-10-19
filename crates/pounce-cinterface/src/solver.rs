@@ -113,8 +113,10 @@ pub unsafe extern "C" fn IpoptFreeSolver(solver: IpoptSolver) {
 }
 
 /// Run the IPM. Same output buffer contract as [`crate::IpoptSolve`]:
-/// `x` is in/out (initial guess in, solution out); `g`, `obj_val`,
-/// `mult_g`, `mult_x_L`, `mult_x_U` are out-only and may be NULL.
+/// `x` is in/out (initial guess in, solution out); `g`, `obj_val` are
+/// out-only; `mult_g`, `mult_x_L`, `mult_x_U` are out, and in as the
+/// starting multipliers under `warm_start_init_point=yes`. All may be
+/// NULL except `x` (when `n > 0`).
 /// `user_data` is threaded into the C callbacks unchanged.
 ///
 /// Returns the same `Index`-cast [`ApplicationReturnStatus`] code as
@@ -191,6 +193,9 @@ pub unsafe extern "C" fn IpoptSolverSolve(
                 g_l: info.problem.g_l.clone(),
                 g_u: info.problem.g_u.clone(),
                 initial_x,
+                start_lambda: mult_g as *const Number,
+                start_z_l: mult_x_L as *const Number,
+                start_z_u: mult_x_U as *const Number,
                 eval_f: info.problem.eval_f,
                 eval_grad_f: info.problem.eval_grad_f,
                 eval_g: info.problem.eval_g,

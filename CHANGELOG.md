@@ -238,6 +238,20 @@ changes.
   the Lagrangian's gradient in both senses. New tests also pin
   `gmoSetSolution2` / `gmoSetVarM` marginals for minimize and maximize against
   hand-derived GAMS marginals.
+- **The C API's multiplier buffers seed a dual warm start, as Ipopt's do.**
+  `IpoptSolve` (and `IpoptSolverSolve`, `IpoptSolveWarmStart`, Fortran
+  `IPSOLVE`) treated `mult_g` / `mult_x_L` / `mult_x_U` as out-only: the
+  bridge's `get_starting_point` copied `x` and nothing else, so a C caller
+  setting `warm_start_init_point=yes` and passing the previous solve's
+  multipliers silently got a primal-only warm start. Under `init_lambda` /
+  `init_z` the buffers are now read as the starting duals (upstream
+  `StdInterfaceTNLP`'s `start_lam` / `start_z_L` / `start_z_U`, same sign
+  convention as what the solve writes back, so output feeds input
+  unchanged). A NULL buffer means "not supplied" and leaves that block
+  unseeded (gh#622's marker) rather than failing as upstream does. The GAMS
+  C link, which passes zeroed buffers, now marks its bound multipliers NaN
+  so a `warm_start_init_point=yes` option file keeps reading them as
+  unseeded. Pinned by `crates/pounce-cinterface/tests/ipm_dual_warm_start.rs`.
 - **A `.nl` file's initial duals are read in the `.sol` sign (gh#1033).** The
   `d` segment carries AMPL's dual, `d obj / d b`, the sign `sol_writer`
   produces by negating pounce's multiplier; the reader stored it unnegated, so
