@@ -2327,6 +2327,27 @@ fn real_main() -> ExitCode {
         }
     }
 
+    // M24: a bound presolve made from a singleton row it then dropped had its
+    // multiplier handed back to that row inside `PresolveTnlp::finalize_solution`,
+    // and the full-length `lambda` swapped in above carries it. The bound
+    // capture was taken outside presolve, so it still holds the same number on
+    // a variable bound the model never declared; zero those entries so the
+    // `.sol` reports it once, on the row, as a presolve=no solve does.
+    // Zeroing is frame-free, so it is safe after the scaling undo above.
+    if let Some(p) = &presolve_handle {
+        let handed = p.borrow().bound_multipliers_handed_to_rows().to_vec();
+        if !handed.is_empty() {
+            if let Some((z_l, z_u)) = bound_mult_capture.borrow_mut().as_mut() {
+                for (j, upper) in handed {
+                    let side = if upper { &mut *z_u } else { &mut *z_l };
+                    if let Some(z) = side.get_mut(j) {
+                        *z = 0.0;
+                    }
+                }
+            }
+        }
+    }
+
     // ---- Objective sense: carry the duals back into the user's frame ----
     //
     // gh#959. Every capture above is a dual of the problem the ENGINE solved,

@@ -292,6 +292,19 @@ changes.
   plain solve's carries no bound multipliers either. `scripts/sweep-minima.sh`
   now records the best `.sol`'s blocks; across its 54 lines only that column
   moves.
+- **Presolve hands a dropped singleton row's dual back to the row (M24).**
+  Phase 1 turns a row like `x0 <= 0.5` into a variable bound and Phase 2 drops
+  the row, so the solver's multiplier came out as `ipopt_zU_out` on a variable
+  with no declared upper bound while the row's `.sol` dual read 0; `presolve=no`
+  and the convex arms report the row dual (-2) and nothing on `x0`. Postsolve
+  now sets `λ = (z_u − z_l)/a` on the row and zeroes that bound side (also in the
+  CLI's bound-multiplier capture), and the warm-start path does the inverse, so
+  a `.sol` round-trips. Only where the derived bound is strictly tighter than
+  the declared one; a tie keeps the declared bound's multiplier. NLP and SQP
+  arms, both senses, `≤`/`≥`/ranged rows and either coefficient sign now match
+  `presolve=no`. Bounds derived from multi-variable rows are unchanged (still
+  documented as M24). Tests: `tests/presolve_singleton_row_dual.rs` and three
+  crate unit tests.
 - **A transferred bound multiplier survives a warm start through
   `presolve_linear_eq_reduction` (gh#493, inbound half).** On the way out the
   linear-equality pass reports the multiplier of a bound it moved onto a
