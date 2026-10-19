@@ -26,9 +26,13 @@ use pounce_qp::{BoundStatus, ConsStatus, WorkingSet};
 ///   follow from the one stationarity form `∇f + Jᵀλ_g − λ_x = 0` that
 ///   pounce-qp, the SQP driver's `check_kkt`, and IPOPT's `(y, z_l, z_u)`
 ///   all share; the bound block enters it negated, so its signs flip.
-/// - `m_eq`: number of equality rows at the start of `lambda_g`.
-///   Used to flag rows as [`ConsStatus::Equality`] without
-///   consulting `g_l`/`g_u`.
+/// - `m_eq`: number of leading rows to flag [`ConsStatus::Equality`]
+///   without consulting `g_l`/`g_u` — the SQP's internal
+///   equalities-first order. For rows in a **model's** own `g` order
+///   (what `finalize_solution` reports and
+///   `IpoptApplication::set_sqp_warm_start` takes), pass `0`: a row
+///   with `g_l == g_u` is classified `Equality` from its bounds anyway,
+///   wherever it sits, and the result is then in that same row order.
 /// - `x`, `x_l`, `x_u`: primal iterate and variable bounds, length
 ///   `n`. The bound-classifier double-checks the primal is close
 ///   to the bound (within `primal_tol`) — guards against the case

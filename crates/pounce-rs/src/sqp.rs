@@ -67,7 +67,9 @@
 //! `x`, `lambda_g` and `lambda_x` are in the space `finalize_solution`
 //! reports — full `n`, `g` row order, `lambda_x = z_L − z_U`, unscaled — and
 //! the solve maps them into the algorithm's own space, so a reported solution
-//! can be fed back as-is.
+//! can be fed back as-is. The working set is in the same space both ways:
+//! `bounds[j]` is variable `j` of the full `n`, `constraints[i]` is `g` row
+//! `i` in the model's order (not the SQP's internal equalities-first order).
 //!
 //! The warm start is consumed by the solve that follows it, so each
 //! iteration of a sequence installs a fresh one;
@@ -78,7 +80,9 @@
 //! — there is no previous working set to carry, so
 //! [`classify_working_set`] derives one from a predicted point and its
 //! multipliers. Note its `lambda_x` argument is the **packed** bound
-//! multiplier `z_l − z_u`, not the pair.
+//! multiplier `z_l − z_u`, not the pair, and that on rows in the model's
+//! own order its `m_eq` argument should be `0` (equality rows are found
+//! from `g_l == g_u`).
 //!
 //! `λ_g` and `λ_x` are unconstrained in sign only where the corresponding
 //! row is inactive; a warm start whose multipliers disagree with its working

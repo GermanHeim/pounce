@@ -1544,43 +1544,13 @@ fn int_to_cons_status(v: c_int) -> Option<pounce_qp::ConsStatus> {
     }
 }
 
-/// Internal → user row map for the SQP's constraint vector.
-///
-/// The SQP works on a *reordered* constraint vector: equalities first,
-/// inequalities after, each in ascending original index. Its working set
-/// is in that order, and both C entry points copied it positionally
-/// against the caller's row indices — so on HS071, whose rows are
-/// `[x₀x₁x₂x₃ ≥ 25, Σxᵢ² = 40]`, `IpoptGetWorkingSet` reported
-/// `[Equality, AtLower]`: exactly reversed. A caller feeding that back
-/// through `IpoptSetWarmStartWorkingSet`, which is the documented
-/// round-trip, warm-started with the statuses swapped.
-///
-/// The split is a pure function of the bounds — a row is an equality iff
-/// both sides are finite and equal — so the map is reconstructible here,
-/// with no need to plumb `BoundClassification` out of `pounce-nlp`.
-/// Mirrors `tnlp_adapter::classify_bounds`, sentinel test included.
-fn internal_to_user_rows(g_l: &[Number], g_u: &[Number]) -> Vec<usize> {
-    let m = g_l.len();
-    let is_eq =
-        |i: usize| g_l[i] > NLP_LOWER_BOUND_INF && g_u[i] < NLP_UPPER_BOUND_INF && g_l[i] == g_u[i];
-    let mut map: Vec<usize> = (0..m).filter(|&i| is_eq(i)).collect();
-    map.extend((0..m).filter(|&i| !is_eq(i)));
-    map
-}
-
-/// Internal → user variable map for the SQP's bound vector.
-///
-/// Fixed variables (`x_l == x_u`) are removed from the internal problem
-/// altogether, so the working set's bound vector is indexed by *non-fixed*
-/// position. Same reconstruction argument as `internal_to_user_rows`.
-fn internal_to_user_vars(x_l: &[Number], x_u: &[Number]) -> Vec<usize> {
-    (0..x_l.len()).filter(|&i| x_l[i] != x_u[i]).collect()
-}
-
 /// Retrieve the working set produced by the most recent SQP solve
 /// (`algorithm = active-set-sqp`). Buffer sizes are `n` for
 /// `bound_status_out` and `m` for `cons_status_out`. Pass `NULL`
-/// for either to skip that side.
+/// for either to skip that side. Entry `i` is variable `i` / constraint
+/// row `i` in the problem's own order (a variable fixed by
+/// `x_L == x_U` reads `POUNCE_WS_FIXED_OR_EQ`), the same indexing
+/// [`IpoptSetWarmStartWorkingSet`] takes.
 ///
 /// Returns `TRUE` (1) on success, `FALSE` (0) if there is no
 /// working set to retrieve (e.g. no SQP solve has run, the IPM
@@ -1607,28 +1577,28 @@ pub unsafe extern "C" fn IpoptGetWorkingSet(
             Some(w) => w,
             None => return FALSE,
         };
-        // Translate out of the SQP's equalities-first ordering, back into
-        // the caller's row / variable indices.
-        let row_map = internal_to_user_rows(&info.g_l, &info.g_u);
-        let var_map = internal_to_user_vars(&info.x_l, &info.x_u);
-        if ws.constraints.len() != row_map.len() || ws.bounds.len() != var_map.len() {
+        // `last_sqp_working_set` is already in the caller's index spaces —
+        // full `n` (fixed variables read `Fixed`) and `g` row order — so it
+        // is copied positionally. This used to rebuild the SQP's
+        // equalities-first order from the bounds and permute here, which
+        // stopped matching once the application lifted bound statuses to
+        // full `n` (gh#986): with any fixed variable the length check
+        // below failed and this returned FALSE after a successful solve.
+        let n = info.x_l.len();
+        let m = info.g_l.len();
+        if ws.constraints.len() != m || ws.bounds.len() != n {
             // The stored set does not match this problem's shape. Report
             // nothing rather than something mis-indexed.
             return FALSE;
         }
         if !bound_status_out.is_null() {
-            // A fixed variable is absent from the internal problem and so
-            // has no stored status. `Fixed` is what it is.
-            for i in 0..info.x_l.len() {
-                *bound_status_out.add(i) = POUNCE_WS_FIXED_OR_EQ;
-            }
-            for (internal, &user) in var_map.iter().enumerate() {
-                *bound_status_out.add(user) = bound_status_to_int(ws.bounds[internal]);
+            for (i, &s) in ws.bounds.iter().enumerate() {
+                *bound_status_out.add(i) = bound_status_to_int(s);
             }
         }
         if !cons_status_out.is_null() {
-            for (internal, &user) in row_map.iter().enumerate() {
-                *cons_status_out.add(user) = cons_status_to_int(ws.constraints[internal]);
+            for (i, &s) in ws.constraints.iter().enumerate() {
+                *cons_status_out.add(i) = cons_status_to_int(s);
             }
         }
         TRUE
@@ -1638,7 +1608,8 @@ pub unsafe extern "C" fn IpoptGetWorkingSet(
 /// Supply a warm-start working set consumed by the next
 /// [`IpoptSolve`] on this problem. Pass `NULL` for either side to
 /// cold-start it. The caller-owned buffers are copied; reuse
-/// across calls is safe.
+/// across calls is safe. Indexed like [`IpoptGetWorkingSet`]: entry `i`
+/// is variable `i` / constraint row `i` in the problem's own order.
 ///
 /// Returns `TRUE` on success, `FALSE` on (a) NULL problem, (b)
 /// an out-of-range status code in one of the buffers, or
@@ -1666,12 +1637,11 @@ pub unsafe extern "C" fn IpoptSetWarmStartWorkingSet(
         let info = &mut *ipopt_problem;
         let n = info.n.max(0) as usize;
         let m = info.m.max(0) as usize;
-        // The caller indexes by *their* rows and variables; the SQP works
-        // on the reordered, fixed-variables-removed vectors. Translate on
-        // the way in, mirroring `IpoptGetWorkingSet` on the way out, so
-        // the documented get/set round-trip is actually a round-trip.
-        let row_map = internal_to_user_rows(&info.g_l, &info.g_u);
-        let var_map = internal_to_user_vars(&info.x_l, &info.x_u);
+        // The caller indexes by *their* rows and variables, and so does
+        // `IpoptApplication::set_sqp_warm_start`: the solve maps the staged
+        // set into the SQP's equalities-first, fixed-variables-removed
+        // vectors through the problem's own classification, the inverse of
+        // what `IpoptGetWorkingSet` reads out. Staged as given.
         // Validation is not just a range check. A status code says
         // where the point sits relative to a bound — but `Fixed` /
         // `Equality`, and `AtLower` / `AtUpper` against an infinite
@@ -1690,7 +1660,7 @@ pub unsafe extern "C" fn IpoptSetWarmStartWorkingSet(
         // strictly better: the caller already handles FALSE, and this
         // function already returns it for an out-of-range code, so
         // TRUE reasonably reads as "your working set was accepted".
-        let mut bounds = vec![pounce_qp::BoundStatus::Inactive; var_map.len()];
+        let mut bounds = vec![pounce_qp::BoundStatus::Inactive; n];
         if !bound_status_in.is_null() {
             // Validate every entry the caller supplied, including those for
             // fixed variables that the internal problem drops: a wrong
@@ -1712,10 +1682,10 @@ pub unsafe extern "C" fn IpoptSetWarmStartWorkingSet(
                     return FALSE;
                 }
             }
-            for (internal, &user) in var_map.iter().enumerate() {
+            for (i, b) in bounds.iter_mut().enumerate() {
                 // Already range-checked above.
-                if let Some(s) = int_to_bound_status(*bound_status_in.add(user)) {
-                    bounds[internal] = s;
+                if let Some(s) = int_to_bound_status(*bound_status_in.add(i)) {
+                    *b = s;
                 }
             }
         }
@@ -1740,9 +1710,9 @@ pub unsafe extern "C" fn IpoptSetWarmStartWorkingSet(
                     return FALSE;
                 }
             }
-            for (internal, &user) in row_map.iter().enumerate() {
-                if let Some(s) = int_to_cons_status(*cons_status_in.add(user)) {
-                    constraints[internal] = s;
+            for (i, c) in constraints.iter_mut().enumerate() {
+                if let Some(s) = int_to_cons_status(*cons_status_in.add(i)) {
+                    *c = s;
                 }
             }
         }

@@ -197,6 +197,25 @@ changes.
   parity test's strict `xfail` on camel deflation is now a pass.
 
 ### Fixed
+- **The SQP working set is published and taken in user row and variable
+  order.** `IpoptApplication::last_sqp_working_set` (and so pounce-py's
+  `info["working_set"]` / `get_working_set()` and pounce-rs) reported
+  constraint statuses positionally in the SQP's internal equalities-first
+  `[c; d]` order: on a model whose `g0` is an active inequality and `g1` an
+  equality it read `[Equality, AtUpper]`, and `set_sqp_warm_start` /
+  `solve(working_set=...)` read a caller's set the same way, while the C API,
+  the GAMS link and any hand-written set index by `g` row. Both directions now
+  map through the NLP's `c_map` / `d_map` (bound statuses were already full
+  `n`, gh#986), so `[AtUpper, Equality]` comes out and the published set fed
+  back is a 0-iteration re-solve. The C API had rebuilt the internal order
+  from the bounds on its own, which stopped matching once bound statuses
+  became full-`n`: with any fixed variable `IpoptGetWorkingSet` returned FALSE
+  after a successful SQP solve, so `IpoptSolveWarmStart` and the GAMS link's
+  working-set state file silently lost the set. It now copies positionally.
+  `classify_working_set`'s `m_eq` is documented as "leading rows forced
+  `Equality`": pass `0` for user-order rows. Tests:
+  `pounce-algorithm/tests/sqp_working_set_user_order.rs`,
+  `pounce-cinterface/tests/sqp_working_set_user_order.rs`.
 - **`Continuation(predict_duals=True)` reads the dual step through the row
   maps.** `_tangent` sliced the compound KKT step by offset: it assigned the
   `k`-th entry of the `z_l` / `z_u` blocks to variable `k`, but those blocks

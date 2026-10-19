@@ -19,7 +19,7 @@
 //!    let lambda_x: Vec<f64> = z_l.iter().zip(z_u.iter())
 //!        .map(|(l, u)| l - u).collect();
 //!    let ws = classify_working_set(
-//!        &lambda_x, &lambda_g, m_eq,
+//!        &lambda_x, &lambda_g, 0, // user `g` order: equalities found by bounds
 //!        &x_predicted, &x_l, &x_u,
 //!        &g_at_predicted, &g_l, &g_u,
 //!        1e-8, 1e-6,

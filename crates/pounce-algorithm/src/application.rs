@@ -2513,9 +2513,11 @@ impl IpoptApplication {
     /// `lambda_x = z_L − z_U`. The solve maps them into the algorithm's
     /// space (fixed variables dropped, `[y_c; y_d]` row order, objective,
     /// constraint and per-variable scaling) itself, so a converged solve's
-    /// reported multipliers can be fed back unchanged. The working set is
-    /// unchanged by this: its bound statuses are full-`n`, its constraint
-    /// statuses in the order `last_sqp_working_set` publishes them.
+    /// reported multipliers can be fed back unchanged. The working set is in
+    /// the same space: bound statuses full-`n` in variable order (fixed
+    /// variables' entries are ignored), constraint statuses one per `g` row
+    /// in the user's row order — exactly what [`Self::last_sqp_working_set`]
+    /// publishes, so a published set can be fed back as-is.
     pub fn set_sqp_warm_start(&mut self, warm: crate::sqp::SqpIterates) {
         self.sqp_warm_start = Some(warm);
     }
@@ -2666,27 +2668,41 @@ impl IpoptApplication {
     /// solve, or `None` if the last solve wasn't SQP, didn't
     /// produce a working set (cold-start declared the iterate
     /// optimal before solving any QP), or no SQP solve has run.
+    ///
+    /// The set is in the **caller's** index spaces, the ones
+    /// `finalize_solution` uses: `bounds[j]` is variable `j` of the full
+    /// `n` (a variable `fixed_variable_treatment = make_parameter` removed
+    /// reads `Fixed`), and `constraints[i]` is `g` row `i` in the model's
+    /// own row order — not the SQP's internal equalities-first order. It is
+    /// the form [`Self::set_sqp_warm_start`] takes back.
     pub fn last_sqp_working_set(&self) -> Option<&pounce_qp::WorkingSet> {
         self.sqp_last_working_set.as_ref()
     }
 
-    /// gh#986 review item 10: a working set computed in the solve's reduced
-    /// space (fixed variables eliminated), lifted to the caller's full
-    /// variable space. Fixed variables are `Fixed`; a working set that is not
-    /// reduced-sized is returned unchanged.
-    fn working_set_to_full(&self, ws: pounce_qp::WorkingSet) -> pounce_qp::WorkingSet {
-        match &self.x_elimination {
+    /// A working set computed in the solve's algorithm space, mapped to the
+    /// caller's: bound statuses lifted to the full variable vector (gh#986
+    /// review item 10 — fixed variables are `Fixed`), constraint statuses
+    /// moved from the algorithm's `[c; d]` row order (equalities first) to
+    /// the user's `g` row order through the NLP's `c_map` / `d_map`. A
+    /// bound vector that is not reduced-sized is left as it is.
+    fn working_set_to_user(
+        &self,
+        nlp: &dyn IpoptNlp,
+        ws: pounce_qp::WorkingSet,
+    ) -> pounce_qp::WorkingSet {
+        let bounds = match &self.x_elimination {
             Some((map, n_full)) if ws.bounds.len() == map.len() && map.len() != *n_full => {
                 let mut bounds = vec![pounce_qp::BoundStatus::Fixed; *n_full];
                 for (k, &j) in map.iter().enumerate() {
                     bounds[j as usize] = ws.bounds[k];
                 }
-                pounce_qp::WorkingSet {
-                    bounds,
-                    constraints: ws.constraints,
-                }
+                bounds
             }
-            _ => ws,
+            _ => ws.bounds,
+        };
+        pounce_qp::WorkingSet {
+            bounds,
+            constraints: working_set_rows_to_user(nlp, ws.constraints),
         }
     }
 
@@ -3287,7 +3303,7 @@ impl IpoptApplication {
         // gh#986 review item 10: map a warm start given in the caller's full
         // variable space through this problem's fixed-variable elimination.
         // The working set this application publishes is in that space
-        // (`working_set_to_full`), and so is what Python's
+        // (`working_set_to_user`), and so is what Python's
         // `solve(..., working_set=...)` decodes, so a child that fixes `x1`
         // gets the parent's statuses for exactly the columns it still has.
         // The first pass compared lengths only: a fixed variable made the
@@ -3429,7 +3445,7 @@ impl IpoptApplication {
         self.sqp_last_working_set = res
             .working_set
             .clone()
-            .map(|ws| self.working_set_to_full(ws));
+            .map(|ws| self.working_set_to_user(&*nlp_rc.borrow(), ws));
         // Populate the shared `SolveStatistics` so the Python /
         // C-API post-solve accessors (`GetIpoptIterCount`,
         // `info["iter_count"]`, etc.) report the SQP outer-iter
@@ -3942,7 +3958,7 @@ impl IpoptApplication {
             self.sqp_last_working_set = res
                 .working_set
                 .clone()
-                .map(|ws| self.working_set_to_full(ws));
+                .map(|ws| self.working_set_to_user(&*nlp_handle.borrow(), ws));
         }
         tracing::debug!(target: "pounce::crossover", "crossover: {report:?}");
         self.crossover_report = Some(report);
@@ -9044,6 +9060,11 @@ fn apply_qp_subproblem_options(options: &OptionsList, opts: &mut pounce_qp::QpOp
 /// | `x` | full `n`, model units | fixed columns dropped, `x̃ = d ⊙ x` |
 /// | `lambda_x` | full `n`, `z_L − z_U` | fixed dropped, `· obj_scal ⊘ d` |
 /// | `lambda_g` | `m`, in `g` order | `[y_c; y_d]`, `y = λ · obj_scal / {c,d}_scale` |
+/// | `working.constraints` | `m`, in `g` order | `[c; d]` order |
+///
+/// (`working.bounds` goes from full `n` to the reduced columns in the
+/// caller, which also knows which elimination an already-reduced set came
+/// from.)
 ///
 /// `d` is the per-variable factor of a `ScalingTnlp` below the NLP (gh#486;
 /// `z̃ = z ⊘ d`, its `get_starting_point` rule) and `obj_scal` includes the
@@ -9106,6 +9127,67 @@ fn sqp_warm_start_to_algorithm(nlp: &dyn IpoptNlp, w: &mut crate::sqp::SqpIterat
             }
         }
         w.lambda_g = y;
+    }
+    if let Some(ws) = w.working.as_mut() {
+        ws.constraints = working_set_rows_to_algorithm(nlp, std::mem::take(&mut ws.constraints));
+    }
+}
+
+/// Algorithm row `k` of the `[c; d]` constraint vector → user `g` row, or
+/// `None` when the NLP's row count does not describe a full split.
+fn algorithm_rows_to_user(nlp: &dyn IpoptNlp) -> Option<Vec<usize>> {
+    let m_full = nlp.n_full_g() as usize;
+    let m_eq = nlp.m_eq() as usize;
+    let m_alg = m_eq + nlp.m_ineq() as usize;
+    if m_full != m_alg {
+        return None;
+    }
+    let mut map = vec![usize::MAX; m_alg];
+    for i in 0..m_full {
+        let k = if let Some(k) = nlp.full_g_to_c_block(i as Index) {
+            k as usize
+        } else if let Some(k) = nlp.full_g_to_d_block(i as Index) {
+            m_eq + k as usize
+        } else {
+            return None;
+        };
+        if k >= m_alg || map[k] != usize::MAX {
+            return None;
+        }
+        map[k] = i;
+    }
+    Some(map)
+}
+
+/// Constraint statuses of a working set, algorithm `[c; d]` order → user
+/// `g` order. The SQP stacks equalities first, so on a model whose first
+/// row is an inequality the statuses published positionally landed on the
+/// wrong rows (`[Equality, AtUpper]` for `g = [ineq, eq]`). A vector of
+/// any other length is returned unchanged for the dimension check to judge.
+fn working_set_rows_to_user(
+    nlp: &dyn IpoptNlp,
+    rows: Vec<pounce_qp::ConsStatus>,
+) -> Vec<pounce_qp::ConsStatus> {
+    match algorithm_rows_to_user(nlp) {
+        Some(map) if map.len() == rows.len() => {
+            let mut user = vec![pounce_qp::ConsStatus::Inactive; rows.len()];
+            for (k, &i) in map.iter().enumerate() {
+                user[i] = rows[k];
+            }
+            user
+        }
+        _ => rows,
+    }
+}
+
+/// Inverse of [`working_set_rows_to_user`]: user `g` order → `[c; d]`.
+fn working_set_rows_to_algorithm(
+    nlp: &dyn IpoptNlp,
+    rows: Vec<pounce_qp::ConsStatus>,
+) -> Vec<pounce_qp::ConsStatus> {
+    match algorithm_rows_to_user(nlp) {
+        Some(map) if map.len() == rows.len() => map.iter().map(|&i| rows[i]).collect(),
+        _ => rows,
     }
 }
 

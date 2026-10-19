@@ -233,7 +233,9 @@ impl PyProblem {
     ///
     /// The optional `working_set` kwarg (Phase 5c §7.3) accepts a
     /// 2-tuple `(bounds, constraints)` of numpy int arrays
-    /// (length `n` and `m` respectively, status codes 0..=3).
+    /// (length `n` and `m` respectively, status codes 0..=3), indexed
+    /// like `x` and `g`: entry `i` is variable `i` / constraint row `i`
+    /// in the problem's own order (a fixed variable reads 3).
     /// Consumed only by the SQP path (`algorithm = active-set-sqp`);
     /// the IPM ignores it. When provided, it overrides any value
     /// previously stashed via `set_working_set`. After every SQP
