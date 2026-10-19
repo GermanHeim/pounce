@@ -381,8 +381,10 @@ What *does* cross the boundary is more than the primal point. An AMPL
 `.nl` file carries an initial primal point (the `x` segment) *and*
 initial duals (the `d` segment), and pounce's reader honours both, so
 the driver folds the previous point's answer into the next model and
-turns on `warm_start_init_point`. The bound multipliers and the barrier
-parameter have nowhere to go in the `.nl` format, and that is the gap
+turns on `warm_start_init_point`. The barrier parameter has nowhere to
+go in the `.nl` format; the bound multipliers could ride the
+`ipopt_zL_in` / `ipopt_zU_in` suffixes, which the reader honours since
+gh#1033, but the driver does not write them yet. Those two are the gap
 against the in-process driver.
 
 **Measured**, on a 20-point van der Pol NMPC path (horizon 40, n = 122):

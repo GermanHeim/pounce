@@ -33,8 +33,10 @@ segment), and pounce's reader honours both, so the previous point's
 back into the next point's model. With ``warm_start_init_point yes``
 that is a genuine primal-dual warm start, the same state
 :class:`pounce.WarmStart` carries in process, minus the barrier
-parameter and the bound multipliers, which the ``.nl`` format has
-nowhere to put.
+parameter, which the ``.nl`` format has nowhere to put, and the bound
+multipliers. Those could ride ``ipopt_zL_in`` / ``ipopt_zU_in`` suffixes,
+which the reader honours (gh#1033), but this driver does not write them
+yet.
 
 Manifest format (JSON, ``version: 1``)
 --------------------------------------

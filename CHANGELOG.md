@@ -204,8 +204,19 @@ changes.
   -5 (Ipopt: 5). The reader now negates on the way in. `pounce-continuation`,
   which wrote the JSON report's `lambda` straight into the next point's `d`
   segment and so relied on the old behaviour, now negates it on the way out;
-  its transfer is unchanged. A full solve ends at the same multipliers either
-  way.
+  its transfer is unchanged. The objective sense is applied too: a maximize
+  model's `.sol` dual is `-sigma*lambda`, so the reader's inverse is
+  `lambda = -sigma*d`. The reader also honours the `ipopt_zL_in` /
+  `ipopt_zU_in` bound-multiplier suffixes it used to drop, as Ipopt's AMPL
+  driver does (`z_L = sigma*zL_in`, `z_U = -sigma*zU_in`, the inverse of the
+  `_out` blocks); note that the default `warm_start_recentering=residual`
+  re-derives supplied bound multipliers, so they survive verbatim only under
+  `warm_start_recentering=none`. A full solve ends at the same multipliers
+  either way.
+- **GAMS C link: the active-set-SQP warm start reads maximize marginals with
+  the right sign.** The working-set reconstruction classified persisted
+  marginals without `obj_sign`, so every active side of a maximize model came
+  back flipped; the outbound half of gh#272 had the factor.
 - **LPs with duplicated, round-off-conflicting cuts solve again on both convex
   engines (gh#1023).** An outer-approximation master LP (67 columns, 426 rows)
   repeats its cuts with right-hand sides that differ by `~1e-14`, so no point

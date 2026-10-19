@@ -691,9 +691,10 @@ pub struct NlProblem {
     pub g_l: Vec<Number>,
     pub g_u: Vec<Number>,
     pub x0: Vec<Number>,
-    /// Initial constraint multipliers from the `d` segment, in pounce's
-    /// sign (`L = f + lambda' g`): the negation of the AMPL duals the
-    /// file carries (gh#1033).
+    /// Initial constraint multipliers from the `d` segment, in the engine's
+    /// sign (`L = f + lambda' g`, `f` negated for a maximize model):
+    /// `-sigma * dual` for the AMPL duals the file carries, the inverse of
+    /// the CLI's `.sol` writer (gh#1033).
     pub lambda0: Vec<Number>,
     /// AMPL suffix dictionaries. Variable / constraint / objective
     /// suffixes are stored as dense vectors (length n / m / num_obj)
@@ -1592,6 +1593,16 @@ pub fn parse_nl_string(txt: String, use_quadratic: bool) -> Result<NlProblem, St
         obj_nonlinear.quad().is_some() || con_nonlinear.iter().any(|b| b.quad().is_some());
     let kept_src = any_recognized.then(|| Arc::clone(&src));
 
+    // A `d` entry was stored as `-dual` above, which is the engine's
+    // multiplier only for a minimize model. A maximize model is solved as
+    // `min -f`, and the CLI writes its `.sol` dual as `-sigma * lambda`
+    // (sigma = -1, gh#959), so the inverse is `lambda = -sigma * dual`.
+    // Applied here because the `O` segment fixing the sense may follow `d`.
+    if !minimize {
+        for v in lambda0.iter_mut() {
+            *v = -*v;
+        }
+    }
     Ok(NlProblem {
         n,
         m,
@@ -6140,10 +6151,36 @@ impl TNLP for NlTnlp {
         // back; `OrigIpoptNlp::get_starting_point` then compresses them into
         // the algorithm-side y_c / y_d. Without this the warm start silently
         // began from zero multipliers, discarding the parsed duals. (Code
-        // review 2026-06 item M19.) The `.nl` `d` segment carries no bound
-        // multipliers, so `z_l`/`z_u` are left to the engine's defaults.
+        // review 2026-06 item M19.)
         if sp.init_lambda {
             sp.lambda.copy_from_slice(&self.prob.lambda0);
+        }
+        // Bound multipliers come from the `ipopt_zL_in` / `ipopt_zU_in`
+        // variable suffixes, as in Ipopt's `AmplTNLP::get_starting_point`:
+        // `z_L = sigma * zL_in`, `z_U = -sigma * zU_in` (sigma = -1 for a
+        // maximize model) — the inverse of the CLI's `ipopt_zL_out` /
+        // `ipopt_zU_out`, so a `.sol` result fed back in round-trips. A
+        // suffix the file does not carry leaves that block to the engine's
+        // defaults, as before.
+        if sp.init_z {
+            let sigma = if self.prob.minimize { 1.0 } else { -1.0 };
+            let sfx = &self.prob.suffixes;
+            for (name, out, sign) in [
+                ("ipopt_zL_in", &mut *sp.z_l, sigma),
+                ("ipopt_zU_in", &mut *sp.z_u, -sigma),
+            ] {
+                // A writer may emit an all-integer suffix as integer-kind.
+                let vals: Option<Vec<Number>> = sfx.var_real.get(name).cloned().or_else(|| {
+                    sfx.var_int
+                        .get(name)
+                        .map(|v| v.iter().map(|&x| x as Number).collect())
+                });
+                if let Some(v) = vals.filter(|v| v.len() == out.len()) {
+                    for (o, x) in out.iter_mut().zip(v) {
+                        *o = sign * x;
+                    }
+                }
+            }
         }
         true
     }

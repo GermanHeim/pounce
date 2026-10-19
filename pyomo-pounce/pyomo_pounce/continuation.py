@@ -10,7 +10,11 @@ a second implementation:
   (:func:`pyomo_pounce.sens_retain_kkt`);
 * the **warm transfer** is the solved model's own ``Var`` values plus
   the ``dual`` / ``ipopt_zL_in`` / ``ipopt_zU_in`` suffixes, which the
-  solver plugin already reads under ``warm_start_init_point=yes``;
+  solver plugin reads under ``warm_start_init_point=yes`` -- on the
+  in-process path and, since gh#1033, the ``.nl`` path as well. They are
+  read only if the model declares them (``Suffix(direction=IMPORT_EXPORT)``
+  for ``dual``, ``EXPORT`` for the ``_in`` pair, copied from the ``_out``
+  results); this module does not declare or copy them for you;
 * the **corrector** is an ordinary ``SolverFactory("pounce").solve``.
 
 Usage -- an MPC horizon shift, the case pounce#608 names::
