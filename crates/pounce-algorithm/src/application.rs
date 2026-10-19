@@ -9132,11 +9132,18 @@ fn sqp_tnlp_warm_start(nlp_rc: &Rc<RefCell<dyn IpoptNlp>>) -> Option<crate::sqp:
             return None;
         }
         let finite = |v: Vec<Number>| -> Vec<Number> {
-            v.into_iter().map(|a| if a.is_finite() { a } else { 0.0 }).collect()
+            v.into_iter()
+                .map(|a| if a.is_finite() { a } else { 0.0 })
+                .collect()
         };
         let mut lambda_g = finite(dense(&y_c));
         lambda_g.extend(finite(dense(&y_d)));
-        (finite(dense(&z_l)), finite(dense(&z_u)), dense(&x), lambda_g)
+        (
+            finite(dense(&z_l)),
+            finite(dense(&z_u)),
+            dense(&x),
+            lambda_g,
+        )
     };
     let lambda_x = crate::sqp::ipopt_adapter::pack_bound_multipliers(nlp_rc, &z_l, &z_u);
     Some(crate::sqp::SqpIterates {
