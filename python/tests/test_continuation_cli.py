@@ -15,15 +15,29 @@ import sys
 
 import pytest
 
-from pounce._continuation_cli import (
-    PathManifest,
-    parse_sol,
-    rewrite_nl_initial_point,
-    trace_manifest,
-)
-
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.abspath(os.path.join(_HERE, "..", ".."))
+
+try:
+    from pounce import _continuation_cli as _cc
+except ImportError:
+    # The driver is pure Python, but `import pounce` loads the compiled
+    # extension. Without it (a source checkout that was never built), load
+    # the module file directly so the format tests below still run.
+    import importlib.util
+
+    _spec = importlib.util.spec_from_file_location(
+        "_continuation_cli",
+        os.path.join(_ROOT, "python", "pounce", "_continuation_cli.py"),
+    )
+    _cc = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_cc)
+
+PathManifest = _cc.PathManifest
+parse_sol = _cc.parse_sol
+parse_sol_suffixes = _cc.parse_sol_suffixes
+rewrite_nl_initial_point = _cc.rewrite_nl_initial_point
+trace_manifest = _cc.trace_manifest
 _FIXTURES = os.path.join(_ROOT, "crates", "pounce-cli", "tests", "fixtures")
 
 
@@ -169,6 +183,50 @@ def test_rewrite_checks_the_lengths_against_the_model(tmp_path):
                                  duals=[0.1, 0.2])
 
 
+def _segment(lines, header):
+    """The ``index value`` lines of the segment headed `header`."""
+    h = lines.index(header)
+    count = int(header.split()[1])
+    return lines[h + 1:h + 1 + count]
+
+
+def test_rewrite_writes_the_bound_multiplier_suffixes(tmp_path):
+    """gh#1033: the bound multipliers ride the real variable suffixes
+    `ipopt_zL_in` / `ipopt_zU_in` (`S4 <count> <name>`, then sparse
+    `index value` lines), replacing any segment of those names the source
+    already had and leaving every other suffix alone."""
+    text = _NL + ("S4 2 ipopt_zL_in\n0 9.0\n1 9.0\n"
+                  "S0 1 sosno\n1 3\n")
+    dst = str(tmp_path / "out.nl")
+    rewrite_nl_initial_point(_src(tmp_path, text), dst, primals=[1.0, 2.0],
+                             z_l=[2.0, 0.0], z_u=[0.0, -4.0])
+    lines = open(dst).read().split("\n")
+    heads = [ln for ln in lines if ln[:1] == "S" and ln[1:2].isdigit()]
+    # One segment per name: the stale `ipopt_zL_in` is gone, not shadowed,
+    # and the unrelated integer suffix is copied through with its entry.
+    assert sorted(heads) == ["S0 1 sosno", "S4 1 ipopt_zL_in",
+                             "S4 1 ipopt_zU_in"]
+    assert _segment(lines, "S0 1 sosno") == ["1 3"]
+    # Zero entries are the suffix default, so they are left out.
+    assert _segment(lines, "S4 1 ipopt_zL_in") == ["0 2.0"]
+    assert _segment(lines, "S4 1 ipopt_zU_in") == ["1 -4.0"]
+    assert "9.0" not in " ".join(lines)
+
+
+def test_rewrite_leaves_existing_bound_suffixes_when_none_are_given(tmp_path):
+    text = _NL + "S4 1 ipopt_zL_in\n0 9.0\n"
+    dst = str(tmp_path / "out.nl")
+    rewrite_nl_initial_point(_src(tmp_path, text), dst, primals=[1.0, 2.0])
+    lines = open(dst).read().split("\n")
+    assert _segment(lines, "S4 1 ipopt_zL_in") == ["0 9.0"]
+
+
+def test_rewrite_checks_the_bound_multiplier_lengths(tmp_path):
+    with pytest.raises(ValueError, match="ipopt_zU_in"):
+        rewrite_nl_initial_point(_src(tmp_path), str(tmp_path / "o.nl"),
+                                 z_l=[0.0, 0.0], z_u=[1.0])
+
+
 def test_rewrite_rejects_a_binary_nl(tmp_path):
     p = tmp_path / "b.nl"
     p.write_text("b3 1 1 0\n 2 1 1 0 1\n")
@@ -187,6 +245,16 @@ def test_parse_sol_splits_duals_from_primals(tmp_path):
     duals, primals = parse_sol(str(p), 3, 2)
     assert duals == [10.0, 11.0]
     assert primals == [1.0, 2.0, 3.0]
+
+
+def test_parse_sol_suffixes_reads_sparse_blocks(tmp_path):
+    p = tmp_path / "s.sol"
+    p.write_text("POUNCE: done\n\nOptions\n3\n0\n1\n0\n0\n0\n2\n2\n"
+                 "1.0\n2.0\nobjno 0 0\n"
+                 "suffix 4 1 13 0 0\nipopt_zL_out\n0 2.5e0\n"
+                 "suffix 4 1 13 0 0\nipopt_zU_out\n1 -4.0e0\n")
+    sfx = parse_sol_suffixes(str(p))
+    assert sfx == {"ipopt_zL_out": {0: 2.5}, "ipopt_zU_out": {1: -4.0}}
 
 
 def test_parse_sol_rejects_a_non_sol_file(tmp_path):
@@ -253,6 +321,73 @@ def test_warm_transfer_writes_duals_in_the_sol_sign(tmp_path):
     transferred = float(lines[d + 1].split()[1])
     assert sol_duals[0] == pytest.approx(2.0, abs=1e-6)
     assert transferred == pytest.approx(sol_duals[0], abs=1e-12)
+
+
+def _warm_bound_transfer(tmp_path, fixture, options):
+    """Trace `fixture` twice and return ``(zL_out, zU_out)`` of the first
+    point's `.sol` and ``(zL_in, zU_in)`` of the second point's `.nl`, all
+    dense."""
+    src = os.path.join(_FIXTURES, fixture)
+    if not os.path.exists(src):
+        pytest.skip("fixture not present")
+    for name in ("p0.nl", "p1.nl"):
+        shutil.copy(src, tmp_path / name)
+    man = PathManifest.load(_write(tmp_path, {
+        "version": 1,
+        "points": [{"model": "p0.nl"}, {"model": "p1.nl"}],
+        "options": options,
+    }))
+    trace = trace_manifest(man, binary=_CLI, workdir=str(tmp_path))
+    assert trace["n_converged"] == 2
+    lines = (tmp_path / "step0001.nl").read_text().split("\n")
+    n = int(lines[1].split()[0])
+    sol = parse_sol_suffixes(str(tmp_path / "step0000.sol"))
+
+    def dense(entries):
+        v = [0.0] * n
+        for k, x in entries.items():
+            v[k] = x
+        return v
+
+    def seg(name):
+        head = [ln for ln in lines if ln.startswith("S4 ")
+                and ln.split()[2] == name]
+        assert len(head) == 1, f"expected one {name} segment: {head}"
+        return dense({int(a): float(b) for a, b in
+                      (ln.split() for ln in _segment(lines, head[0]))})
+
+    return ((dense(sol["ipopt_zL_out"]), dense(sol["ipopt_zU_out"])),
+            (seg("ipopt_zL_in"), seg("ipopt_zU_in")))
+
+
+@needs_cli
+def test_warm_transfer_writes_bound_multipliers_minimize(tmp_path):
+    """gh#1033: the previous point's bound multipliers reach the next
+    model as `ipopt_zL_in` / `ipopt_zU_in`, equal to the previous `.sol`'s
+    `ipopt_zL_out` / `ipopt_zU_out` -- the two pairs share a sign, so a
+    sign slip in the transfer shows as a mismatch. `boxed_qp_min.nl` is
+    `min (x - 3)^2` on `[0, 1]`: the upper bound is active with
+    `df/dx = -4`, so `ipopt_zU_out = -4` and cannot hide at zero."""
+    (zl_out, zu_out), (zl_in, zu_in) = _warm_bound_transfer(
+        tmp_path, "boxed_qp_min.nl",
+        {"print_level": "0", "sb": "yes", "solver_selection": "nlp"})
+    assert zu_out[0] == pytest.approx(-4.0, abs=1e-5)
+    assert zl_in == pytest.approx(zl_out, abs=1e-12)
+    assert zu_in == pytest.approx(zu_out, abs=1e-12)
+
+
+@needs_cli
+def test_warm_transfer_writes_bound_multipliers_maximize(tmp_path):
+    """The maximize twin: `wyndor_max_boxed.nl` is `max 3x0 + 5x1` with
+    `x0 <= 1.5` active and `df/dx0 = 3`, so `ipopt_zU_out[0] = +3` (gh#959)
+    and the transfer must carry it unchanged -- the reader applies the
+    sense, not the driver."""
+    (zl_out, zu_out), (zl_in, zu_in) = _warm_bound_transfer(
+        tmp_path, "wyndor_max_boxed.nl",
+        {"print_level": "0", "sb": "yes", "solver_selection": "nlp"})
+    assert zu_out[0] == pytest.approx(3.0, abs=1e-5)
+    assert zl_in == pytest.approx(zl_out, abs=1e-12)
+    assert zu_in == pytest.approx(zu_out, abs=1e-12)
 
 
 @needs_cli

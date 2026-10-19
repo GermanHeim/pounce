@@ -268,6 +268,18 @@ changes.
   iteration-0 iterate equals the seed and the re-solve takes 0 iterations.
   Pinned by `crates/pounce-algorithm/tests/sqp_warm_start_user_space.rs`.
   The working set is unchanged.
+- **`pounce-continue` transfers bound multipliers, not just `x` and `d`.** The
+  warm transfer wrote the previous point's primal and constraint duals into the
+  next model and dropped its bound multipliers (documented as "this driver does
+  not write them yet"). It now copies the previous `.sol`'s `ipopt_zL_out` /
+  `ipopt_zU_out` into `ipopt_zL_in` / `ipopt_zU_in` `S4` segments of the next
+  `.nl`, replacing any the source already carried. The `_out` and `_in`
+  suffixes share one sign convention (`σ·z_L`, `−σ·z_U`), and the reader
+  applies the sense (gh#1033), so the copy is exact for minimize and maximize
+  models. They are read from the `.sol` because the JSON report carries no
+  bound multipliers. Under the default `warm_start_recentering=residual` the
+  engine still re-derives them from the transferred point. The van der Pol
+  measurement in `docs/src/continuation.md` predates this and was not re-run.
 - **`--minima` `.sol` files carry `ipopt_zL_out` / `ipopt_zU_out`.** The
   ranked `.sol` files were written with no suffix blocks, so a Pyomo
   `model.ipopt_zL_out` / AMPL `.rc` read after a `--minima` run came back empty
