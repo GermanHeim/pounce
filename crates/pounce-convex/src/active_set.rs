@@ -1769,7 +1769,9 @@ fn runaway_overrides(status: QpStatus, x: &[f64], prob: &QpProblem) -> bool {
     match status {
         QpStatus::NumericalFailure | QpStatus::IterationLimit => recession_ray_certifies(prob, x),
         QpStatus::Optimal | QpStatus::OptimalInaccurate => {
-            inf_norm(x) > RUNAWAY_FACTOR * data_scale(prob) && recession_ray_certifies(prob, x)
+            inf_norm(x) > RUNAWAY_FACTOR * data_scale(prob)
+                && !stationary_along_own_direction(prob, x)
+                && recession_ray_certifies(prob, x)
         }
         _ => false,
     }
@@ -1782,16 +1784,69 @@ fn runaway_overrides(status: QpStatus, x: &[f64], prob: &QpProblem) -> bool {
 /// beyond (measured, gh#1034).
 const RUNAWAY_FACTOR: f64 = 1e12;
 
-/// Largest magnitude among the model's right-hand sides and finite bounds, at
-/// least 1 — the scale a solved iterate is compared to in [`runaway_overrides`].
+/// Largest magnitude among the model's right-hand sides, finite bounds, and
+/// each row's `|rhs_j|/‖row_j‖∞`, at least 1 — the scale a solved iterate is
+/// compared to in [`runaway_overrides`].
+///
+/// The per-row ratio is where that row's boundary sits along its own normal,
+/// and it is what a right-hand side alone misses: `1e-12·x₁ ≤ 1` has `h = 1`
+/// and an optimum at `x₁ = 1e12`, which without it read as a runaway (found in
+/// review of gh#1034).
 fn data_scale(prob: &QpProblem) -> f64 {
     let finite = |v: &f64| v.is_finite() && v.abs() < 1e19;
+    let row_reach = |rows: &[Triplet], rhs: &[f64]| -> Vec<f64> {
+        let norms = row_inf_norms(rows, rhs.len());
+        rhs.iter()
+            .zip(&norms)
+            .filter(|(r, nrm)| **nrm > 0.0 && finite(r))
+            .map(|(r, nrm)| r.abs() / nrm)
+            .filter(|v| v.is_finite())
+            .collect()
+    };
+    let reach_a = row_reach(&prob.a, &prob.b);
+    let reach_g = row_reach(&prob.g, &prob.h);
     prob.b
         .iter()
         .chain(&prob.h)
         .chain(prob.lb.iter().filter(|v| finite(v)))
         .chain(prob.ub.iter().filter(|v| finite(v)))
+        .chain(&reach_a)
+        .chain(&reach_g)
         .fold(1.0_f64, |a, v| a.max(v.abs()))
+}
+
+/// `‖row_j‖∞` for each of `m` rows of a triplet matrix.
+fn row_inf_norms(rows: &[Triplet], m: usize) -> Vec<f64> {
+    let mut out = vec![0.0_f64; m];
+    for t in rows {
+        if t.row < m {
+            out[t.row] = out[t.row].max(t.val.abs());
+        }
+    }
+    out
+}
+
+/// Is a solved iterate `x` the minimizer of the objective along its own
+/// direction `u = x/‖x‖∞`, to within the factor a runaway cannot reach?
+///
+/// Along `u` the objective is `f(tu) = t·cᵀu + ½t²·uᵀPu`, so with descent
+/// `cᵀu < 0` and curvature `κ = uᵀPu > 0` its minimizer is `t* = |cᵀu|/κ`.
+/// A genuine runaway stopped nowhere near that: its `κ` is round-off, and
+/// `κ·‖x‖∞ ≪ |cᵀu|`. A bounded problem whose optimum is simply far out —
+/// `P = diag(1, 1e-22)`, `c = (0, −1)`, optimum at `1e22` — has
+/// `κ·‖x‖∞ ≈ |cᵀu|`, and its solved status stands even though `κ` is under
+/// the `1e-20` floor (found in review of gh#1034). The `1e-6` leaves six orders
+/// of room on the runaway side; the measured runaways sit at `κ·‖x‖ ≈ 1e-17`.
+fn stationary_along_own_direction(prob: &QpProblem, x: &[f64]) -> bool {
+    let xn = inf_norm(x);
+    if !xn.is_finite() || xn == 0.0 || x.len() != prob.n {
+        return false;
+    }
+    let u: Vec<f64> = x.iter().map(|v| v / xn).collect();
+    let pu = crate::ipm::p_mul_add_compensated(prob, &u, vec![0.0; prob.n]);
+    let kappa = crate::ipm::dot_compensated(&u, &pu);
+    let slope = crate::ipm::dot_compensated(&prob.c, &u);
+    kappa > 0.0 && kappa * xn >= 1e-6 * slope.abs()
 }
 
 /// Is the direction of `x` a certified recession ray of `prob`?
@@ -2744,6 +2799,13 @@ fn ray_certifies_unbounded(prob: &QpProblem, d: &[f64]) -> bool {
     // a finite-precision null-space computation, so demanding `tol` here would
     // reject genuine certificates.
     let slack = 1e-7 * dn;
+    // Each row's slack is additionally scaled by that row's own size when it is
+    // below 1. An absolute slack makes a row with coefficients under `1e-7`
+    // invisible: `1e-12·x₁ ≤ 1` passed `u = (0, 1)` as a recession direction,
+    // and the bounded QP behind it was reported unbounded (found in review of
+    // gh#1034). Rows of norm ≥ 1 keep the slack they had, so this only ever
+    // rejects a certificate the old test accepted.
+    let row_slack = |nrm: f64| slack * nrm.min(1.0);
 
     let mut pd = vec![0.0; prob.n];
     prob.p_mul(d, &mut pd);
@@ -2752,7 +2814,12 @@ fn ray_certifies_unbounded(prob: &QpProblem, d: &[f64]) -> bool {
     for t in &prob.a {
         ad[t.row] += t.val * d[t.col];
     }
-    if ad.iter().any(|v| v.abs() > slack) {
+    let a_norms = row_inf_norms(&prob.a, prob.m_eq());
+    if ad
+        .iter()
+        .zip(&a_norms)
+        .any(|(v, &nrm)| v.abs() > row_slack(nrm))
+    {
         return false;
     }
 
@@ -2760,7 +2827,8 @@ fn ray_certifies_unbounded(prob: &QpProblem, d: &[f64]) -> bool {
     for t in &prob.g {
         gd[t.row] += t.val * d[t.col];
     }
-    if gd.iter().any(|&v| v > slack) {
+    let g_norms = row_inf_norms(&prob.g, prob.m_ineq());
+    if gd.iter().zip(&g_norms).any(|(&v, &nrm)| v > row_slack(nrm)) {
         return false;
     }
 

@@ -175,6 +175,56 @@ fn mixed_scale_bounded_is_not_unbounded() {
     }
 }
 
+/// Bounded QPs whose optimum is far out *because the model's own numbers put it
+/// there*: a row with tiny coefficients (`1e-12·x₁ ≤ 1` puts `x₁*` at `1e12`),
+/// or a strictly convex `P` with a tiny eigenvalue (`diag(1, λ)`, `x₁* = 1/λ`).
+///
+/// Found in review of the gh#1034 fix: every one of these read
+/// `DualInfeasible` from the driver while `main` reported `Optimal`. Two holes:
+/// `ray_certifies_unbounded` held `Au`/`Gu` to an *absolute* `1e-7` slack, so
+/// a row whose coefficients sit below it is invisible to the certificate; and
+/// the runaway gate measured "far" against the right-hand sides alone, so an
+/// optimum at `h/‖g‖` looked like a runaway. The `diag(1, λ)` cases pass the
+/// IPM's `1e-20` floor for `λ ≤ 1e-20` — the iterate is the genuine minimizer
+/// along `u`, which is what a solved status may not be overturned on.
+///
+/// None of the controls above varies the row scale or puts the optimum past
+/// `1e12·data`, so they could not see either hole.
+#[test]
+fn far_but_bounded_optima_are_not_unbounded() {
+    let mut cases: Vec<(String, QpProblem)> = vec![];
+    for a in [1e-8, 1e-10, 1e-12, 1e-13] {
+        // min ½x₀² − x₁  s.t.  a·x₁ ≤ 1   (x* = (0, 1/a))
+        let mut ineq = unconstrained(&[vec![1.0, 0.0], vec![0.0, 0.0]], &[0.0, -1.0]);
+        ineq.g = vec![Triplet::new(0, 1, a)];
+        ineq.h = vec![1.0];
+        cases.push((format!("{a:e}·x₁ ≤ 1"), ineq));
+        // min ½x₀² − x₁  s.t.  a·x₁ = 1   (x* = (0, 1/a))
+        let mut eq = unconstrained(&[vec![1.0, 0.0], vec![0.0, 0.0]], &[0.0, -1.0]);
+        eq.a = vec![Triplet::new(0, 1, a)];
+        eq.b = vec![1.0];
+        cases.push((format!("{a:e}·x₁ = 1"), eq));
+    }
+    for lam in [1e-14, 1e-18, 1e-22, 1e-26] {
+        let p = vec![vec![1.0, 0.0], vec![0.0, lam]];
+        cases.push((
+            format!("P = diag(1, {lam:e})"),
+            unconstrained(&p, &[0.0, -1.0]),
+        ));
+    }
+    // The engine's own `Unbounded` ray takes the same certificate, with no
+    // runaway gate in front of it: `min ½x₀² − 1e-6·x₁  s.t.  1e-14·x₁ ≤ 1e-6`
+    // (bounded, `x₁* = 1e8`) read `DualInfeasible` even before gh#1034, through
+    // the engine ray `(0, 1)` and the absolute `Gu` slack.
+    let mut tiny = unconstrained(&[vec![1.0, 0.0], vec![0.0, 0.0]], &[0.0, -1e-6]);
+    tiny.g = vec![Triplet::new(0, 1, 1e-14)];
+    tiny.h = vec![1e-6];
+    cases.push(("1e-14·x₁ ≤ 1e-6, engine ray".into(), tiny));
+    for (what, prob) in cases {
+        assert_ne!(active_set(&prob), QpStatus::DualInfeasible, "{what}");
+    }
+}
+
 /// Tiny deterministic generator so the sweep is reproducible without a dep.
 struct Lcg(u64);
 impl Lcg {

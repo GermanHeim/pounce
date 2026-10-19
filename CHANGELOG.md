@@ -223,7 +223,13 @@ changes.
   a strictly convex `P + 1e-10·I` unbounded. All six families now match the IPM
   on every instance, and 1,186 bounded controls (blocked rays, `c ∈ range(P)`,
   `P + εI` for `ε` down to `1e-12`, gh #293's mixed scales) report exactly what
-  they did before. Pinned by
+  they did before. A bounded QP whose optimum is merely far out is not mistaken
+  for a runaway: the certificate holds each row to a slack scaled by that row's
+  own size (a `1e-14·x₁ ≤ 1e-6` row used to be invisible to it, and that model
+  read unbounded even before this change), the runaway threshold counts where
+  each row's boundary sits (`|rhs|/‖row‖`), and a solved iterate that is the
+  minimizer along its own direction (`P = diag(1, 1e-22)`, optimum at `1e22`)
+  keeps its `Optimal`. Pinned by
   `crates/pounce-convex/tests/issue1034_unbounded_singular_qp_status.rs`.
 - **LPs with duplicated, round-off-conflicting cuts solve again on both convex
   engines (gh#1023).** An outer-approximation master LP (67 columns, 426 rows)
