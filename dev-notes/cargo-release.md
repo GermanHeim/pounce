@@ -125,9 +125,12 @@ was first swept 27 commits behind its tag, and 0.12.0 ran from a
    `benchmark-rerun`, not `benchmark`: the incremental target skips any
    suite whose `pounce.json` is newer than the binary and its inputs, which
    in a reused tree is a stale result silently carried forward.
-2. **Check what ran.** `target/release/pounce --about` must print the
-   `origin/main` commit, and the report's Provenance row must read that
-   SHA with no `-dirty`. Every suite's `<suite>/pounce.env.json` records
+2. **Check what ran.** The report's "POUNCE binary" row (from
+   `target/release/pounce --about`) must name the `origin/main` commit,
+   and its POUNCE row must read a tree with no `-dirty`. The two rows can
+   name different commits legitimately: a report regenerated after a
+   harness or reference fix is generated from the fix's commit, while the
+   numbers still come from the swept binary. Every suite's `<suite>/pounce.env.json` records
    the time limit and thread settings it ran under; keep them the same as
    the previous release's (0.12.0: 300 s, threads unpinned) or say in the
    commit which changed — otherwise timing deltas are not comparable.
