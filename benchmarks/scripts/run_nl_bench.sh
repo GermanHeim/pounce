@@ -84,6 +84,16 @@ parse_nm() {
   awk 'NR==2 {gsub(/[\t#].*/,""); print $1, $2; exit}' "$nl"
 }
 
+# Does the .nl declare its (first) objective as maximize? The `O<i> <sigma>`
+# segment header carries sigma = 1 for maximize. Ipopt's AMPL driver minimizes
+# -f and prints that internal value, so on a maximize model its "Objective"
+# line has the opposite sign to the model's own; pounce reports the declared
+# sense (gh#959). The ipopt (AMPL-protocol) row is negated below so both rows are recorded in
+# the model's sense and the report compares like with like.
+nl_is_maximize() {
+  [ "$(grep -a -m1 '^O[0-9]' "$1" | awk '{print $2}')" = "1" ]
+}
+
 # Map ipopt's free-form termination message → cutest-style status label.
 ipopt_status_from_log() {
   local log="$1"
@@ -287,6 +297,9 @@ run_one() {
   local obj iter
   obj=$(extract_obj "$log"); obj=${obj:-null}
   iter=$(extract_iters "$log"); iter=${iter:-0}
+  if [ "$ampl_protocol" = "yes" ] && [ "$obj" != "null" ] && nl_is_maximize "$nl"; then
+    case "$obj" in -*) obj=${obj#-} ;; +*) obj="-${obj#+}" ;; *) obj="-$obj" ;; esac
+  fi
 
   # JSON solver label: "ipopt" for the AMPL-protocol invocation (so the
   # report's load_domain_results() finds it under the canonical key). A
