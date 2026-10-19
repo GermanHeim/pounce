@@ -9044,6 +9044,10 @@ fn sqp_user_iterate(
 ) -> crate::intermediate::UserIterate {
     use pounce_linalg::dense_vector::DenseVectorSpace;
 
+    // `finalize_solution_z_*` read the compressed x_l / x_u spaces (one
+    // entry per finite bound, via `x_l_map`), not one entry per variable;
+    // `split_bound_multipliers` does that split, as crossover does.
+    let (zl, zu) = crate::sqp::ipopt_adapter::split_bound_multipliers(nlp, lambda_x);
     let nlp = nlp.borrow();
     let n_alg = nlp.n() as usize;
     let m_eq = nlp.m_eq() as usize;
@@ -9063,13 +9067,11 @@ fn sqp_user_iterate(
     };
 
     let x_full = nlp.finalize_solution_x(&dv(&x_space, x));
-    let zl: Vec<Number> = lambda_x.iter().map(|v| v.max(0.0)).collect();
-    let zu: Vec<Number> = lambda_x.iter().map(|v| (-v).max(0.0)).collect();
-    let mut z_l = nlp.finalize_solution_z_l(&dv(&x_space, &zl));
+    let mut z_l = nlp.finalize_solution_z_l(&dv(&DenseVectorSpace::new(zl.len() as Index), &zl));
     if z_l.is_empty() {
         z_l = vec![0.0; n_user];
     }
-    let mut z_u = nlp.finalize_solution_z_u(&dv(&x_space, &zu));
+    let mut z_u = nlp.finalize_solution_z_u(&dv(&DenseVectorSpace::new(zu.len() as Index), &zu));
     if z_u.is_empty() {
         z_u = vec![0.0; n_user];
     }
@@ -9132,13 +9134,20 @@ fn finalize_via_sqp(
     let x_vec: Vec<Number> = nlp_borrow.finalize_solution_x(&x_dv);
     debug_assert_eq!(x_vec.len(), n);
 
-    // λ_x is packed signed (z_l − z_u). Split for lift.
-    let mut z_l_compressed = x_space.make_new_dense();
-    let mut z_u_compressed = x_space.make_new_dense();
-    let zl_vals: Vec<Number> = res.lambda_x.iter().map(|v| v.max(0.0)).collect();
-    let zu_vals: Vec<Number> = res.lambda_x.iter().map(|v| (-v).max(0.0)).collect();
-    z_l_compressed.set_values(&zl_vals);
-    z_u_compressed.set_values(&zu_vals);
+    // λ_x is packed signed (z_l − z_u), one entry per variable. Split it
+    // into the compressed x_l / x_u spaces `finalize_solution_z_*` read
+    // (one entry per finite bound): splitting per variable put each
+    // multiplier on the wrong variable whenever an unbounded one came
+    // first, as crossover's `split_bound_multipliers` call already avoids.
+    let (zl_vals, zu_vals) = crate::sqp::ipopt_adapter::split_bound_multipliers(nlp, &res.lambda_x);
+    let mut z_l_compressed = DenseVectorSpace::new(zl_vals.len() as Index).make_new_dense();
+    let mut z_u_compressed = DenseVectorSpace::new(zu_vals.len() as Index).make_new_dense();
+    if !zl_vals.is_empty() {
+        z_l_compressed.set_values(&zl_vals);
+    }
+    if !zu_vals.is_empty() {
+        z_u_compressed.set_values(&zu_vals);
+    }
     // `finalize_solution_*` (not `pack_*`): report unscaled-Lagrangian duals,
     // dividing out `obj_scale_factor` — see `finalize_via_orig_nlp` (F1).
     let mut z_l = nlp_borrow.finalize_solution_z_l(&z_l_compressed);

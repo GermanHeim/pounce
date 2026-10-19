@@ -220,6 +220,14 @@ changes.
   `--require-optimal`. `--minima` wrote the best minimum's JSON `lambda`
   without the sense factor its `.sol` and a plain solve apply, and reported
   `problem.minimize: true`.
+- **The active-set SQP arm reports its bound multipliers.** `finalize_via_sqp`
+  and the live-inspector iterate split the signed per-variable `lambda_x`
+  per variable and handed it to `finalize_solution_z_*`, which read the
+  compressed x_l / x_u spaces; with an unbounded variable ahead of a bounded
+  one each multiplier landed on the wrong variable or was dropped. Separately
+  the CLI backfilled an SQP solve's `x` / `lambda` for the `.sol` but not its
+  bound multipliers, so the file had no `ipopt_zL_out` / `ipopt_zU_out`
+  entries. Both now match the NLP arm.
 - **GAMS C link: the active-set-SQP warm start reads maximize marginals with
   the right sign.** The working-set reconstruction classified persisted
   marginals without `obj_sign`, so every active side of a maximize model came

@@ -2154,6 +2154,17 @@ fn real_main() -> ExitCode {
             *nominal_capture.borrow_mut() = Some(xl);
         }
     }
+    // The bound multipliers too, from the same `finalize_solution` lift:
+    // without them an SQP `.sol` carried no `ipopt_zL_out` / `ipopt_zU_out`
+    // at all while every other engine's did. Empty blocks (a non-
+    // `OrigIpoptNlp` model) are left alone, as below.
+    if bound_mult_capture.borrow().is_none() {
+        if let Some((z_l, z_u)) = counting.borrow().captured_bound_mults() {
+            if !z_l.is_empty() || !z_u.is_empty() {
+                *bound_mult_capture.borrow_mut() = Some((z_l, z_u));
+            }
+        }
+    }
 
     // ...and OVERWRITE it, not merely backfill it, when a losing retry's
     // answer was thrown away and an earlier attempt's replayed.
