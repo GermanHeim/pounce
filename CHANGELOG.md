@@ -211,8 +211,19 @@ changes.
   component the residual reaches): the `presolve=no` duals wherever those are
   unique, a valid KKT set otherwise, on both the NLP and SQP arms and in both
   senses. A warm start seeds the reduced bounds from a dropped row's supplied
-  multiplier, so a `.sol` round-trips at `max_iter=0` while the primal stays
-  on its bounds. A singleton row coincident with a declared bound keeps its
+  multiplier, and from an eliminated column's bound multiplier by the chain
+  rule when no bound was transferred off it (a tie). A `.sol` fed back at
+  `max_iter=0` now returns exactly the duals `presolve=no` returns — the
+  supplied ones — under the *default* warm-start push too: that push moves
+  `x` about `1e-3` off its bounds, and every multiplier postsolve re-derives
+  (a consumed row's `λ`, a derived bound's `z`) read `∇f` there, so 4 of 12
+  model × presolve cases came back wrong (ELIM_NEG under elimination: `λ`
+  `-2` → `7e-16`, and `-1.992`; CHAIN: `[6, -3]` → `[3, 0]` with a `z_U` on
+  an undeclared bound) and 2 more carried a spurious `z_L = 1` on a derived
+  bound. Each presolve layer now records the warm start it served and, when
+  the solver hands its multipliers back unchanged, reports the ones it was
+  handed. A cold solve never records one; its duals are unchanged.
+  A singleton row coincident with a declared bound keeps its
   multiplier on the bound (row dual 0) — a degenerate pair, now pinned.
   `presolve` is off by default; `presolve=no` output is unchanged.
 - **`GetIpoptCurrentViolations` reports the user's problem, and honours

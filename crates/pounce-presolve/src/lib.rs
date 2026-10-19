@@ -46,10 +46,15 @@
 //!   supplied multiplier onto the reduced bounds of the variables it
 //!   touches (`a_ij·λ_i`), so the reduced start is stationary where the
 //!   supplied one was. A `.sol` round-trips through
-//!   `warm_start_init_point=yes max_iter=0` when the primal stays on its
-//!   active bounds (`warm_start_bound_push` / `_frac` near zero): the
-//!   default push moves it 1e-3 into the interior, off the active set the
-//!   recovery reads, and the duals then describe that non-optimal point.
+//!   `warm_start_init_point=yes max_iter=0` under any warm-start push: the
+//!   recovery above, the singleton hand-back, Phase 0's frames and
+//!   `linear_eq_elim`'s sweep all re-derive multipliers from stationarity
+//!   at the returned `x`, which the default push moved 1e-3 off its bounds,
+//!   so they would be `O(push)` off the supplied duals. Instead each layer
+//!   records the warm start it served and, when the solver hands back the
+//!   served multipliers unchanged, reports the ones it was handed — its
+//!   inbound map's exact inverse on that map's image (`warm_echo`). A cold
+//!   solve records none, so its postsolve is the recovery alone.
 //!   Primal point and objective are unaffected throughout.
 //! * **Phase 3** — structural LICQ check on the surviving equality
 //!   rows. Verdict is published via [`PresolveTnlp::licq_verdict`].
@@ -108,6 +113,7 @@ pub mod reduction_frame;
 pub mod redundant;
 pub mod trivial_elim;
 pub mod warm;
+mod warm_echo;
 
 pub use block_solve::{
     BlockEquations, BlockSolveError, BlockSolveOptions, BlockSolveOutcome, BlockSolver,
@@ -698,6 +704,11 @@ pub struct PresolveTnlp {
     /// What the derived-bound recovery did at the last `finalize_solution`.
     derived_bound_recovery: Option<dual_recovery::Outcome>,
 
+    /// The duals the last `get_starting_point` was handed and served, when
+    /// it served any: `finalize_solution` returns the handed ones when the
+    /// solver gives the served ones back unchanged (`warm_echo`).
+    served_warm_start: Option<warm_echo::ServedWarmStart>,
+
     /// What the most recent starting-point calls actually changed while
     /// projecting the inner seed into this wrapper's row space and box.
     /// Reset by session callers before each solve.
@@ -894,6 +905,7 @@ impl PresolveTnlp {
             bound_multiplier_overrides: Vec::new(),
             duals_rewritten: false,
             derived_bound_recovery: None,
+            served_warm_start: None,
             starting_point_projection_report: WarmProjectionReport::default(),
         }
     }
@@ -941,6 +953,7 @@ impl PresolveTnlp {
             bound_multiplier_overrides: Vec::new(),
             duals_rewritten: false,
             derived_bound_recovery: None,
+            served_warm_start: None,
             starting_point_projection_report: WarmProjectionReport::default(),
         }
     }
@@ -1171,6 +1184,104 @@ impl PresolveTnlp {
         Some(out)
     }
 
+    /// The original problem's duals when the solver handed back the warm
+    /// start this wrapper served without moving its duals: the ones the
+    /// caller supplied, `(lambda, z_l, z_u)` (see `warm_echo`). Every
+    /// re-derivation postsolve would otherwise do reads `∇f` at the returned
+    /// `x`, which the interior-point start pushed off the bounds the supplied
+    /// duals belong to. An entry the solver had to fill (a bound multiplier
+    /// supplied as 0 or not at all) is reported as filled when the model
+    /// declares that bound — what `presolve=no` reports — and as 0 on a
+    /// bound only presolve has. `None` on any other return.
+    fn echoed_warm_start(
+        &self,
+        sol: &Solution<'_>,
+    ) -> Option<(Vec<Number>, Vec<Number>, Vec<Number>)> {
+        let w = self.served_warm_start.as_ref()?;
+        if !w.echoed_by(sol.z_l, sol.z_u, sol.lambda) {
+            return None;
+        }
+        let s = self.state.as_ref()?;
+        let n = w.z_l_in.len();
+        if w.z_u_in.len() != n || s.decl_x_l.len() != n || s.bounds.x_l.len() != n {
+            return None;
+        }
+        let side = |z_in: &[Number], z_out: &[Number], got: &[Number], lower: bool| {
+            (0..n)
+                .map(|j| {
+                    let mut z = warm_echo::as_reported_z(z_in[j]);
+                    let declared = if lower {
+                        lower_bound_present(s.decl_x_l[j])
+                    } else {
+                        upper_bound_present(s.decl_x_u[j])
+                    };
+                    // A variable presolve fixed is not one the solver saw:
+                    // whatever it reports there is not a filled seed.
+                    let pinned =
+                        s.bounds.x_l[j] == s.bounds.x_u[j] && s.decl_x_l[j] != s.decl_x_u[j];
+                    if !warm_echo::is_seed(z_out[j]) && declared && !pinned && got[j].is_finite() {
+                        z += got[j];
+                    }
+                    z
+                })
+                .collect::<Vec<_>>()
+        };
+        Some((
+            w.lambda_in
+                .iter()
+                .map(|&l| warm_echo::as_reported_lambda(l))
+                .collect(),
+            side(&w.z_l_in, &w.z_l_out, sol.z_l, true),
+            side(&w.z_u_in, &w.z_u_out, sol.z_u, false),
+        ))
+    }
+
+    /// Record what `finalize_solution` is about to hand the inner TNLP
+    /// (overrides against the solver's `z`, whether any dual was rewritten,
+    /// the full-space `(x, λ)`), then hand it down.
+    #[allow(clippy::too_many_arguments)]
+    fn forward_finalized(
+        &mut self,
+        sol: Solution<'_>,
+        g_full: &[Number],
+        lambda_full: &[Number],
+        lambda_lifted: &[Number],
+        z_l_full: &[Number],
+        z_u_full: &[Number],
+        ip_data: &IpoptData,
+        ip_cq: &IpoptCq,
+    ) {
+        self.bound_multiplier_overrides = (0..z_l_full.len().min(sol.z_l.len()))
+            .filter(|&j| {
+                z_l_full[j].to_bits() != sol.z_l[j].to_bits()
+                    || z_u_full.get(j).map(|z| z.to_bits()) != sol.z_u.get(j).map(|z| z.to_bits())
+            })
+            .map(|j| (j, z_l_full[j], z_u_full.get(j).copied().unwrap_or(0.0)))
+            .collect();
+        self.duals_rewritten = !self.bound_multiplier_overrides.is_empty()
+            || lambda_full
+                .iter()
+                .zip(lambda_lifted)
+                .any(|(a, b)| a.to_bits() != b.to_bits());
+        // Stash the full-space (x, lambda) the inner TNLP is about to
+        // receive so the CLI can prefer it over its reduced-space
+        // capture when sizing the `.sol` / JSON dual block.
+        self.finalized_full_solution = Some((sol.x.to_vec(), lambda_full.to_vec()));
+        self.inner.borrow_mut().finalize_solution(
+            Solution {
+                status: sol.status,
+                x: sol.x,
+                z_l: z_l_full,
+                z_u: z_u_full,
+                g: g_full,
+                lambda: lambda_full,
+                obj_value: sol.obj_value,
+            },
+            ip_data,
+            ip_cq,
+        );
+    }
+
     /// Clear the record of transformations applied by
     /// [`TNLP::get_starting_point`]. A persistent caller resets this before
     /// each solve, then reads [`Self::starting_point_projection_report`].
@@ -1251,6 +1362,7 @@ impl PresolveTnlp {
     /// after fingerprint-invisible changes (FBBT tapes).
     pub fn invalidate(&mut self) {
         self.state = None;
+        self.served_warm_start = None;
         self.reset_starting_point_projection_report();
     }
 
@@ -2161,6 +2273,7 @@ impl TNLP for PresolveTnlp {
     fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
         // n is unchanged by presolve; lambda warm-start is masked to
         // kept rows only (caller already sized `sp.lambda` to m_out).
+        self.served_warm_start = None;
         let Some(_) = self.ensure_init() else {
             return false;
         };
@@ -2187,6 +2300,9 @@ impl TNLP for PresolveTnlp {
         if !ok {
             return false;
         }
+        // What the caller handed, before any seeding below (`warm_echo`).
+        let handed = (sp.init_z || sp.init_lambda)
+            .then(|| (z_l_full.clone(), z_u_full.clone(), lambda_full.clone()));
         let s = self.state.as_ref().expect("inited");
         // M24, inbound: a dropped singleton row's supplied multiplier is the
         // bound multiplier of the bound presolve made from it — the inverse
@@ -2323,6 +2439,28 @@ impl TNLP for PresolveTnlp {
         if let Some(value) = x_clamped_count {
             self.starting_point_projection_report.x_clamped_count = value;
         }
+        // Record what was served, so `finalize_solution` can recognise it
+        // coming back unchanged. An entry the solver ignores (`init_z` /
+        // `init_lambda` off) is recorded as NaN, i.e. "not a seed".
+        let served = handed.map(|(z_l_in, z_u_in, lambda_in)| warm_echo::ServedWarmStart {
+            z_l_in,
+            z_u_in,
+            lambda_in,
+            z_l_out: warm_echo::served_bound_multipliers(
+                sp.init_z,
+                sp.z_l,
+                &s.bounds.x_l,
+                &s.bounds.x_u,
+            ),
+            z_u_out: warm_echo::served_bound_multipliers(
+                sp.init_z,
+                sp.z_u,
+                &s.bounds.x_l,
+                &s.bounds.x_u,
+            ),
+            lambda_out: warm_echo::served_row_multipliers(sp.init_lambda, sp.lambda),
+        });
+        self.served_warm_start = served;
         true
     }
 
@@ -2463,6 +2601,30 @@ impl TNLP for PresolveTnlp {
                 matches!(s.info_inner.index_style, IndexStyle::Fortran),
             )
         };
+
+        // A warm start the solver handed back without moving its duals: the
+        // original problem's duals are the ones the caller supplied, not a
+        // re-derivation from stationarity at the pushed `x` (`warm_echo`).
+        if let Some((lambda_e, z_l_e, z_u_e)) = self.echoed_warm_start(&sol) {
+            tracing::debug!(
+                target: "pounce_presolve",
+                "presolve postsolve: the solver returned the served warm start unchanged; \
+                 reporting the supplied duals"
+            );
+            self.bound_multipliers_handed_to_rows.clear();
+            self.derived_bound_recovery = None;
+            self.forward_finalized(
+                sol,
+                &g_full,
+                &lambda_e,
+                &lambda_full,
+                &z_l_e,
+                &z_u_e,
+                ip_data,
+                ip_cq,
+            );
+            return;
+        }
 
         // Phase-0 (issue #53) multiplier recovery for dropped rows.
         // Walk the reduction stack top-down; for each frame, compute
@@ -2613,32 +2775,13 @@ impl TNLP for PresolveTnlp {
             &mut z_l_full,
             &mut z_u_full,
         );
-        self.bound_multiplier_overrides = (0..z_l_full.len().min(sol.z_l.len()))
-            .filter(|&j| {
-                z_l_full[j].to_bits() != sol.z_l[j].to_bits()
-                    || z_u_full.get(j).map(|z| z.to_bits()) != sol.z_u.get(j).map(|z| z.to_bits())
-            })
-            .map(|j| (j, z_l_full[j], z_u_full.get(j).copied().unwrap_or(0.0)))
-            .collect();
-        self.duals_rewritten = !self.bound_multiplier_overrides.is_empty()
-            || lambda_full
-                .iter()
-                .zip(&lambda_lifted)
-                .any(|(a, b)| a.to_bits() != b.to_bits());
-        // Stash the full-space (x, lambda) the inner TNLP is about to
-        // receive so the CLI can prefer it over its reduced-space
-        // capture when sizing the `.sol` / JSON dual block.
-        self.finalized_full_solution = Some((sol.x.to_vec(), lambda_full.clone()));
-        self.inner.borrow_mut().finalize_solution(
-            Solution {
-                status: sol.status,
-                x: sol.x,
-                z_l: &z_l_full,
-                z_u: &z_u_full,
-                g: &g_full,
-                lambda: &lambda_full,
-                obj_value: sol.obj_value,
-            },
+        self.forward_finalized(
+            sol,
+            &g_full,
+            &lambda_full,
+            &lambda_lifted,
+            &z_l_full,
+            &z_u_full,
             ip_data,
             ip_cq,
         );

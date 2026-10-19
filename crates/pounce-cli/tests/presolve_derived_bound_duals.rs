@@ -342,14 +342,57 @@ fn a_coincident_singleton_row_leaves_its_multiplier_on_the_declared_bound() {
     }
 }
 
-/// A `.sol` written through presolve, fed back as a warm start with zero
-/// iterations, comes back unchanged.
+/// The `.sol` duals and `ipopt_zL_out` / `ipopt_zU_out` of `a` and `b` agree
+/// over all `n` variables, whatever their `x`.
+fn same_duals(a: &Sol, b: &Sol, n: usize, tol: f64) -> bool {
+    let close = |p: f64, q: f64| (p - q).abs() <= tol * (1.0 + q.abs());
+    a.duals.len() == b.duals.len()
+        && a.duals.iter().zip(&b.duals).all(|(p, q)| close(*p, *q))
+        && (0..n).all(|j| {
+            close(entry(&a.zl, j), entry(&b.zl, j)) && close(entry(&a.zu, j), entry(&b.zu, j))
+        })
+}
+
+/// The warm starts the round trip runs: `max_iter=0` under the default
+/// warm-start push (the interior-point start moves `x` about `1e-3` off
+/// every bound it was supplied on) and under a near-zero one that keeps it
+/// there, and the same start left to iterate, where the solver moves the
+/// duals and postsolve's own recovery has to agree with `presolve=no`.
+const WARM_RUNS: [(&str, &[&str]); 3] = [
+    ("default_push", &["max_iter=0"]),
+    (
+        "tiny_push",
+        &[
+            "max_iter=0",
+            "warm_start_bound_push=1e-14",
+            "warm_start_bound_frac=1e-14",
+            "warm_start_slack_bound_push=1e-14",
+            "warm_start_slack_bound_frac=1e-14",
+        ],
+    ),
+    ("iterated", &[]),
+];
+
+/// A `.sol` written through presolve, fed back as a warm start, comes back
+/// with exactly the duals `presolve=no` returns for the same warm start —
+/// which, with zero iterations, are the supplied ones.
+///
+/// Before the fix the default push failed 4 of the 12 `max_iter=0` cases
+/// (ELIM_NEG under `elim`: supplied `λ = -2`, returned `7e-16`; under
+/// `elim_nobt`, `-1.992`; CHAIN under `on` and `elim`: supplied `[6, -3]`,
+/// returned `[3, -0]` with `z_U(x1) = 3` on a bound the model does not
+/// have): postsolve re-derived the multipliers the reduced problem does not
+/// carry from stationarity at the pushed `x`, where `∇f` is not the one the
+/// supplied duals balance. The 1e-14 push hid that by keeping `x` on its
+/// bounds. Now each presolve layer returns the duals it was handed when the
+/// solver hands back the ones it served (`warm_echo`).
 #[test]
 fn derived_bound_duals_round_trip_through_a_warm_start() {
+    let mut failures = Vec::new();
     for model in [&ELIM_NEG, &CHAIN, &VIA_BOUND] {
+        let n = model.centers.len();
         for (ps, ps_opts) in PRESOLVE {
             let opts = [&["solver_selection=nlp"][..], ps_opts].concat();
-            let n = model.centers.len();
             let (full, _, _) = solve(
                 &format!("rt_{}_{ps}_full", model.name),
                 &nl(model, false, &vec![0.1; n], ""),
@@ -367,37 +410,35 @@ fn derived_bound_duals_round_trip_through_a_warm_start() {
                     }
                 }
             }
-            let (warm, _, _) = solve(
-                &format!("rt_{}_{ps}_warm", model.name),
-                &nl(model, false, &full.x, &extra),
-                &[
-                    &opts[..],
-                    &[
-                        "warm_start_init_point=yes",
-                        "warm_start_recentering=none",
-                        "max_iter=0",
-                        // Keep the primal on the bounds it was supplied on:
-                        // the default push moves it 1e-3 into the interior,
-                        // off the active set the duals belong to.
-                        "warm_start_bound_push=1e-14",
-                        "warm_start_bound_frac=1e-14",
-                        "warm_start_slack_bound_push=1e-14",
-                        "warm_start_slack_bound_frac=1e-14",
-                    ],
-                ]
-                .concat(),
-            );
-            // Duals only: the interior-point start pushes x off the bound by
-            // `warm_start_bound_push` regardless of presolve.
-            let duals_only = |s: &Sol| Sol {
-                x: Vec::new(),
-                ..s.clone()
-            };
-            assert!(
-                same(&duals_only(&warm), &duals_only(&full), 1e-6),
-                "{} {ps}: warm {warm:?}\n   vs supplied {full:?}",
-                model.name
-            );
+            let body = nl(model, false, &full.x, &extra);
+            for (run, run_opts) in WARM_RUNS {
+                let warm_opts = |presolve: &[&'static str]| -> Vec<&'static str> {
+                    [
+                        &["solver_selection=nlp"][..],
+                        presolve,
+                        &["warm_start_init_point=yes", "warm_start_recentering=none"],
+                        run_opts,
+                    ]
+                    .concat()
+                };
+                let t = format!("rt_{}_{ps}_{run}", model.name);
+                let (warm, _, _) = solve(&format!("{t}_warm"), &body, &warm_opts(ps_opts));
+                let (reference, _, _) =
+                    solve(&format!("{t}_ref"), &body, &warm_opts(&["presolve=no"]));
+                // Duals only: the interior-point start moves x off the bound
+                // by `warm_start_bound_push`, presolve or not.
+                if !same_duals(&reference, &full, n, 1e-6) {
+                    failures.push(format!(
+                        "{t}: presolve=no warm {reference:?}\n   vs supplied {full:?}"
+                    ));
+                }
+                if !same_duals(&warm, &reference, n, 1e-6) {
+                    failures.push(format!(
+                        "{t}: warm {warm:?}\n   vs presolve=no warm {reference:?}"
+                    ));
+                }
+            }
         }
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

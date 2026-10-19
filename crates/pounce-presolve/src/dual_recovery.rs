@@ -44,6 +44,18 @@
 //! [`MAX_COMPONENT_VARS`]); a component past the cap, or a solve that does
 //! not reduce the residual, leaves the duals exactly as the solver reported
 //! them and says so through [`Outcome`].
+//!
+//! Activity is geometric, at `x*`, and so are the multipliers: the solve
+//! reads `∇f(x*)`. That is right for a point the solver converged to, where
+//! complementarity is `~μ` and an active side's slack is far below the
+//! [`on_bound`] tolerance. It is not right for a warm start handed back
+//! without a step: the interior-point start pushed `x` about `1e-3` off its
+//! bounds, so the derived side reads inactive *and* `∇f` there is not the
+//! one the supplied duals balance — widening the activity test alone was
+//! measured to leave every re-derived multiplier `O(push)` off (CHAIN:
+//! `[6.003, -3.003]` against `[6, -3]`). That case never reaches this
+//! module: `PresolveTnlp::finalize_solution` recognises the served warm
+//! start coming back and reports the supplied duals (`crate::warm_echo`).
 
 use pounce_common::types::{Number, lower_bound_present, upper_bound_present};
 

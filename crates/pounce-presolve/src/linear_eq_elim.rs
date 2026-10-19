@@ -145,6 +145,7 @@ use crate::linear_eq_plan::{
 };
 use crate::options::PresolveOptions;
 use crate::warm::WarmProjectionReport;
+use crate::warm_echo::{self, ServedWarmStart};
 
 /// A gather list: `out[k] = Σ scale · inner_values[src]` over the terms in
 /// `terms[start[k]..start[k+1]]`.
@@ -256,6 +257,9 @@ pub struct LinearEqElimTnlp {
     state: Option<ElimState>,
     finalized: Option<FullSolution>,
     starting_point_projection_report: WarmProjectionReport,
+    /// The full-space duals the last `get_starting_point` was handed and the
+    /// reduced ones it served (`warm_echo`).
+    served_warm_start: Option<ServedWarmStart>,
 }
 
 impl LinearEqElimTnlp {
@@ -266,6 +270,7 @@ impl LinearEqElimTnlp {
             state: None,
             finalized: None,
             starting_point_projection_report: WarmProjectionReport::default(),
+            served_warm_start: None,
         }
     }
 
@@ -304,6 +309,63 @@ impl LinearEqElimTnlp {
         self.finalized.as_ref()
     }
 
+    /// The full-space `(λ, z_l, z_u)` to hand down when the solver returned
+    /// the warm start this layer served with its duals unmoved: what this
+    /// layer was handed, plus — on a reduced bound the solver had to fill
+    /// (supplied as 0 or not at all) — the filled value, attributed as any
+    /// reduced multiplier is. `None` on any other return (`warm_echo`).
+    fn echoed_warm_start(
+        &self,
+        sol: &Solution<'_>,
+    ) -> Option<(Vec<Number>, Vec<Number>, Vec<Number>)> {
+        let w = self.served_warm_start.as_ref()?;
+        let s = self.state.as_ref()?;
+        if !w.echoed_by(sol.z_l, sol.z_u, sol.lambda)
+            || w.z_l_in.len() != s.plan.n_full
+            || w.z_u_in.len() != s.plan.n_full
+        {
+            return None;
+        }
+        let lambda = w
+            .lambda_in
+            .iter()
+            .map(|&l| warm_echo::as_reported_lambda(l))
+            .collect();
+        let mut z_l: Vec<Number> = w
+            .z_l_in
+            .iter()
+            .map(|&z| warm_echo::as_reported_z(z))
+            .collect();
+        let mut z_u: Vec<Number> = w
+            .z_u_in
+            .iter()
+            .map(|&z| warm_echo::as_reported_z(z))
+            .collect();
+        for (red, &full) in s.plan.vars_kept.iter().enumerate() {
+            for (upper, served, got, src) in [
+                (false, &w.z_l_out, sol.z_l, &s.plan.x_l_src),
+                (true, &w.z_u_out, sol.z_u, &s.plan.x_u_src),
+            ] {
+                let (Some(&served), Some(&got)) = (served.get(red), got.get(red)) else {
+                    continue;
+                };
+                if warm_echo::is_seed(served) || !got.is_finite() {
+                    continue;
+                }
+                attribute_bound_multiplier(
+                    &s.plan,
+                    src.get(red).copied().unwrap_or(full),
+                    full,
+                    got,
+                    upper,
+                    &mut z_l,
+                    &mut z_u,
+                );
+            }
+        }
+        Some((lambda, z_l, z_u))
+    }
+
     /// Clear the record of transformations applied by
     /// [`TNLP::get_starting_point`].
     pub fn reset_starting_point_projection_report(&mut self) {
@@ -324,6 +386,7 @@ impl LinearEqElimTnlp {
     /// Drop the cached plan. The next query recomputes it.
     pub fn invalidate(&mut self) {
         self.state = None;
+        self.served_warm_start = None;
         self.reset_starting_point_projection_report();
     }
 
@@ -812,6 +875,73 @@ fn attribute_bound_multiplier(
     }
 }
 
+/// Inbound chain rule for the bound multipliers of eliminated columns that
+/// no reduced bound was transferred from (M24, warm round trip).
+///
+/// With `x_e = α·x_s + β`, reduced stationarity at the survivor `s` is
+/// full stationarity at `s` plus `α` times that at `e` (the consumed row's
+/// multiplier cancels), so a multiplier the caller supplied on `e`'s own
+/// bound contributes `α·(z_l[e] − z_u[e])` to the survivor's reduced
+/// `z_l − z_u`. [`gather_transferred_bound_multiplier`] already carries the
+/// side a transfer moved; this carries every other one — typically a bound
+/// of `e` that tied with the survivor's, so the survivor's won and nothing
+/// was transferred, which left the reduced start non-stationary by exactly
+/// that multiplier. Added onto the reduced side the sign calls for, when the
+/// reduced box has that side.
+fn seed_untransferred_bound_multipliers(
+    plan: &EliminationPlan,
+    z_l_full: &[Number],
+    z_u_full: &[Number],
+    z_l_red: &mut [Number],
+    z_u_red: &mut [Number],
+) {
+    for (e, rec) in plan.recovery.iter().enumerate() {
+        let VarRecovery::Affine { rep, coeff, .. } = *rec else {
+            continue;
+        };
+        if !coeff.is_finite() || coeff == 0.0 {
+            continue;
+        }
+        let Some(&VarRecovery::Kept(red)) = plan.recovery.get(rep) else {
+            continue;
+        };
+        if red >= z_l_red.len() || red >= z_u_red.len() {
+            continue;
+        }
+        // Sides of `e` a transfer already moved: the reduced lower bound
+        // takes `e`'s lower side (upper when `α < 0`), the upper its upper.
+        let moved = |reduced_upper: bool| -> Option<bool> {
+            let src = if reduced_upper {
+                plan.x_u_src.get(red)
+            } else {
+                plan.x_l_src.get(red)
+            };
+            (src == Some(&e) && transfer_coeff(plan, e, rep).is_some())
+                .then_some(reduced_upper != (coeff < 0.0))
+        };
+        let taken = [moved(false), moved(true)];
+        for (e_upper, v) in [(false, z_l_full[e]), (true, z_u_full[e])] {
+            if taken.contains(&Some(e_upper)) || !warm_echo::is_seed(v) {
+                continue;
+            }
+            // Contribution to the survivor's `z_l − z_u`.
+            let c = if e_upper { -coeff * v } else { coeff * v };
+            let (dst, present) = if c > 0.0 {
+                (&mut z_l_red[red], lower_bound_present(plan.x_l_red[red]))
+            } else {
+                (&mut z_u_red[red], upper_bound_present(plan.x_u_red[red]))
+            };
+            if present {
+                *dst = if dst.is_finite() {
+                    *dst + c.abs()
+                } else {
+                    c.abs()
+                };
+            }
+        }
+    }
+}
+
 /// Recover a multiplier for every row the plan consumed.
 ///
 /// See the module docs for why a reverse sweep over the elimination steps
@@ -1101,6 +1231,7 @@ impl TNLP for LinearEqElimTnlp {
     }
 
     fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+        self.served_warm_start = None;
         let Some(s) = self.ensure_init() else {
             return false;
         };
@@ -1136,6 +1267,8 @@ impl TNLP for LinearEqElimTnlp {
         }) {
             return false;
         }
+        let handed = (sp.init_z || sp.init_lambda)
+            .then(|| (z_l_full.clone(), z_u_full.clone(), lambda_full.clone()));
         let s = self.state.as_ref().expect("inited");
         for (red, &full) in s.plan.vars_kept.iter().enumerate() {
             sp.x[red] = x_full[full];
@@ -1164,6 +1297,9 @@ impl TNLP for LinearEqElimTnlp {
                 sp.z_u[red] = z_u_full[full];
             }
         }
+        if sp.init_z {
+            seed_untransferred_bound_multipliers(&s.plan, &z_l_full, &z_u_full, sp.z_l, sp.z_u);
+        }
         for (red, &full) in s.plan.rows_kept.iter().enumerate() {
             sp.lambda[red] = lambda_full[full];
         }
@@ -1177,6 +1313,25 @@ impl TNLP for LinearEqElimTnlp {
                 .map(|(_, value)| value.abs())
                 .sum();
         }
+        let served = handed.map(|(z_l_in, z_u_in, lambda_in)| ServedWarmStart {
+            z_l_in,
+            z_u_in,
+            lambda_in,
+            z_l_out: warm_echo::served_bound_multipliers(
+                sp.init_z,
+                sp.z_l,
+                &s.plan.x_l_red,
+                &s.plan.x_u_red,
+            ),
+            z_u_out: warm_echo::served_bound_multipliers(
+                sp.init_z,
+                sp.z_u,
+                &s.plan.x_l_red,
+                &s.plan.x_u_red,
+            ),
+            lambda_out: warm_echo::served_row_multipliers(sp.init_lambda, sp.lambda),
+        });
+        self.served_warm_start = served;
         true
     }
 
@@ -1360,6 +1515,57 @@ impl TNLP for LinearEqElimTnlp {
             s.plan.lift_x(sol.x, &mut x_full);
         }
 
+        // Constraint values: re-evaluate so the dropped rows carry their
+        // real residual rather than a zero. If that fails, splice the
+        // solver's own reduced `g` into the kept rows and leave the rest at
+        // zero — never forward a partially-written scratch buffer.
+        let mut g_full = vec![0.0; m_in];
+        {
+            let ok = m_in == 0 || self.inner.borrow_mut().eval_g(&x_full, true, &mut g_full);
+            let s = self.state.as_ref().expect("inited");
+            if !ok {
+                for v in g_full.iter_mut() {
+                    *v = 0.0;
+                }
+                for (red, &full) in s.plan.rows_kept.iter().enumerate() {
+                    if red < sol.g.len() {
+                        g_full[full] = sol.g[red];
+                    }
+                }
+            }
+        }
+
+        // A warm start handed back with its duals unmoved: the full-space
+        // duals are the ones this layer was handed (`warm_echo`), not a
+        // sweep at the pushed `x`.
+        if let Some((lambda_e, z_l_e, z_u_e)) = self.echoed_warm_start(&sol) {
+            tracing::debug!(
+                target: "pounce_presolve",
+                "linear_eq_elim postsolve: the solver returned the served warm start \
+                 unchanged; reporting the supplied duals"
+            );
+            self.finalized = Some(FullSolution {
+                x: x_full.clone(),
+                lambda: lambda_e.clone(),
+                z_l: z_l_e.clone(),
+                z_u: z_u_e.clone(),
+            });
+            self.inner.borrow_mut().finalize_solution(
+                Solution {
+                    status: sol.status,
+                    x: &x_full,
+                    z_l: &z_l_e,
+                    z_u: &z_u_e,
+                    g: &g_full,
+                    lambda: &lambda_e,
+                    obj_value: sol.obj_value,
+                },
+                ip_data,
+                ip_cq,
+            );
+            return;
+        }
+
         // Bound multipliers: each one routed to the column whose declared
         // bound the reduced bound came from, which is the survivor itself
         // unless a transfer moved that bound there (gh#493). This has to
@@ -1391,26 +1597,6 @@ impl TNLP for LinearEqElimTnlp {
                         &mut z_l_full,
                         &mut z_u_full,
                     );
-                }
-            }
-        }
-
-        // Constraint values: re-evaluate so the dropped rows carry their
-        // real residual rather than a zero. If that fails, splice the
-        // solver's own reduced `g` into the kept rows and leave the rest at
-        // zero — never forward a partially-written scratch buffer.
-        let mut g_full = vec![0.0; m_in];
-        {
-            let ok = m_in == 0 || self.inner.borrow_mut().eval_g(&x_full, true, &mut g_full);
-            let s = self.state.as_ref().expect("inited");
-            if !ok {
-                for v in g_full.iter_mut() {
-                    *v = 0.0;
-                }
-                for (red, &full) in s.plan.rows_kept.iter().enumerate() {
-                    if red < sol.g.len() {
-                        g_full[full] = sol.g[red];
-                    }
                 }
             }
         }
@@ -2091,6 +2277,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `x0 = α·x1`, `x0 ≥ 4` declared, and x1's reduced bound its own (a
+    /// tie, so nothing was transferred): a warm start's `z_L(x0) = 10` still
+    /// reaches the survivor by the chain rule, as `α·10` on the side its
+    /// sign calls for — and only where the reduced box has that side. A side
+    /// a transfer already carried is not added twice.
+    #[test]
+    fn an_untransferred_eliminated_bound_multiplier_reaches_the_survivor() {
+        for (coeff, lower, upper) in [(2.0, 20.0, 0.0), (-2.0, 0.0, 20.0)] {
+            let mut plan = plan_with_transferred_bound(coeff);
+            plan.x_l_src = vec![1];
+            plan.x_u_src = vec![1];
+            plan.x_l_red = vec![2.0];
+            plan.x_u_red = vec![5.0];
+            let (z_l, z_u) = (vec![10.0, Number::NAN], vec![0.0, Number::NAN]);
+            let (mut zl_red, mut zu_red) = (vec![0.0], vec![0.0]);
+            seed_untransferred_bound_multipliers(&plan, &z_l, &z_u, &mut zl_red, &mut zu_red);
+            assert_eq!((zl_red[0], zu_red[0]), (lower, upper), "α = {coeff}");
+            // No upper side on the survivor: the −20 has nowhere to go.
+            plan.x_u_red = vec![1e20];
+            let (mut zl_red, mut zu_red) = (vec![0.0], vec![Number::NAN]);
+            seed_untransferred_bound_multipliers(&plan, &z_l, &z_u, &mut zl_red, &mut zu_red);
+            assert_eq!(zl_red[0], lower, "α = {coeff}");
+            assert!(zu_red[0].is_nan(), "α = {coeff}: {zu_red:?}");
+        }
+        // Transferred: gather moves it, this pass leaves it alone.
+        let mut plan = plan_with_transferred_bound(2.0);
+        plan.x_l_red = vec![2.0];
+        plan.x_u_red = vec![5.0];
+        let (mut zl_red, mut zu_red) = (vec![0.0], vec![0.0]);
+        seed_untransferred_bound_multipliers(
+            &plan,
+            &[10.0, 0.0],
+            &[0.0, 0.0],
+            &mut zl_red,
+            &mut zu_red,
+        );
+        assert_eq!((zl_red[0], zu_red[0]), (0.0, 0.0));
     }
 
     /// A NaN on the source column means the caller supplied nothing there
