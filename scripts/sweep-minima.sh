@@ -3,8 +3,10 @@
 #
 # Runs every fixture below under each of the six `--minima` methods and
 # records what the search returned -- stop status, solves spent, minima found,
-# kkt_tol rejections, every minimum's objective, and the best point's x and
-# base-problem duals -- one line per (fixture, method), sorted and diffable.
+# kkt_tol rejections, every minimum's objective, and the best point's x,
+# base-problem duals and bound multipliers (the best `.sol`'s `ipopt_zL_out` /
+# `ipopt_zU_out` blocks, sparse `index:value`) -- one line per (fixture,
+# method), sorted and diffable.
 #
 # WHY THIS EXISTS (gh#966). scripts/sweep-fixtures.sh never passes
 # `--minima`, so it is uniform in exactly the dimension a change to the
@@ -105,11 +107,11 @@ for f in "${FIXTURES[@]}"; do
     j="$W/$n.$method.json"
     # A run that hangs must not hang the sweep; it shows up as NO_JSON.
     timeout 300 "$BIN" "$f" --minima "$method" --n-minima 6 --max-solves 30 \
-      --patience 8 --seed 0 --json-output "$j" --no-sol "${fopts[@]}" "$@" \
-      > "$W/$n.$method.out" 2>&1
-    python3 - "$j" "$n" "$method" >> "$OUT" <<'PY'
+      --patience 8 --seed 0 --json-output "$j" --sol-output "$W/$n.$method.sol" \
+      "${fopts[@]}" "$@" > "$W/$n.$method.out" 2>&1
+    python3 - "$j" "$n" "$method" "$W/$n.$method.sol" >> "$OUT" <<'PY'
 import json, sys
-path, name, method = sys.argv[1:]
+path, name, method, sol = sys.argv[1:]
 try:
     d = json.load(open(path))
 except Exception:
@@ -121,10 +123,32 @@ g = lambda v: "%.10g" % v
 vals = ",".join(g(v) for v in m.get("values", []))
 x = ",".join(g(v) for v in s.get("x", []) or [])
 lam = ",".join(g(v) for v in s.get("lambda", []) or [])
+# The best minimum's `.sol` suffix blocks: `suffix <kind> <count> ...`, the
+# name, then `count` sparse `index value` lines (zeros are not written).
+# Magnitudes below 1e-6 are barrier noise at an inactive bound and are
+# dropped so the column reads the active set, not the last mu.
+blocks = {}
+try:
+    lines = open(sol).read().split("\n")
+except OSError:
+    lines = []
+i = 0
+while i < len(lines):
+    p = lines[i].split()
+    if len(p) >= 3 and p[0] == "suffix":
+        cnt, nm = int(p[2]), lines[i + 1].strip()
+        ent = [ln.split() for ln in lines[i + 2:i + 2 + cnt]]
+        blocks[nm] = ",".join(f"{k}:{g(float(v))}" for k, v in ent
+                              if abs(float(v)) >= 1e-6)
+        i += 2 + cnt
+    else:
+        i += 1
+zl = blocks.get("ipopt_zL_out", "-")
+zu = blocks.get("ipopt_zU_out", "-")
 print(f"{name:28s} {method:12s} {m.get('status', '?'):18s} "
       f"solves={m.get('n_solves', '?')} found={m.get('n_minima', '?')} "
       f"kkt_rej={m.get('n_kkt_rejected', '-')} values=[{vals}] "
-      f"x=[{x}] lambda=[{lam}]")
+      f"x=[{x}] lambda=[{lam}] zL=[{zl}] zU=[{zu}]")
 PY
   done
 done

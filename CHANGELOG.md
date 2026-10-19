@@ -268,6 +268,18 @@ changes.
   iteration-0 iterate equals the seed and the re-solve takes 0 iterations.
   Pinned by `crates/pounce-algorithm/tests/sqp_warm_start_user_space.rs`.
   The working set is unchanged.
+- **`--minima` `.sol` files carry `ipopt_zL_out` / `ipopt_zU_out`.** The
+  ranked `.sol` files were written with no suffix blocks, so a Pyomo
+  `model.ipopt_zL_out` / AMPL `.rc` read after a `--minima` run came back empty
+  while a plain solve of the same file filled it (gh #296). The clean re-solve
+  that recovers each minimum's constraint duals (issue #196) now also captures
+  its bound multipliers, and every file writes them with a plain solve's signs
+  (`σ·z_L`, `−σ·z_U`, gh#959). Without constraints that re-solve used to be
+  skipped outright; it now runs when the minimum sits on a finite bound (an
+  interior minimum keeps the skip, and zeros). The JSON report is unchanged: a
+  plain solve's carries no bound multipliers either. `scripts/sweep-minima.sh`
+  now records the best `.sol`'s blocks; across its 54 lines only that column
+  moves.
 - **A `.nl` file's initial duals are read in the `.sol` sign (gh#1033).** The
   `d` segment carries AMPL's dual, `d obj / d b`, the sign `sol_writer`
   produces by negating pounce's multiplier; the reader stored it unnegated, so
