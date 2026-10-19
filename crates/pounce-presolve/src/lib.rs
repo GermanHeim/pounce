@@ -2759,15 +2759,24 @@ impl TNLP for PresolveTnlp {
         // the *final* solution is put back afterwards.
         let lifted = match self.get_nlp_info() {
             Some(info) => {
+                // Every field `finalize_solution` writes, including the
+                // derived-bound dual recovery's, so a lift never leaves a
+                // live iterate's record where the final solution's belongs.
                 let saved = (
                     self.finalized_full_solution.take(),
                     std::mem::take(&mut self.bound_multipliers_handed_to_rows),
+                    std::mem::take(&mut self.bound_multiplier_overrides),
+                    self.duals_rewritten,
+                    self.derived_bound_recovery.take(),
                 );
                 let lifted =
                     live_lift::lift(self, |s| &mut s.inner, (info.n as usize, info.m as usize));
                 (
                     self.finalized_full_solution,
                     self.bound_multipliers_handed_to_rows,
+                    self.bound_multiplier_overrides,
+                    self.duals_rewritten,
+                    self.derived_bound_recovery,
                 ) = saved;
                 lifted
             }
