@@ -193,15 +193,19 @@ static bool gams_eval_jac_g(ipindex n, ipnumber *x, bool new_x,
  *
  * POUNCE convention:  H = obj_factor * nabla^2 f + sum_i lambda_i * nabla^2 c_i
  *
- * gmoHessLagValue(gmo, x, pi, w, objweight, conweight, numerr) computes:
- *   w = objweight * nabla^2 f + conweight * sum_i pi_i * nabla^2 c_i
+ * gmoHessLagValue(gmo, x, pi, w, objweight, conweight, numerr) computes the
+ * Hessian of GMO's Lagrangian  objweight*f - conweight * pi^T c,  stated in
+ * GAMS's marginal convention (pi_gams = -lambda_ipopt for a minimization):
+ *   w = objweight * nabla^2 f - conweight * sum_i pi_i * nabla^2 c_i
+ * Note the MINUS on the constraint term.
  *
- * GAMS multiplier convention: pi_gams = -lambda_ipopt.
- * The Ipopt solver link negates lambda before passing to gmoHessLagValue.
- * Equivalently, we pass lambda directly with conweight = -1.0:
- *   w = objweight * nabla^2 f + (-1) * sum_i lambda_i * nabla^2 c_i
- *     = objweight * nabla^2 f - sum_i lambda_i * nabla^2 c_i
- * which matches negating lambda and using conweight = 1.0.
+ * The natural call would pass pi = -lambda with conweight = +1. Like the
+ * GAMS/Ipopt link (GamsNLP::eval_h: "for GAMS, lambda would need to be
+ * multiplied by -1, we do this via the constraint weight"), we instead pass
+ * lambda directly with conweight = -1.0:
+ *   w = objweight * nabla^2 f - (-1) * sum_i lambda_i * nabla^2 c_i
+ *     = objweight * nabla^2 f + sum_i lambda_i * nabla^2 c_i
+ * which is the POUNCE convention above.
  *
  * For maximization, obj_sign = -1, so objweight = -obj_factor negates the
  * objective Hessian (POUNCE minimizes -f).

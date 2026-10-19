@@ -212,6 +212,32 @@ changes.
   a fixed variable it previously came back one short. Checked against
   finite differences of re-solved duals, with and without
   `obj_scaling_factor`, in `python/tests/test_continuation_tangent_duals.py`.
+- **The pip GAMS link rejects points GMO flags as evaluation errors.**
+  `_GmoAdapter` ignored the return code and `numerr` of `gmoEvalFuncObj`,
+  `gmoEvalGradObj`, `gmoEvalFunc`, `gmoEvalGrad` and `gmoHessLagValue`, so a
+  domain error (`log` of a negative, ...) handed POUNCE whatever GMO left in
+  the output slot as a valid value, and the line search could accept a point
+  outside the model's domain. A non-zero `rc` or `numerr > 0` now raises
+  `GmoEvalError`, which the `pounce.Problem` callback layer reports as a failed
+  evaluation, matching `gams_pounce.c`'s `return false`.
+- **The pip GAMS link honours `warm_start_init_point yes` for the duals.** It
+  passed only the primal start; GMO's marginals were never read. It now seeds
+  `lagrange = -obj_sign * EquM` and splits `obj_sign * VarM` into `z_L`/`z_U`
+  by sign -- the exact inverse of what it writes back, so a maximizing model
+  round-trips too -- when the option is set and `gmoHaveBasis` says GMO has
+  marginals.
+- **GMO's Hessian-of-the-Lagrangian formula is stated correctly.** The comments
+  in `gmo_translate.py` and `gams/gams_pounce.c` gave `gmoHessLagValue` as
+  `objweight*d2f + conweight*sum pi_i d2g_i`; it is
+  `objweight*d2f - conweight*sum pi_i d2g_i` (GMO's Lagrangian is `f - pi^T g`),
+  which is why passing `lambda` with `conweight = -1` is right. The code was
+  already correct; the license-free test fake implemented the wrong formula, so
+  the "analytical Hessian" tests ran with the constraint curvature inverted and
+  could not have caught a sign regression. The fake now computes what GMO
+  computes, and the Hessian callback is checked against finite differences of
+  the Lagrangian's gradient in both senses. New tests also pin
+  `gmoSetSolution2` / `gmoSetVarM` marginals for minimize and maximize against
+  hand-derived GAMS marginals.
 - **A `.nl` file's initial duals are read in the `.sol` sign (gh#1033).** The
   `d` segment carries AMPL's dual, `d obj / d b`, the sign `sol_writer`
   produces by negating pounce's multiplier; the reader stored it unnegated, so

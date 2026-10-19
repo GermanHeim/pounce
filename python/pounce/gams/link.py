@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from .gmo_translate import POUNCE_INF, problem_from_gmo
+from .gmo_translate import GmoEvalError, POUNCE_INF, problem_from_gmo, warm_start_duals
 
 if TYPE_CHECKING:
     from .gmo_translate import GmoProblem, GmoView
@@ -272,10 +272,28 @@ def solve_view(
     gp, prob = problem_from_view(
         view, options=options, max_iter=max_iter, max_wall_time=max_wall_time
     )
+    # Warm-start duals: read GMO's marginals only when the option file asks
+    # for a warm start (the engine consults the seeds only then, exactly as
+    # Ipopt only sets init_lambda / init_z under warm_start_init_point=yes)
+    # and GMO says it has them. See `warm_start_duals` for the conversion.
+    seeds = {}
+    if _wants_warm_start(options):
+        duals = warm_start_duals(view, gp.obj_sign)
+        if duals is not None:
+            lam0, zl0, zu0 = duals
+            seeds = {"zl": zl0, "zu": zu0}
+            if gp.m:
+                seeds["lagrange"] = lam0
     x, info = prob.solve(
-        x0=gp.x0, report_path=report_path, report_detail=report_detail
+        x0=gp.x0, report_path=report_path, report_detail=report_detail, **seeds
     )
     return gp, x, info
+
+
+def _wants_warm_start(options: dict | None) -> bool:
+    """``warm_start_init_point yes`` in the (option-file) options."""
+    val = (options or {}).get("warm_start_init_point")
+    return isinstance(val, str) and val.strip().lower() == "yes"
 
 
 def problem_from_view(
@@ -673,17 +691,36 @@ class _GmoAdapter:  # pragma: no cover - thin wrapper over gamsapi calls
         return rows, cols, row_has_nl, lin
 
     # --- numerical evaluators (native sense) -----------------------------
+    #
+    # gamsapi's SWIG bindings return the C int return code together with the
+    # C output arguments as a list, in C-signature order (the docstrings say
+    # ``-> int`` but omit the outputs; `gmoCreate` -> ``[rc, msg]`` above is
+    # the same convention):
+    #
+    #   gmoEvalFuncObj(h, x)          -> [rc, fval, numerr]
+    #   gmoEvalFunc(h, i, x)          -> [rc, fval, numerr]
+    #   gmoEvalGradObj(h, x, g)       -> [rc, fval, gx, numerr]
+    #   gmoEvalGrad(h, i, x, g)       -> [rc, fval, gx, numerr]
+    #   gmoHessLagValue(h, x, pi, w, ow, cw) -> [rc, numerr]
+    #
+    # `rc != 0` or `numerr > 0` rejects the point (GmoEvalError), as
+    # gams_pounce.c's `!= 0 || numerr > 0 -> return false` does. These used
+    # to be ignored, so a domain error (log of a negative, ...) handed POUNCE
+    # whatever GMO left in the output slot as a valid value.
     def eval_obj(self, x):
-        ret = self._gmo.gmoEvalFuncObj(self._h, _to_double_array(self._gmo, x))
-        # bindings return either fval or [rc, fval, numerr]; take the value.
-        if isinstance(ret, (list, tuple)):
-            return float(ret[1])
-        return float(ret)
+        outs = _check_gmo_eval(
+            self._gmo.gmoEvalFuncObj(self._h, _to_double_array(self._gmo, x)),
+            "gmoEvalFuncObj",
+        )
+        return float(outs[0])
 
     def eval_grad_obj(self, x):
         gmo = self._gmo
         grad = gmo.doubleArray(self._n)
-        gmo.gmoEvalGradObj(self._h, _to_double_array(gmo, x), grad)
+        _check_gmo_eval(
+            gmo.gmoEvalGradObj(self._h, _to_double_array(gmo, x), grad),
+            "gmoEvalGradObj",
+        )
         return [float(grad[j]) for j in range(self._n)]
 
     def eval_cons(self, x):
@@ -691,8 +728,8 @@ class _GmoAdapter:  # pragma: no cover - thin wrapper over gamsapi calls
         xa = _to_double_array(gmo, x)
         out = []
         for i in range(self._m):
-            ret = gmo.gmoEvalFunc(self._h, i, xa)
-            out.append(float(ret[1] if isinstance(ret, (list, tuple)) else ret))
+            outs = _check_gmo_eval(gmo.gmoEvalFunc(self._h, i, xa), "gmoEvalFunc", i)
+            out.append(float(outs[0]))
         return out
 
     def eval_jac(self, x):
@@ -713,23 +750,71 @@ class _GmoAdapter:  # pragma: no cover - thin wrapper over gamsapi calls
                 for t in range(start, end):
                     vals[t] = self._jac_lin[t]
                 continue
-            gmo.gmoEvalGrad(self._h, i, xa, self._grad_buf)
+            _check_gmo_eval(
+                gmo.gmoEvalGrad(self._h, i, xa, self._grad_buf), "gmoEvalGrad", i
+            )
             for t in range(start, end):
                 vals[t] = float(self._grad_buf[self._jac_cols[t]])
         return vals
 
     def hess_lag_value(self, x, lam, obj_weight, con_weight):
+        # GMO returns  obj_weight * d2f - con_weight * sum_i lam_i d2g_i.
         gmo = self._gmo
         vals = gmo.doubleArray(self._nnz_hess)
-        gmo.gmoHessLagValue(
-            self._h,
-            _to_double_array(gmo, x),
-            _to_double_array(gmo, lam),
-            vals,
-            float(obj_weight),
-            float(con_weight),
+        _check_gmo_eval(
+            gmo.gmoHessLagValue(
+                self._h,
+                _to_double_array(gmo, x),
+                _to_double_array(gmo, lam),
+                vals,
+                float(obj_weight),
+                float(con_weight),
+            ),
+            "gmoHessLagValue",
         )
         return [float(vals[k]) for k in range(self._nnz_hess)]
+
+    # --- warm start ------------------------------------------------------
+    def has_marginals(self) -> bool:
+        """GMO flags that the model carries a basis / marginals."""
+        try:
+            return bool(self._gmo.gmoHaveBasis(self._h))
+        except Exception:
+            return False
+
+    def var_marginals(self):
+        buf = self._gmo.doubleArray(self._n)
+        self._gmo.gmoGetVarM(self._h, buf)
+        return [float(buf[j]) for j in range(self._n)]
+
+    def equ_marginals(self):
+        buf = self._gmo.doubleArray(self._m)
+        if self._m:
+            self._gmo.gmoGetEquM(self._h, buf)
+        return [float(buf[i]) for i in range(self._m)]
+
+
+def _check_gmo_eval(ret, what: str, row: int | None = None):
+    """Unpack a gamsapi evaluator return ``[rc, *outputs, numerr]``.
+
+    Returns the outputs between ``rc`` and ``numerr`` (``[fval]``,
+    ``[fval, gx]`` or ``[]``). Raises :class:`GmoEvalError` when GMO reports
+    a non-zero return code or ``numerr > 0`` -- the point is rejected, never
+    read. A return that is not a list (a binding that changed shape) is
+    refused rather than guessed at.
+    """
+    where = what if row is None else f"{what}(row {row})"
+    if not isinstance(ret, (list, tuple)) or len(ret) < 2:
+        raise GmoEvalError(
+            f"{where}: unexpected gamsapi return {ret!r}; expected [rc, ..., numerr]"
+        )
+    rc = int(ret[0])
+    numerr = int(ret[-1])
+    if rc != 0:
+        raise GmoEvalError(f"{where}: GMO return code {rc}")
+    if numerr > 0:
+        raise GmoEvalError(f"{where}: {numerr} evaluation error(s) at this point")
+    return list(ret[1:-1])
 
 
 def _to_double_array(gmo, x):  # pragma: no cover - needs gamsapi

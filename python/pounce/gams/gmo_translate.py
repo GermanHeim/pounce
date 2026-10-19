@@ -20,10 +20,26 @@ exactly:
   always minimizes, so the objective and its gradient are scaled by ``obj_sign``
   (maximize -> minimize ``-f``).
 * The Hessian of the Lagrangian is obtained from a single ``gmoHessLagValue``
-  call with ``objweight = obj_sign * obj_factor`` and ``conweight = -1.0``.  The
-  ``conweight = -1`` is equivalent to negating the multipliers (GAMS's ``pi`` is
-  ``-lambda``), so POUNCE's standard cyipopt ``lagrange`` vector is passed
-  through unchanged.
+  call with ``objweight = obj_sign * obj_factor`` and ``conweight = -1.0``.
+  GMO's Lagrangian is stated in GAMS's own marginal convention,
+  ``L = objweight*f - conweight * pi^T g``, so it returns::
+
+      W = objweight * d2f  -  conweight * sum_i pi_i * d2g_i
+
+  (note the minus).  Passing POUNCE's ``lambda`` in the ``pi`` slot with
+  ``conweight = -1`` gives ``obj_sign*obj_factor*d2f + sum_i lambda_i d2g_i``,
+  which is exactly the cyipopt ``hessian`` contract.  This is the call the
+  GAMS/Ipopt link makes (``GamsNLP::eval_h``: "for GAMS, lambda would need to
+  be multiplied by -1, we do this via the constraint weight").
+* Warm-start duals (``warm_start_init_point yes``) are the exact inverse of
+  what :func:`pounce.gams.link._write_solution` writes back:
+  ``lambda = -obj_sign * EquM`` and ``z_L - z_U = obj_sign * VarM``, split by
+  sign (see :func:`warm_start_duals`).
+* An evaluator that reports a domain error (``numerr > 0``) or a non-zero
+  return code raises :class:`GmoEvalError`.  The cyipopt-style
+  ``pounce.Problem`` treats any exception from a callback as a failed
+  evaluation (the TNLP callback returns ``false``), so the line search
+  backtracks exactly as the C link's ``return false`` makes it.
 """
 
 from __future__ import annotations
@@ -86,6 +102,9 @@ class GmoView(Protocol):
     def eval_cons(self, x: np.ndarray) -> Sequence[float]: ...
     def eval_jac(self, x: np.ndarray) -> Sequence[float]: ...
 
+    # Emulates gmoHessLagValue: returns the lower triangle of
+    #   obj_weight * d2f  -  con_weight * sum_i lam_i * d2g_i
+    # (GMO's sign convention -- the constraint term is SUBTRACTED).
     def hess_lag_value(
         self,
         x: np.ndarray,
@@ -93,6 +112,25 @@ class GmoView(Protocol):
         obj_weight: float,
         con_weight: float,
     ) -> Sequence[float]: ...
+
+    # --- warm start (optional) -------------------------------------------
+    # True when GMO carries usable marginals for the current point
+    # (the adapter answers from ``gmoHaveBasis``). A view that does not
+    # define it is read as "no marginals", so no duals are seeded.
+    def has_marginals(self) -> bool: ...
+    # GAMS-convention marginals: ``VarM`` (length n) / ``EquM`` (length m).
+    def var_marginals(self) -> Sequence[float]: ...
+    def equ_marginals(self) -> Sequence[float]: ...
+
+
+class GmoEvalError(ArithmeticError):
+    """A GMO evaluator reported a domain error or a non-zero return code.
+
+    Raised by the view (the real adapter in :mod:`pounce.gams.link`, or a
+    test fake) and deliberately not caught here: an exception out of a
+    ``pounce.Problem`` callback is how the cyipopt-style interface signals a
+    failed evaluation, the same as ``return false`` in the C link.
+    """
 
 
 @dataclass
@@ -173,10 +211,12 @@ class _GmoProblemObjHess(_GmoProblemObj):
         return self._hess_rows, self._hess_cols
 
     def hessian(self, x, lagrange, obj_factor):
-        # gmoHessLagValue computes  objweight * d2f + conweight * sum_i pi_i d2c_i.
+        # gmoHessLagValue computes  objweight * d2f - conweight * sum_i pi_i d2g_i
+        # (GMO's Lagrangian is f - pi^T g in GAMS marginal convention).
         # objweight = obj_sign*obj_factor (negate objective Hessian for max);
-        # conweight = -1.0 absorbs the GAMS pi = -lambda sign flip, so the
-        # standard cyipopt `lagrange` is passed straight through.
+        # conweight = -1.0 turns the subtracted term into + sum_i lambda_i d2g_i,
+        # so the standard cyipopt `lagrange` is passed straight through.
+        # Same call as GamsNLP::eval_h in the GAMS/Ipopt link.
         vals = self._v.hess_lag_value(
             np.asarray(x, dtype=float),
             np.asarray(lagrange, dtype=float),
@@ -184,6 +224,48 @@ class _GmoProblemObjHess(_GmoProblemObj):
             -1.0,
         )
         return np.asarray(vals, dtype=float)
+
+
+def warm_start_duals(view: GmoView, obj_sign: float):
+    """POUNCE starting multipliers from GMO's marginals, or ``None``.
+
+    The exact inverse of the write-back in
+    :func:`pounce.gams.link._write_solution`, which publishes::
+
+        EquM = -obj_sign * lambda          (gams_pi)
+        VarM =  obj_sign * (z_L - z_U)
+
+    so here::
+
+        lambda    = -obj_sign * EquM
+        z_L - z_U =  obj_sign * VarM,   z_L = max(d, 0), z_U = max(-d, 0)
+
+    For a minimizing model this is the GAMS/Ipopt link's
+    ``GamsNLP::get_starting_point`` verbatim (``lambda = -EquM``, ``VarM``
+    split by sign). That link handles ``maximizing`` through
+    ``obj_scaling_factor = -1`` instead of negating ``f``; POUNCE negates
+    ``f``, so its multipliers belong to ``min -f`` and both conversions carry
+    ``obj_sign``.
+
+    Returns ``None`` when the view has no marginals to offer (no
+    ``has_marginals`` method, or it answers ``False``) -- seeding zeros
+    would not be a warm start.
+    """
+    have = getattr(view, "has_marginals", None)
+    if not (callable(have) and have()):
+        return None
+    n = int(view.num_vars())
+    m = int(view.num_cons())
+    var_m = np.asarray(view.var_marginals(), dtype=float).reshape(n)
+    d = obj_sign * var_m
+    z_l = np.maximum(d, 0.0)
+    z_u = np.maximum(-d, 0.0)
+    if m:
+        equ_m = np.asarray(view.equ_marginals(), dtype=float).reshape(m)
+        lam = -obj_sign * equ_m
+    else:
+        lam = np.zeros(0)
+    return lam, z_l, z_u
 
 
 def problem_from_gmo(view: GmoView) -> GmoProblem:
