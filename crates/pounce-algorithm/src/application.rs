@@ -5146,12 +5146,18 @@ impl IpoptApplication {
                 false,
             );
         }
-        let _ = self.options.set_integer_value("max_iter", retry_iter, true, false);
+        let _ = self
+            .options
+            .set_integer_value("max_iter", retry_iter, true, false);
         if let Some(t) = cpu_left {
-            let _ = self.options.set_numeric_value("max_cpu_time", t, true, false);
+            let _ = self
+                .options
+                .set_numeric_value("max_cpu_time", t, true, false);
         }
         if let Some(t) = wall_left {
-            let _ = self.options.set_numeric_value("max_wall_time", t, true, false);
+            let _ = self
+                .options
+                .set_numeric_value("max_wall_time", t, true, false);
         }
         tracing::debug!(target: "pounce::algorithm",
             "[POUNCE] gh#983: {:?} verdict audited ({:?}); re-solving from the \
