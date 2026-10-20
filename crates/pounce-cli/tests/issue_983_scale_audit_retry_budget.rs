@@ -42,11 +42,21 @@ fn iteration_counts(out: &str) -> Vec<i64> {
 fn a_declined_re_solve_is_capped_at_three_times_the_base_solve() {
     let out = run(&[]);
     let its = iteration_counts(&out);
-    assert_eq!(its.len(), 2, "expected one base solve and one re-solve:\n{out}");
+    assert_eq!(
+        its.len(),
+        2,
+        "expected one base solve and one re-solve:\n{out}"
+    );
     let base = its[0];
-    assert!(base > 50, "the floor must not be what binds here: base {base}\n{out}");
+    assert!(
+        base > 50,
+        "the floor must not be what binds here: base {base}\n{out}"
+    );
     for &r in &its[1..] {
-        assert!(r <= 3 * base, "re-solve ran {r} iterations against base {base}\n{out}");
+        assert!(
+            r <= 3 * base,
+            "re-solve ran {r} iterations against base {base}\n{out}"
+        );
     }
     assert!(out.contains("gh#983 scale audit: declined"), "{out}");
     assert!(out.contains("EXIT: Optimal Solution Found."), "{out}");
@@ -56,9 +66,15 @@ fn a_declined_re_solve_is_capped_at_three_times_the_base_solve() {
 fn the_caller_max_iter_still_caps_the_re_solve() {
     let out = run(&["max_iter=300"]);
     let its = iteration_counts(&out);
-    assert!(its.len() >= 2, "expected a base solve and a re-solve:\n{out}");
+    assert!(
+        its.len() >= 2,
+        "expected a base solve and a re-solve:\n{out}"
+    );
     assert!(its[0] <= 300, "{out}");
     for &r in &its[1..] {
-        assert!(r <= 300, "re-solve ran {r} iterations against max_iter=300\n{out}");
+        assert!(
+            r <= 300,
+            "re-solve ran {r} iterations against max_iter=300\n{out}"
+        );
     }
 }

@@ -184,7 +184,13 @@ fn solve(extra: &[&str]) -> SolveReport {
 /// has to climb against it.
 const NO_WALKBACK: [&str; 1] = ["perturb_delta_c_max_rungs=0"];
 
-const POOLING_OPTIMUM: f64 = -3273.9549;
+/// MINLPLib's global optimum for pooling_rt2stp (primal -4391.825893), which
+/// the default run reaches since feral 0.21. On feral <= 0.20 it stopped at
+/// the local -3273.9549 that Ipopt also reports.
+const POOLING_OPTIMUM: f64 = -4391.8260;
+
+/// The local optimum the run reaches with the walk-back off (feral 0.21).
+const POOLING_LOCAL_OPTIMUM: f64 = -3273.9549;
 
 /// The headline, with its scope corrected by gh#693.
 ///
@@ -262,14 +268,32 @@ fn the_walkback_is_inert_on_this_fixture_since_gh693() {
 }
 
 /// The walk-back must not cost the certificate it is meant to reach
-/// sooner: same point, either way. Still true after gh#693, though now
-/// for the trivial reason that the walk-back does nothing here.
+/// sooner. Through feral 0.20 it reached the same point either way, for the
+/// trivial reason that it did nothing here. On feral 0.21 it is no longer
+/// inert on the *answer*: with it on (the default) the run reaches the
+/// global optimum -4391.826 in 82 iterations, with it off the local
+/// -3273.955 in 171, both certified. Measured on 3ca01115. Neither leg may
+/// lose its certificate, and the walk-back may not land on the worse point.
 #[test]
-fn the_walkback_reaches_the_same_point_it_used_to() {
-    let with = solve(&[]).solution.objective;
-    let without = solve(&NO_WALKBACK).solution.objective;
+fn the_walkback_does_not_cost_the_certificate_or_the_better_optimum() {
+    let with = solve(&[]);
+    let without = solve(&NO_WALKBACK);
+    for (leg, r) in [("walk-back on", &with), ("walk-back off", &without)] {
+        assert_eq!(
+            r.solution.status,
+            ApplicationReturnStatus::SolveSucceeded,
+            "{leg}: lost the certificate",
+        );
+    }
     assert!(
-        (with - without).abs() < 1e-4,
-        "withdrawing delta_c moved the answer: {with} vs {without}",
+        (with.solution.objective - POOLING_OPTIMUM).abs() < 1e-3,
+        "walk-back on: {} is not the global optimum",
+        with.solution.objective,
+    );
+    assert!(
+        (without.solution.objective - POOLING_LOCAL_OPTIMUM).abs() < 1e-3
+            || (without.solution.objective - POOLING_OPTIMUM).abs() < 1e-3,
+        "walk-back off: {} is neither known optimum",
+        without.solution.objective,
     );
 }

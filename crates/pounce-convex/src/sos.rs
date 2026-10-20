@@ -1434,10 +1434,20 @@ mod tests {
             ],
         );
         let prob = PolyProblem::new(p);
+        // The order-3 SDP is itself fragile: on feral 0.20 it converged in
+        // under 200 iterations to -2097, but `tol = 1e-7` already turned it
+        // into IterationLimit; on feral 0.21 it needs more than 200 and
+        // converges by 600 (to -2407, equally valid). The fallback test below
+        // only bites if the coarser order *does* converge, so both calls get
+        // a budget it converges within on either release.
+        let opts = QpOptions {
+            max_iter: 600,
+            ..sos_opts()
+        };
 
         // The minimal order converges to a valid (if loose) lower bound. It is an
         // unconstrained problem, so nothing is certified.
-        let r3 = sos_minimize(&prob, Some(3), backend);
+        let r3 = sos_minimize_opts(&prob, Some(3), &opts, backend);
         assert_eq!(r3.status, QpStatus::Optimal, "order 3 should converge");
         assert_eq!(r3.order, 3);
         assert!(
@@ -1456,7 +1466,7 @@ mod tests {
         // (`Optimal`) result. Either order 4 converged on its own (order == 4),
         // or a certified fallback was found, or the reported status is honestly
         // non-Optimal — but never a silent uncertified `Optimal` fallback.
-        let r4 = sos_minimize(&prob, Some(4), backend);
+        let r4 = sos_minimize_opts(&prob, Some(4), &opts, backend);
         assert!(
             !(r4.status == QpStatus::Optimal && r4.order < 4 && !r4.certified),
             "an uncertified order-{} fallback was disguised as an Optimal order-4 \

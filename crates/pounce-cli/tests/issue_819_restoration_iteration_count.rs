@@ -33,7 +33,19 @@
 //!
 //! # What it is *not* evidence about
 //!
-//! One fixture, one exit path (`Restoration_Failed`), one linear solver. The
+//! One fixture, one exit path (`Restoration_Failed`), one linear solver.
+//!
+//! The fixture reaches that exit only under `tol=1e-11` as of FERAL 0.21. On
+//! 0.20 it failed in restoration at the default `tol` (131 iterations, 84 of
+//! them `r` rows); on 0.21 it solves at the default in 95, with 82 `r` rows in
+//! one restoration call that *recovers* — which still exercises the two
+//! counting identities but not the terminating path this file is about. Below
+//! the model's round-off floor (see `issue_815_restoration_ladder.rs`) the
+//! restoration sub-solve has nowhere to go and the run ends `Restoration
+//! Failed!` at 108: 3 ordinary rows, then 105 `r` rows in one call. The
+//! assertions parse the log rather than pin those numbers.
+//!
+//! The
 //! `Recovered` path had a working roll-forward before this change and still
 //! does; `restoration_deadline.rs` is what covers the multi-call arm. The
 //! `Infeasible_Problem_Detected` and `MaximumIterationsExceeded` restoration
@@ -44,15 +56,14 @@ use std::process::Command;
 
 const MODEL: &str = "square_flowsheet_resto.nl";
 
-/// The fixture solves on a second-opinion rung, which would hide the failing
-/// path this file is about — so the ladder is switched off.
-///
-/// Both rungs a `Restoration_Failed` can reach have to be named: the gh#815
-/// displacement rung, and gh#857's `feral_increase_quality_retry`, which opens
-/// on the same verdict and recovers this fixture by undoing the factorization
-/// escalation. Leaving either on promotes a `Solve_Succeeded` and there is no
-/// restoration-terminating solve left to measure. A rung added later that
-/// catches this trigger belongs here too.
+/// `tol=1e-11` is what puts the fixture on the terminating path under FERAL
+/// 0.21 (module comment). The ladder is switched off so that the run's last
+/// printed rows are the base solve's own: every rung a `Restoration_Failed`
+/// can reach is named — the gh#815 displacement rung, gh#857's
+/// `feral_increase_quality_retry`, and the square-system stage. None of them
+/// recovers the model at this `tol`, but each would print its own iteration
+/// table after the base solve's, and the identity is about one solve. A rung
+/// added later that catches this trigger belongs here too.
 fn run_to_restoration_failure() -> String {
     let mut model = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     model.push("tests");
@@ -63,6 +74,7 @@ fn run_to_restoration_failure() -> String {
     let out = Command::new(PathBuf::from(env!("CARGO_BIN_EXE_pounce")))
         .arg(&model)
         .arg(&sol)
+        .arg("tol=1e-11")
         .arg("infeasibility_perturbed_start_retry=no")
         .arg("feral_increase_quality_retry=no")
         .arg("square_system_recovery=no")

@@ -952,10 +952,11 @@ mod tests {
             r["restoration_calls"].as_i64().unwrap_or(0) > 0,
             "the fixture no longer exercises restoration: {r}"
         );
-        // Same optimum the CLI reports for this fixture.
+        // Same optimum the CLI reports for this fixture: since feral 0.21,
+        // the global one (MINLPLib -4391.825893), not Ipopt's -3273.955.
         let obj = r["objective"].as_f64().unwrap_or(f64::NAN);
         assert!(
-            (obj + 3273.9549922501797).abs() < 1e-4,
+            (obj + 4391.826007391657).abs() < 1e-4,
             "unexpected objective {obj}"
         );
     }

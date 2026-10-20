@@ -8,7 +8,7 @@
 //! loses whole solves on others. Its own option text has said so since gh#850,
 //! and the documented remedy for the losing side was for the user to notice,
 //! read the option, and re-run. `square_flowsheet_resto` is the fixture that
-//! measures both halves:
+//! measured both halves when this rung was written, on FERAL 0.20:
 //!
 //! ```text
 //!   exact  escalating   Restoration_Failed/131   (rung 3 rescues it: 54, tot 185)
@@ -20,6 +20,25 @@
 //! The lbfgs leg is the one with no recovery, and it is not a rare path — the
 //! Python frontend and the CasADi plugin both select `limited-memory`
 //! automatically when no exact Lagrangian Hessian is available.
+//!
+//! # What FERAL 0.21 moved, and where the rung is measured now
+//!
+//! The 0.21 bump took both of those witnesses away. The exact leg now reaches
+//! `Optimal` in 95 with the escalation on (59 with it off), so it opens no
+//! ladder at all; the lbfgs leg still runs to the cap with the escalation on,
+//! but now runs to it with the escalation **off** too, so rung 4 re-solves it
+//! and fails — the square-system stage is what recovers it, in 8. Across the
+//! whole fixture sweep on 0.21 no default-options run is promoted by rung 4.
+//!
+//! The rung is not wrong for that; the trade it answers moved from the verdict
+//! to the iteration count. And that is what still reaches it: the exact leg's
+//! escalated trajectory takes 95 iterations and its un-escalated one 59, so a
+//! budget between the two — [`EXACT_CAP`], `max_iter=75` — is exhausted by the
+//! escalating solve (three escalations by then) and not by the re-solve, which
+//! is the gh#857 situation exactly: a capped run the escalation walked into the
+//! wall, recovered by undoing it. The cap sits sixteen iterations clear of
+//! each side. The tests that pin the rung, the stand-down and the switch all
+//! run there.
 //!
 //! # Why the gate is a measurement
 //!
@@ -37,13 +56,17 @@
 //! below is the branch that keeps the cost at zero, and it is the test, not a
 //! duplicate of the one above it.
 //!
-//! It is a gate at `>= 1` and deliberately not a threshold: `deb7` escalates
-//! exactly as many times as this fixture's base solve and *gains* by it. The
-//! count cannot separate the two; the verdict can.
+//! It is a gate at `>= 1` and deliberately not a threshold: on FERAL 0.20
+//! `deb7` escalated exactly as many times as this fixture's base solve and
+//! *gained* by it, and on 0.21 this fixture's own exact leg escalates four
+//! times and reaches `Optimal`. The count cannot separate the two; the
+//! verdict can.
 //!
-//! # Why the lbfgs arms name an explicit `max_iter`
+//! # Why the lbfgs arms named an explicit `max_iter`
 //!
-//! Left to run free, this fixture's lbfgs leg does not reach the same verdict
+//! (FERAL 0.20 history; the lbfgs arms moved to the exact leg at
+//! [`EXACT_CAP`] above, and the one lbfgs arm left caps at 500 for the same
+//! reason.) Left to run free, this fixture's lbfgs leg did not reach the same verdict
 //! on every platform. On macOS/aarch64 it exhausts the 3000-iteration default
 //! and exits `Maximum_Iterations_Exceeded`; on linux/x86_64 it spends the same
 //! 3000 iterations with the same 25 escalations and then exits
@@ -69,10 +92,13 @@
 //!
 //! # Appended, not prepended
 //!
-//! On a `Restoration_Failed` the gh#815 displacement rung runs first and
-//! promotes first. `square_flowsheet_resto`'s exact leg is exactly that case,
-//! so it reaches the same answer in the same 185 iterations it did before —
-//! `the_exact_leg_is_unchanged_because_the_new_rung_is_last` is the pin.
+//! An earlier rung that recovers the model promotes before rung 4 runs. On
+//! FERAL 0.20 the witness was `square_flowsheet_resto`'s exact leg, where the
+//! gh#815 displacement rung promoted at the same 185 total as before gh#857.
+//! On 0.21 that leg opens no ladder, and the witness is `circle_parabola_t0p5`
+//! on the lbfgs leg: an escalating local-infeasibility verdict, all four rungs
+//! open, and rung 1 promotes —
+//! `the_new_rung_is_last_so_an_earlier_promotion_is_unchanged` is the pin.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -90,11 +116,36 @@ fn fixture(name: &str) -> PathBuf {
     p
 }
 
+/// `square_flowsheet_resto`'s exact leg capped between its escalated (95)
+/// and un-escalated (59) trajectories; see the module comment.
+const EXACT_CAP: &str = "max_iter=75";
+
 struct Run {
     out: String,
     /// The reported iteration count, which on a promoted run is the promoted
     /// rung's — the same field the sweep's `it=` column reads.
     iterations: i64,
+    /// The JSON report, for the `second_opinion` block: which rungs ran and
+    /// which one promoted, read from the report rather than the narration.
+    report: serde_json::Value,
+}
+
+impl Run {
+    /// `second_opinion.tried`, empty when no ladder ran.
+    fn tried(&self) -> Vec<String> {
+        self.report["second_opinion"]["tried"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn promoted_by(&self) -> Option<&str> {
+        self.report["second_opinion"]["promoted_by"].as_str()
+    }
 }
 
 fn solve(model: &str, extra: &[&str]) -> Run {
@@ -121,6 +172,8 @@ fn solve(model: &str, extra: &[&str]) -> Run {
         .output()
         .expect("run pounce");
     let text = std::fs::read_to_string(&json).expect("json report written");
+    let _ = std::fs::remove_file(&json);
+    let _ = std::fs::remove_file(&sol);
     let key = "\"iteration_count\":";
     let at = text.find(key).expect("iteration_count in report");
     let digits: String = text[at + key.len()..]
@@ -135,6 +188,7 @@ fn solve(model: &str, extra: &[&str]) -> Run {
             String::from_utf8_lossy(&out.stderr)
         ),
         iterations: digits.parse().expect("numeric iteration_count"),
+        report: serde_json::from_str(&text).expect("report parses"),
     }
 }
 
@@ -155,22 +209,22 @@ fn ladder_lines(out: &str) -> Vec<&str> {
 
 /// The fix. A capped solve that escalated is re-solved without the
 /// escalation, and that re-solve converges.
+///
+/// On FERAL 0.20 this ran on the lbfgs leg at `max_iter=500` (500 capped,
+/// then rung 4 at 178). On 0.21 rung 4 cannot recover that leg at any budget,
+/// so it runs on the exact leg at [`EXACT_CAP`]: 75 capped with three
+/// escalations, then rung 4 at 59.
 #[test]
 fn an_escalating_budget_exit_recovers_by_undoing_the_escalation() {
-    let run = solve(
-        "square_flowsheet_resto.nl",
-        &["hessian_approximation=limited-memory", "max_iter=500"],
-    );
+    let run = solve("square_flowsheet_resto.nl", &[EXACT_CAP]);
     // The base solve must still hit the cap: this rung recovers a failure,
     // it does not prevent one.
     //
     // Read off the FIRST attempt's own statistics block rather than off an
-    // `EXIT: Maximum Number of Iterations Exceeded` banner, which is what
-    // this used to match. The verdict is now printed once per run rather
-    // than once per attempt, so the only `EXIT:` line here is the promoted
-    // rung's `Optimal Solution Found` — see
-    // `one_verdict_per_run.rs`. The per-attempt statistics block is
-    // unchanged, and it is the more direct evidence anyway: it reports the
+    // `EXIT: Maximum Number of Iterations Exceeded` banner. The verdict is
+    // printed once per run rather than once per attempt, so the only `EXIT:`
+    // line here is the promoted rung's `Optimal Solution Found` — see
+    // `one_verdict_per_run.rs`. The per-attempt statistics block reports the
     // base attempt's own count instead of a status string that a later
     // attempt could also have produced.
     let base_iters: i64 = run
@@ -180,8 +234,8 @@ fn an_escalating_budget_exit_recovers_by_undoing_the_escalation() {
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or_else(|| panic!("no per-attempt iteration count:\n{}", run.out));
     assert!(
-        base_iters >= 500,
-        "the base solve should still hit the 500-iteration cap; its own \
+        base_iters >= 75,
+        "the base solve should still hit the 75-iteration cap; its own \
          summary reports {base_iters}:\n{}",
         run.out
     );
@@ -201,31 +255,42 @@ fn an_escalating_budget_exit_recovers_by_undoing_the_escalation() {
                 .contains("feral_increase_quality=no re-solve recovered the problem — promoting")),
         "{lines:#?}"
     );
+    assert_eq!(
+        (run.tried(), run.promoted_by()),
+        (
+            vec!["feral_increase_quality=no".to_string()],
+            Some("feral_increase_quality=no")
+        ),
+        "the report must name rung 4 as the one rung tried and the one that \
+         promoted"
+    );
     assert!(
         run.out.contains("EXIT: Optimal Solution Found"),
         "{}",
         run.out
     );
     assert!(
-        run.iterations < 500,
-        "the promoted rung is the un-escalated solve, which converges well \
-         inside the cap the base solve ran out of — the same trajectory a \
-         user gets by setting feral_increase_quality=no by hand (178 \
-         iterations here at the time of writing):\n{}",
+        run.iterations < 75,
+        "the promoted rung is the un-escalated solve, which converges inside \
+         the cap the base solve ran out of — the same trajectory a user gets \
+         by setting feral_increase_quality=no by hand (59 iterations when \
+         FERAL 0.21 was taken):\n{}",
         run.out
     );
 }
 
 /// The rung's own enable, and the evidence that the recovery above is this
 /// rung and not something else: turn it off and the pre-gh#857 verdict comes
-/// straight back.
+/// straight back. Same fixture, leg and cap as the recovery test, so the only
+/// difference between the two runs is the switch. (The square-system stage
+/// is switched off too: it opens on the same budget exit of this square model
+/// and would otherwise answer instead.)
 #[test]
 fn the_rung_can_be_turned_off_and_the_old_verdict_returns() {
     let run = solve(
         "square_flowsheet_resto.nl",
         &[
-            "hessian_approximation=limited-memory",
-            "max_iter=500",
+            EXACT_CAP,
             "feral_increase_quality_retry=no",
             "square_system_recovery=no",
         ],
@@ -242,7 +307,7 @@ fn the_rung_can_be_turned_off_and_the_old_verdict_returns() {
         run.out
     );
     assert!(
-        run.iterations >= 500,
+        run.iterations >= 75,
         "and the verdict that stands is the capped one:\n{}",
         run.out
     );
@@ -343,6 +408,23 @@ fn a_budget_exit_that_never_escalated_is_left_alone() {
 
 /// The rung is dropped when the baseline already ran with the escalation
 /// off, where it would re-run the solve that just failed.
+///
+/// On FERAL 0.20 this combination converged (`Optimal`/178), so the test
+/// could only show that nothing was re-solved on a run that never failed. On
+/// 0.21 the lbfgs leg runs to the cap with the escalation off as well, which
+/// is the case the drop is for: a budget exit, from a baseline that already
+/// declined the escalation, gets no rung 4. The cap is 500 for the reason the
+/// module header gives, and the square-system stage is switched off because
+/// it would otherwise answer this budget exit of a square model.
+///
+/// Read what this can and cannot catch. With the escalation off the solve
+/// cannot escalate, so `quality_escalations` is 0 and the `>= 1` gate drops
+/// the rung on its own; removing `already_no_increase_quality` alone leaves
+/// this green. That branch is pinned directly, with a nonzero count, by
+/// `the_quality_rung_is_droppable_and_never_a_no_op` in
+/// `pounce-algorithm/src/second_opinion.rs`. What this pins end to end is the
+/// observable contract: the failing verdict stands, and no rung is narrated or
+/// recorded.
 #[test]
 fn a_baseline_that_already_declined_the_escalation_gets_no_rung() {
     let run = solve(
@@ -350,53 +432,81 @@ fn a_baseline_that_already_declined_the_escalation_gets_no_rung() {
         &[
             "hessian_approximation=limited-memory",
             "feral_increase_quality=no",
+            "max_iter=500",
+            "square_system_recovery=no",
         ],
     );
-    // This combination happens to converge, so the ladder never opens at all;
-    // the assertion that matters is that the answer is the un-escalated one
-    // and nothing was re-solved to get it.
     assert!(
-        run.out.contains("EXIT: Optimal Solution Found"),
-        "{}",
+        run.out
+            .contains("EXIT: Maximum Number of Iterations Exceeded"),
+        "premise: with the escalation off this leg still runs to the cap on \
+         FERAL 0.21; if it now converges the test has lost its failing \
+         baseline:\n{}",
         run.out
     );
-    assert_eq!(run.iterations, 178);
     assert!(ladder_lines(&run.out).is_empty(), "{}", run.out);
+    assert!(
+        run.tried().is_empty(),
+        "no rung may be recorded either: {:?}",
+        run.tried()
+    );
+    assert!(run.iterations >= 500, "{}", run.out);
 }
 
 /// Appended, not prepended — the ordering claim, measured.
 ///
-/// The exact leg fails with `Restoration_Failed` after escalating twice, so
-/// both rung 3 and rung 4 are open. Rung 3 runs first and promotes, so the
-/// leg reaches the same answer at the same cost it did before gh#857: 131 in
-/// the base solve plus 54 in the rung. Rung 4 is announced and never run.
+/// `circle_parabola_t0p5` on the lbfgs leg exits `Infeasible_Problem_Detected`
+/// at 48 having escalated, so all four rungs are open, rung 4 last. Rung 1
+/// (`feral_scaling=mc64`) runs first and promotes at 77, so the leg reaches
+/// the same answer at the same cost it would without rung 4: 48 in the base
+/// solve plus 77 in the rung, 125 total — identical on FERAL 0.20 and 0.21.
+/// Rung 4 is announced and never run.
+///
+/// On 0.20 this was `square_flowsheet_resto`'s exact leg (`Restoration_Failed`,
+/// rung 3 promoting at 54); on 0.21 that leg opens no ladder at all, and no
+/// restoration failure in the corpus is recovered by any rung. The claim is
+/// the same one either way: rung 4 cannot cost an earlier rung's promotion
+/// anything.
 #[test]
-fn the_exact_leg_is_unchanged_because_the_new_rung_is_last() {
-    let run = solve("square_flowsheet_resto.nl", &[]);
+fn the_new_rung_is_last_so_an_earlier_promotion_is_unchanged() {
+    let run = solve(
+        "circle_parabola_t0p5.nl",
+        &["hessian_approximation=limited-memory"],
+    );
     let lines = ladder_lines(&run.out);
     assert!(
         lines.iter().any(|l| l.contains(
-            "restoration failure — re-solving along 2 different trajectories \
-             before believing it (second-opinion ladder: \
-             start_point_perturbation=1e-2, feral_increase_quality=no)"
+            "local infeasibility — re-solving along 4 different trajectories \
+             before believing it (second-opinion ladder: feral_scaling=mc64, \
+             mu_strategy=adaptive, start_point_perturbation=1e-2, \
+             feral_increase_quality=no)"
         )),
-        "both rungs should be open, in this order:\n{lines:#?}"
+        "all four rungs should be open, rung 4 last:\n{lines:#?}"
     );
     assert!(
-        lines.iter().any(|l| l
-            .contains("start_point_perturbation=1e-2 re-solve recovered the problem — promoting")),
+        lines
+            .iter()
+            .any(|l| l.contains("feral_scaling=mc64 re-solve recovered the problem — promoting")),
         "{lines:#?}"
     );
     assert!(
         !lines
             .iter()
             .any(|l| l.contains("re-solving with feral_increase_quality=no")),
-        "rung 3 promoted, so rung 4 must never have run — an extra solve \
+        "rung 1 promoted, so rung 4 must never have run — an extra solve \
          here is the cost this ordering exists to avoid:\n{lines:#?}"
     );
     assert_eq!(
-        run.iterations, 54,
-        "the promoted rung's own count, unchanged from before gh#857"
+        (run.tried(), run.promoted_by()),
+        (
+            vec!["feral_scaling=mc64".to_string()],
+            Some("feral_scaling=mc64")
+        ),
+        "the report must record one rung tried, the first"
+    );
+    assert_eq!(
+        run.iterations, 77,
+        "the promoted rung's own count, unchanged by gh#857 and by FERAL 0.21"
     );
 }
 
@@ -411,6 +521,10 @@ fn solve_count(out: &str) -> usize {
 }
 
 /// The μ-strategy stall retry stands down for this rung (gh#857 follow-up).
+///
+/// Measured where the rung is measured now, the exact leg at [`EXACT_CAP`]:
+/// two summary blocks, 75 capped and 59 in rung 4. The figures in the next
+/// two paragraphs are the lbfgs leg's on FERAL 0.20, where this was found.
 ///
 /// Before this, an escalating budget exit paid for **two** rescue solves and
 /// used one. `run_with_mu_strategy_fallback` fires unconditionally on
@@ -437,10 +551,7 @@ fn solve_count(out: &str) -> usize {
 /// spend it on.
 #[test]
 fn the_mu_flip_stands_down_when_the_escalation_rung_is_open() {
-    let run = solve(
-        "square_flowsheet_resto.nl",
-        &["hessian_approximation=limited-memory", "max_iter=500"],
-    );
+    let run = solve("square_flowsheet_resto.nl", &[EXACT_CAP]);
     assert_eq!(
         solve_count(&run.out),
         2,
@@ -449,8 +560,13 @@ fn the_mu_flip_stands_down_when_the_escalation_rung_is_open() {
          the escalation still governs:\n{}",
         run.out
     );
+    assert_eq!(
+        run.tried(),
+        vec!["feral_increase_quality=no".to_string()],
+        "the second block is rung 4's"
+    );
     assert!(
-        run.iterations < 500,
+        run.iterations < 75,
         "and the promoted answer is the rung's, not a capped one:\n{}",
         run.out
     );
@@ -463,14 +579,15 @@ fn the_mu_flip_stands_down_when_the_escalation_rung_is_open() {
 ///
 /// This is the branch that keeps the stand-down from being a silent removal of
 /// the flip. It is also the arm that measures what the flip was worth here:
-/// two solves, 6000 iterations, and the same `Maximum_Iterations_Exceeded`.
+/// two solves, 150 iterations at [`EXACT_CAP`], and the same
+/// `Maximum_Iterations_Exceeded` (on FERAL 0.20's lbfgs leg, 6000 and the
+/// same verdict).
 #[test]
 fn turning_the_rung_off_gives_the_mu_flip_back() {
     let run = solve(
         "square_flowsheet_resto.nl",
         &[
-            "hessian_approximation=limited-memory",
-            "max_iter=500",
+            EXACT_CAP,
             "feral_increase_quality_retry=no",
             "square_system_recovery=no",
         ],
@@ -488,7 +605,7 @@ fn turning_the_rung_off_gives_the_mu_flip_back() {
         run.out
     );
     assert!(
-        run.iterations >= 500,
+        run.iterations >= 75,
         "both solves ran the budget out, and the second one's verdict is what \
          is reported:\n{}",
         run.out
@@ -500,21 +617,55 @@ fn turning_the_rung_off_gives_the_mu_flip_back() {
 /// `run_with_mu_strategy_fallback` also retries `Solved_To_Acceptable_Level`,
 /// and `SecondOpinionTrigger::for_status` maps that status to **no trigger at
 /// all** — so declining the flip there would drop a retry with nothing in its
-/// place. The exact leg is the control for the other half: it exits
-/// `Restoration_Failed`, which is not retry-worthy for the flip in the first
-/// place, so the ladder is reached exactly as before and rung 3 still
-/// promotes at 54.
+/// place. This is the control for the other half: a `Restoration_Failed` exit
+/// from a solve that escalated (four times), which is not retry-worthy for the
+/// flip in the first place, so the ladder must be reached exactly as it would
+/// be without the stand-down — rung 3, then rung 4, one solve each.
+///
+/// On FERAL 0.20 the control was `square_flowsheet_resto`'s exact leg at the
+/// default `tol`, which failed in restoration and was rescued by rung 3 at 54.
+/// On 0.21 that leg solves, and the restoration failure is reached below the
+/// model's round-off floor instead (`tol=1e-11`; see
+/// `issue_815_restoration_ladder.rs`), where no rung recovers it.
+///
+/// What this is not evidence about: the acceptable-level half. No fixture-leg
+/// in the corpus reaches the μ flip with `Solved_To_Acceptable_Level` *and* an
+/// escalation on 0.21 — `deb7`'s exact leg reports that status with two
+/// escalations, but as the final-verdict downgrade gh#983 applies after every
+/// retry has decided, so the flip only ever sees its `Solve_Succeeded`. A
+/// stand-down widened to every retry-worthy status would leave this test
+/// green; the scope is held by the `matches!` in
+/// `run_with_mu_strategy_fallback` and by this comment, not by a fixture.
 #[test]
-fn the_stand_down_does_not_reach_the_exact_leg() {
-    let run = solve("square_flowsheet_resto.nl", &[]);
+fn the_stand_down_does_not_reach_a_restoration_failure() {
+    let run = solve("square_flowsheet_resto.nl", &["tol=1e-11"]);
+    let lines = ladder_lines(&run.out);
     assert!(
-        run.out.contains("EXIT: Optimal Solution Found"),
-        "{}",
+        lines.iter().any(|l| l.contains(
+            "restoration failure — re-solving along 2 different trajectories \
+             before believing it (second-opinion ladder: \
+             start_point_perturbation=1e-2, feral_increase_quality=no)"
+        )),
+        "both rungs should be open, in this order:\n{lines:#?}"
+    );
+    assert_eq!(
+        solve_count(&run.out),
+        3,
+        "the base solve and one solve per rung — no μ flip, which a \
+         restoration failure never buys, and no rung dropped:\n{}",
         run.out
     );
     assert_eq!(
-        run.iterations, 54,
-        "rung 3 still rescues the exact leg, unchanged:\n{}",
+        &run.tried()[..2],
+        &[
+            "start_point_perturbation=1e-2".to_string(),
+            "feral_increase_quality=no".to_string()
+        ],
+        "the report must record both rungs, in ladder order"
+    );
+    assert!(
+        run.out.contains("Status: Restoration_Failed"),
+        "below the round-off floor nothing recovers it:\n{}",
         run.out
     );
 }

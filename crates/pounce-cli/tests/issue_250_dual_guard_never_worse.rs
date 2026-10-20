@@ -227,8 +227,11 @@ fn dual_guard_diversion_returns_a_stationary_point() {
 /// Fails if the default is flipped back on.
 #[test]
 fn pooling_rt2stp_solves_at_default_settings() {
-    // Ipopt on the identical .nl: -3273.9549927585640, NLP error ~1e-8.
-    const EXPECTED: f64 = -3_273.954_991_374_754_6;
+    // Since feral 0.21 the default solve reaches the global optimum,
+    // MINLPLib's primal bound for pooling_rt2stp (-4391.825893, closed by
+    // BARON/ANTIGONE/SCIP). Ipopt on the identical .nl stops at the local
+    // -3273.9549927585640, which pounce also reached on feral <= 0.20.
+    const EXPECTED: f64 = -4_391.826_007_391_657;
     let report = solve("pooling_rt2stp.nl", &[HANG_GUARD]);
     // `0` exactly: since gh #591 the `0..=99` solved band also holds `1`
     // (`Solved_To_Acceptable_Level`), which is not what this model did before

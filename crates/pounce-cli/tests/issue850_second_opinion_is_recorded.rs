@@ -47,6 +47,19 @@
 //! instance the issue never mentions, `degenerate_start_hs008`, whose base
 //! solve returns `Infeasible_Problem_Detected` at 9 iterations and which is
 //! reported `SolveSucceeded` at `it=5` against a true cost of 30.
+//!
+//! # Which fixture the tests use
+//!
+//! `degenerate_start_hs008`, as of the FERAL 0.21 bump. The tests were written
+//! against `square_flowsheet_resto`, and on 0.21 that fixture's exact leg no
+//! longer loses its base solve — it reaches `Optimal` in 95 with no ladder —
+//! so it stopped being a promotion and the premise test below read
+//! `SolveSucceeded`. `degenerate_start_hs008` has the property this file needs
+//! at the default options on the exact leg, on both versions: the base solve
+//! fails (`Infeasible_Problem_Detected`/9), three rungs run (9, 7 and 5), and
+//! the third, `start_point_perturbation=1e-2`, promotes. That makes it the
+//! stronger witness for the cost test too, because a total that summed only
+//! the promoted rung would be right on a one-rung ladder and wrong here.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -175,26 +188,34 @@ fn string(json: &str, key: &str) -> Option<String> {
     Some(rest[..end].to_string())
 }
 
-const PROMOTING: &str = "square_flowsheet_resto.nl";
+/// A fixture whose base solve fails and whose ladder promotes, at the default
+/// options. See the module comment for why it is not `square_flowsheet_resto`.
+const PROMOTING: &str = "degenerate_start_hs008.nl";
 
 /// The premise, asserted rather than assumed: this fixture's base solver really
 /// does fail, and the ladder really is what rescues it. Turning the rungs off
 /// is how the report separates the two.
 ///
-/// Note the plural. This test disables **every** rung the fixture's verdict
-/// can reach, which as of gh#857 is two: the displacement rung it was written
-/// against, and `feral_increase_quality_retry`, which opens on the same
-/// `Restoration_Failed` and recovers this leg by a different route (undoing
-/// the factorization escalation that produced the failure in the first place —
-/// see `issue850_increase_quality_regression.rs`). Leaving that one on turns
-/// "the base solver alone" into "the base solver plus one rung", and the
-/// premise reads `SolveSucceeded`. A rung added later that also catches
-/// `Restoration_Failed` belongs in this list for the same reason.
+/// Note the plural. This test disables **every** rung a local-infeasibility
+/// verdict can reach: the two infeasibility rungs, the displacement rung that
+/// promotes here, `feral_increase_quality_retry` (closed on this fixture
+/// anyway, since it never escalates, but named so the premise does not rest on
+/// a count), and the square-system stage — HS008 is square with a constant
+/// objective, so the stage would otherwise run once the rungs are gone. Leaving
+/// any one on turns "the base solver alone" into "the base solver plus a
+/// rung". A rung added later that catches `Infeasible_Problem_Detected`
+/// belongs in this list for the same reason.
+///
+/// On FERAL 0.20 this test ran on `square_flowsheet_resto`, whose base solve
+/// failed `RestorationFailed`/131; on 0.21 that solve converges, which is
+/// why the fixture moved (module comment).
 #[test]
 fn the_base_solver_alone_does_not_solve_this_fixture() {
     let json = report(
         PROMOTING,
         &[
+            "feral_infeasibility_scaling_retry=no",
+            "infeasibility_mu_strategy_retry=no",
             "infeasibility_perturbed_start_retry=no",
             "feral_increase_quality_retry=no",
             "square_system_recovery=no",
@@ -202,7 +223,7 @@ fn the_base_solver_alone_does_not_solve_this_fixture() {
     );
     let status = string(&json, "status").expect("a status");
     assert_eq!(
-        status, "RestorationFailed",
+        status, "InfeasibleProblemDetected",
         "premise: without the rung this fixture fails; if it now solves, this \
          file's subject has been fixed and the fixture needs replacing"
     );
@@ -220,7 +241,7 @@ fn a_promotion_records_what_the_base_solve_did() {
     );
     assert_eq!(
         string(&json, "base_status").as_deref(),
-        Some("Restoration_Failed"),
+        Some("Infeasible_Problem_Detected"),
         "the base solve's own verdict is the thing that was invisible"
     );
     assert_eq!(
