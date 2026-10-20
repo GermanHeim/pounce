@@ -2289,7 +2289,17 @@ fn real_main() -> ExitCode {
     // factor, with the objective beside it unchanged and right. Silent,
     // plausible, wrong: the shape this whole block exists to remove, one
     // wrapper over.
-    if app.answer_restored_from_floor() {
+    //
+    // The square-system stage of the ladder is the same case by another
+    // route: it finalizes `counting` directly, outside every
+    // `optimize_tnlp`, so `on_converged` never sees its point. Today the cell
+    // is empty whenever it runs — `on_converged` fires only on a converged
+    // attempt, and a converged rung would have promoted first — so this is
+    // the backfill above made unconditional, for the one promotion whose
+    // answer by construction never passes through that hook.
+    let square_system_promoted = second_opinion.promoted_by
+        == Some(pounce_algorithm::square_system::SQUARE_SYSTEM_RUNG_LABEL);
+    if app.answer_restored_from_floor() || square_system_promoted {
         if let Some(xl) = counting.borrow().captured_solution() {
             *nominal_capture.borrow_mut() = Some(xl);
             x_capture_from_finalize = true;
@@ -2597,7 +2607,14 @@ fn real_main() -> ExitCode {
         // Read after the solve, so it is also right for the late convex
         // declines above: those call back into `optimize_tnlp` and get
         // whichever arm the option selects, long after the banner printed.
-        builder.solution.engine = if app.is_sqp_algorithm_selected() {
+        //
+        // A square-system promotion answered from Levenberg–Marquardt on
+        // `c(x) = 0`, not from the interior-point iterate, so it gets its own
+        // name: reported as `nlp`, a model moving onto that stage would move
+        // only `2nd=` in the sweep and hide which algorithm produced `x`.
+        builder.solution.engine = if square_system_promoted {
+            "square-lm"
+        } else if app.is_sqp_algorithm_selected() {
             "sqp-active-set"
         } else {
             "nlp"

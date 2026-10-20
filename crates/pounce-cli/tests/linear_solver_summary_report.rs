@@ -65,9 +65,10 @@ fn u(v: &serde_json::Value, key: &str) -> u64 {
 /// Switches the ladder off, so the restoration-terminating path is what is
 /// measured (see `issue_819_restoration_iteration_count.rs` for why both
 /// rungs have to be named).
-const NO_LADDER: [&str; 2] = [
+const NO_LADDER: [&str; 3] = [
     "infeasibility_perturbed_start_retry=no",
     "feral_increase_quality_retry=no",
+    "square_system_recovery=no",
 ];
 
 #[test]

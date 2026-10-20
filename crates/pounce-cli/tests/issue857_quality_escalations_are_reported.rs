@@ -192,6 +192,7 @@ fn the_lbfgs_leg_reports_heavy_escalation_and_the_option_stops_it() {
         &[
             "hessian_approximation=limited-memory",
             "feral_increase_quality_retry=no",
+            "square_system_recovery=no",
         ],
     );
     assert!(

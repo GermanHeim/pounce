@@ -142,7 +142,7 @@ fixture-legs and flips `scaled_feasible_a` on the lbfgs leg from
 `MaximumIterationsExceeded`/199 to `SolveSucceeded`/69.
 
 Each line also records **which engine solved the model** (`cvx-qp`,
-`cvx-qcqp`, `qp-active-set`, `sqp-active-set`, `nlp`). Status, objective and
+`cvx-qcqp`, `qp-active-set`, `sqp-active-set`, `square-lm`, `nlp`). Status, objective and
 iteration count can all be unchanged while a model silently changes arms, so a
 routing regression used to leave no trace in the diff. A line whose only moving
 field is the engine is a routing change, and is as reportable as a moved
@@ -155,6 +155,13 @@ synonyms — both solve their subproblems with `pounce-qp`, which is why the
 names are close. The SQP arm reported `nlp` until it was fixed, so a sweep
 taken against a binary older than that shows every SQP line moving in this
 column and nothing else; that is the reporting fix, not a reroute.
+
+`square-lm` is not routed to: it is the last stage of the second-opinion
+ladder (`pounce_algorithm::square_system`), which runs only after the NLP arm
+and every option rung have failed on a square, constant-objective model, and
+answers from Levenberg–Marquardt on `c(x) = 0`. A line moving `nlp` →
+`square-lm` means the IPM stopped solving that model, which is a regression
+to explain even though the status reads `SolveSucceeded`.
 
 The engine is read from the JSON report's `solution.engine`. When a fixture
 produces no JSON at all — `deb7` on the L-BFGS leg under

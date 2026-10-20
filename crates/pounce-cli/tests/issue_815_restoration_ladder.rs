@@ -130,6 +130,7 @@ fn the_ladder_can_be_switched_off() {
     let log = run(&[
         "infeasibility_perturbed_start_retry=no",
         "feral_increase_quality_retry=no",
+        "square_system_recovery=no",
     ]);
     assert!(
         log.contains("EXIT: Restoration Failed!"),

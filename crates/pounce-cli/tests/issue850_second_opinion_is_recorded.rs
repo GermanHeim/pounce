@@ -197,6 +197,7 @@ fn the_base_solver_alone_does_not_solve_this_fixture() {
         &[
             "infeasibility_perturbed_start_retry=no",
             "feral_increase_quality_retry=no",
+            "square_system_recovery=no",
         ],
     );
     let status = string(&json, "status").expect("a status");

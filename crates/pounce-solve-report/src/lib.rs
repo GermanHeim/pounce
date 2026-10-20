@@ -444,7 +444,11 @@ pub struct ProblemInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolutionInfo {
     /// Which engine produced this verdict: `"cvx-qp"`, `"cvx-qcqp"`,
-    /// `"qp-active-set"`, `"sqp-active-set"` or `"nlp"`.
+    /// `"qp-active-set"`, `"sqp-active-set"`, `"square-lm"` or `"nlp"`.
+    ///
+    /// `"square-lm"` is the second-opinion ladder's square-system stage
+    /// (`pounce_algorithm::square_system`): the NLP arm ran and failed, and
+    /// the reported point came from Levenberg–Marquardt on `c(x) = 0`.
     ///
     /// `"qp-active-set"` and `"sqp-active-set"` are different engines and
     /// not synonyms: the first is `pounce_convex::active_set` reached by
