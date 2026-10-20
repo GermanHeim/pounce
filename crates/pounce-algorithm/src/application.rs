@@ -174,6 +174,26 @@ const SCALE_AUDIT_MAX_UPSCALE: Number = 1e10;
 /// declined re-solve whose factor, re-evaluated at the optimum, was the one
 /// it already had.
 const SCALE_AUDIT_MATERIAL: Number = 10.0;
+/// The re-solve's iteration budget is this multiple of the base solve's
+/// iterations (never more than the caller's `max_iter`, never less than
+/// [`SCALE_AUDIT_RETRY_MIN_ITER`]).
+///
+/// The re-solve is a bet placed after the run has already succeeded, so it is
+/// bounded by what the run cost. Measured over the 64 audited solves of the
+/// 1,345-problem release sweep (`origin/main` @ `68e438d0`): every promoted
+/// re-solve but one took at most 2.4x the base iterations, or fewer than 50
+/// (`sreadin3` 8 -> 19, `reading2` 15 -> 29, `camshape_6400` 88 -> 112). The
+/// exception is `robot_b`, 271 -> 1425 iterations and 23 s -> 178 s for a
+/// 1.3e-6 relative move in the objective; it now keeps its base answer, which
+/// was already `Solve_Succeeded`. The declined side is where the cost was:
+/// `meyer3` 256 -> 3000 + 3000 (the re-solve's own mu flip), and the
+/// `brainpc` family, where a 1-2 s solve was followed by a re-solve of a
+/// minute or more that was then discarded -- under the benchmark's 300 s
+/// wall it never returned, so the base `Optimal` was lost as a timeout.
+const SCALE_AUDIT_RETRY_ITER_FACTOR: Index = 3;
+/// Floor on the re-solve's iteration budget, so a base solve of a handful of
+/// iterations still leaves the re-solve room to move.
+const SCALE_AUDIT_RETRY_MIN_ITER: Index = 50;
 /// Under a warm start, an objective gradient measured at an *answer* (the
 /// seed, or the returned point) that is within this factor of the run's
 /// unscaled complementarity is what the barrier alone leaves behind
@@ -2271,9 +2291,7 @@ impl IpoptApplication {
         self.audit_solve_quality(tnlp, status)
     }
 
-    /// [`Self::dispatch_standard_solve`] without the gh#983 quality audit,
-    /// which is what the audit's own re-solve calls (it must not audit its
-    /// own retry).
+    /// [`Self::dispatch_standard_solve`] without the gh#983 quality audit.
     fn dispatch_standard_solve_inner(
         &mut self,
         tnlp: Rc<RefCell<dyn TNLP>>,
@@ -5088,6 +5106,23 @@ impl IpoptApplication {
         let Some(seed) = solution_floor.as_ref().map(|f| f.x.clone()) else {
             return first_status;
         };
+        // Budget the re-solve: an iteration cap tied to the base solve
+        // (`SCALE_AUDIT_RETRY_ITER_FACTOR`), and only the time the caller's
+        // limits have left. Every solve builds a fresh deadline, so without
+        // this the re-solve got a second full `max_cpu_time` / `max_wall_time`
+        // after the run had already succeeded. Restored below, absence as
+        // absence.
+        let prev_iter = self.options.get_integer_value("max_iter", "").ok();
+        let prev_cpu = self.options.get_numeric_value("max_cpu_time", "").ok();
+        let prev_wall = self.options.get_numeric_value("max_wall_time", "").ok();
+        let cpu_left = prev_cpu.map(|(v, _)| v - base.total_cpu_time_secs);
+        let wall_left = prev_wall.map(|(v, _)| v - base.total_wallclock_time_secs);
+        if cpu_left.is_some_and(|t| t <= 0.0) || wall_left.is_some_and(|t| t <= 0.0) {
+            return first_status;
+        }
+        let retry_iter = (SCALE_AUDIT_RETRY_ITER_FACTOR * base.iteration_count)
+            .max(SCALE_AUDIT_RETRY_MIN_ITER)
+            .min(prev_iter.map_or(Index::MAX, |(v, _)| v));
         let seeded: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(
             pounce_nlp::seeded_tnlp::SeededTnlp::new(Rc::clone(&tnlp), seed),
         ));
@@ -5111,10 +5146,41 @@ impl IpoptApplication {
                 false,
             );
         }
+        let _ = self.options.set_integer_value("max_iter", retry_iter, true, false);
+        if let Some(t) = cpu_left {
+            let _ = self.options.set_numeric_value("max_cpu_time", t, true, false);
+        }
+        if let Some(t) = wall_left {
+            let _ = self.options.set_numeric_value("max_wall_time", t, true, false);
+        }
         tracing::debug!(target: "pounce::algorithm",
             "[POUNCE] gh#983: {:?} verdict audited ({:?}); re-solving from the \
-             returned point.", first_status, kind);
-        let retry_status = self.dispatch_standard_solve_inner(Rc::clone(&seeded));
+             returned point (max_iter {retry_iter}).", first_status, kind);
+        // One IPM solve, without the mu-strategy fallback: the re-solve is
+        // already a second opinion on a run that succeeded, and when it hit
+        // its cap the flip spent the same budget again (`meyer3` 768 + 768,
+        // `brainpc3` 120 + 120, `brainpc9` timing out in the second leg).
+        // No promoted re-solve in the release sweep needed the flip except
+        // `robot_b` past the cap, which keeps its `Solve_Succeeded` base.
+        let retry_status = self.optimize_constrained(Rc::clone(&seeded));
+        match prev_iter {
+            Some((v, true)) => {
+                let _ = self.options.set_integer_value("max_iter", v, true, false);
+            }
+            _ => {
+                self.options.unset_value("max_iter");
+            }
+        }
+        for (tag, prev) in [("max_cpu_time", prev_cpu), ("max_wall_time", prev_wall)] {
+            match prev {
+                Some((v, true)) => {
+                    let _ = self.options.set_numeric_value(tag, v, true, false);
+                }
+                _ => {
+                    self.options.unset_value(tag);
+                }
+            }
+        }
         if matches!(kind, ScaleAudit::Upscale(_)) {
             match prev_user {
                 Some(v) => {

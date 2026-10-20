@@ -278,6 +278,25 @@ changes.
   parity test's strict `xfail` on camel deflation is now a pass.
 
 ### Fixed
+- **The gh#983 scale audit's re-solve is budgeted (CLI / Python / Pyomo).**
+  After a successful solve, the audit can re-solve from the returned point
+  with the objective rescaled. That re-solve had no budget of its own. It ran
+  to the caller's full `max_iter` and was given a fresh `max_cpu_time` /
+  `max_wall_time`, so a run could take twice its time limit after it had
+  already succeeded. On the Vanderbei `brainpc3`–`9` models a 1–2 s solve was
+  followed by a re-solve of a minute or more that was then declined. Under a
+  300 s external limit it never returned, so the base `Optimal` was lost as a
+  timeout. `meyer3` spent 3000 + 3000 iterations (the re-solve's own mu flip)
+  on a re-solve that was declined. The re-solve now gets
+  `max(3 × base iterations, 50)` iterations, never more than `max_iter`, and
+  only the time the caller's limits have left; when nothing is left it is
+  skipped. It also runs once: it no longer takes a mu-strategy flip of its
+  own, which spent the same budget a second time whenever the re-solve hit
+  its cap. A declined or capped re-solve keeps the base answer, as before.
+  Across the 64 audited solves of the release benchmark sweep, every promoted
+  re-solve stays inside the budget except `robot_b` (271 → 1425 iterations,
+  23 s → 178 s, for a 1.3e-6 relative objective move). It now returns its
+  base `Solve_Succeeded` answer. The fixture sweep diffs empty on both legs.
 - **The active-set SQP arm takes the model's starting multipliers under
   `warm_start_init_point=yes`.** Only a warm start staged through
   `set_sqp_warm_start` reached it; the TNLP's own starting duals (a `.nl` `d`
