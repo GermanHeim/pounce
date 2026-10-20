@@ -997,7 +997,9 @@ pub(crate) fn configure_solver(cfg: &FeralConfig) -> Solver {
         None => {}
         Some(true) => {
             np.cascade_break_ratio = Some(0.5);
-            np.cascade_break_eps = Some(1e-10);
+            // FERAL's own default floor, so an explicit `yes` re-arms
+            // exactly what `None` inherits (it moved 1e-10 -> 1e-14 in 0.21).
+            np.cascade_break_eps = Some(feral::numeric::factorize::DEFAULT_CASCADE_BREAK_EPS);
         }
         Some(false) => {
             np.cascade_break_ratio = None;

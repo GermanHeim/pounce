@@ -284,13 +284,27 @@ pounce-minima = { path = "crates/pounce-minima", version = "0.12.0" }
 # stays open. The one breaking change, a pub `out` field on `FactorScratch`,
 # touches nothing in pounce.
 #
-# 0.20.0 is the current pin. If you ever need to develop against an unreleased
+# 0.21.0 (feral#221, #222) fixes the escalation regressions 0.19/0.20 left
+# on nql180, brainpc1/2 and qcqp1000-2c/1500-1c. A 2x2 pivot's partner must
+# now be fully summed (the 0.19 #215 budget could pair a column with one
+# that had not finished accumulating), fronts that cannot delay are factored
+# in two phases with blocked/scalar bit-parity restored, and
+# `increase_quality` declines a rung that cannot help: when the stored factor
+# already meets the next threshold (nothing floored, zeroed or forced, and
+# `max|L|·u_next <= 1`), or when the previous rung gave up on more pivots
+# than the factor before it (that rung is undone and the ladder exhausted).
+# nql180 goes from timeout to Optimal in 37 it / 55 s with 3 escalations.
+# `FactorStats::max_abs_l` is new, and the explicit cascade-break floor moved
+# from 1e-10 to `DEFAULT_CASCADE_BREAK_EPS` (1e-14). The fixture sweep and
+# the re-pinned tests are recorded in the commit that made this the pin.
+#
+# 0.21.0 is the current pin. If you ever need to develop against an unreleased
 # feral again, add an UNCOMMITTED `[patch.crates-io]` redirecting feral to the
 # git rev — e.g.
 #   [patch.crates-io]
 #   feral = { git = "https://github.com/jkitchin/feral.git", rev = "<sha>" }
 # Do NOT commit that patch (it re-introduces the publish blocker).
-feral = { version = "0.20.0" }
+feral = { version = "0.21.0" }
 # Dense linear algebra for the debugger's numerical rank diagnosis
 # (SVD of the active-constraint Jacobian). Pure-Rust, MIT; we pull only
 # the dense `std` core — no rayon/sparse/rand/npy.

@@ -305,9 +305,9 @@ dependencies = [
 
 [[package]]
 name = "feral"
-version = "0.20.0"
+version = "0.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99c790a8e8a871ed7fc23f411da86d87c6c3802e2c810e79053c8eb81c44355b"
+checksum = "52a5d10907e7891a65325ff1ae839b4dc0b01a79f7415ee200c0e850651cd491"
 dependencies = [
  "feral-amd",
  "feral-amf",
@@ -362,9 +362,9 @@ dependencies = [
 
 [[package]]
 name = "feral-ordering-core"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca94ad929e23c0adaa6edda42474aa71b5b2bfb3930b1f6b202e4b37c8e9b763"
+checksum = "186505de135c3510fc4bc5f8d919b070af7bd9b40852452bdad96ee69b60c0a0"
 
 [[package]]
 name = "feral-scotch"
