@@ -228,8 +228,13 @@ pub struct SecondOpinionAvailability {
 ///    on by default and genuinely two-sided — it buys accuracy and 15–25% of
 ///    the iterations on several fixture-legs and loses whole solves on others
 ///    — and its losing direction previously had no automatic recovery at all.
-///    Measured on `square_flowsheet_resto`: the lbfgs leg escalates 25 times,
-///    hits the 3000-iteration cap, and converges in 178 with the rung off.
+///    Measured on `square_flowsheet_resto` under feral 0.20: the lbfgs leg
+///    escalates 25 times, hits the 3000-iteration cap, and converges in 178
+///    with the rung off. Under feral 0.21 that leg hits the cap with the rung
+///    off as well (the `square_system_lm` stage recovers it), and no corpus
+///    fixture reaches this rung at default options; the tests' witness is the
+///    exact leg at `max_iter=75` (base MaxIter after 3 escalations, this rung
+///    Optimal at 59). The other 178s and 131s in this file are 0.20 figures.
 ///
 ///    It is **appended**, not inserted, so a `Restoration_Failed` that rung 3
 ///    already recovers (the gh#815 family, and this same fixture's exact leg)
