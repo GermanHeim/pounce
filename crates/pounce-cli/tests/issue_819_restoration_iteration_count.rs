@@ -65,6 +65,7 @@ fn run_to_restoration_failure() -> String {
         .arg(&sol)
         .arg("infeasibility_perturbed_start_retry=no")
         .arg("feral_increase_quality_retry=no")
+        .arg("square_system_recovery=no")
         .output()
         .expect("spawn pounce");
     let _ = std::fs::remove_file(&sol);

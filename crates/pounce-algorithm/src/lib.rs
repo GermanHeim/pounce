@@ -47,6 +47,7 @@ pub mod output;
 pub mod restoration;
 pub mod second_opinion;
 pub mod sqp;
+pub mod square_system;
 pub mod strategy;
 pub mod timing_stats;
 pub mod unimplemented_options;

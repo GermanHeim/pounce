@@ -448,10 +448,17 @@ impl SecondOpinionTrigger {
             //
             // This returns `Some` for every budget exit; the escalation
             // count is not visible here. `second_opinion_rungs` drops the
-            // rung when the count is zero and the driver returns on the
-            // empty list *before* narrating, so a non-escalating budget exit
-            // is unchanged — same statuses, same statistics, same console.
-            // `a_budget_exit_that_never_escalated_opens_no_rung` is the pin.
+            // rung when the count is zero, so a non-escalating budget exit
+            // opens no *option* rung — `a_budget_exit_that_never_escalated_opens_no_rung`
+            // is the pin. It can still open the ladder's last stage: on a
+            // model `square_system::probe` admits (square, equality-only,
+            // `∇f` exactly zero at the start) the driver runs the
+            // square-system LM on any trigger this returns, escalation or
+            // not, because that stage replaces the method rather than
+            // re-running its trajectory. On every other model a
+            // non-escalating budget exit is unchanged — the driver returns
+            // before narrating, with the same status, statistics and
+            // console.
             ApplicationReturnStatus::MaximumIterationsExceeded => {
                 Some(SecondOpinionTrigger::IterationLimit)
             }
@@ -462,7 +469,21 @@ impl SecondOpinionTrigger {
         }
     }
 
-    /// The word for this trigger in a console line.
+    /// The verdict alone, with no claim about how the solve got there —
+    /// for a console line that does not depend on an escalation having
+    /// happened (the square-system stage opens on a budget exit that never
+    /// escalated, where [`Self::describe`]'s wording would be false).
+    pub fn verdict(self) -> &'static str {
+        match self {
+            SecondOpinionTrigger::IterationLimit => "iteration limit",
+            other => other.describe(),
+        }
+    }
+
+    /// The word for this trigger in the option rungs' console line. For
+    /// [`SecondOpinionTrigger::IterationLimit`] it names the escalation,
+    /// which is true there: no option rung opens on a budget exit that did
+    /// not escalate.
     pub fn describe(self) -> &'static str {
         match self {
             SecondOpinionTrigger::LocalInfeasibility => "local infeasibility",

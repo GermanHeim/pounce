@@ -123,9 +123,17 @@ fn a_genuinely_infeasible_model_survives_all_three_rungs() {
             "rung `{rung}` must run and fail:\n{log}",
         );
     }
+    // The model is square (2×2) with a constant objective, so the
+    // square-system stage runs after the three rungs. The start's Jacobian is
+    // identically zero, so it stops at once on stationarity and the verdict
+    // still stands — now having survived four attempts.
+    assert!(
+        log.contains("square_system_lm did not recover (Stationary after 0 iteration(s))"),
+        "the square-system stage must run and decline honestly:\n{log}",
+    );
     assert!(
         log.contains(
-            "keeping the original Infeasible_Problem_Detected verdict; it survived 3 \
+            "keeping the original Infeasible_Problem_Detected verdict; it survived 4 \
              independent re-solve(s)"
         ),
         "the verdict must be kept, and say how many re-solves it survived:\n{log}",

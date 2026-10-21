@@ -42,6 +42,7 @@ use pounce_algorithm::second_opinion::{
     SecondOpinionAvailability, SecondOpinionTrigger, resolve_scaling_retry_outcome,
     scaling_retry_promoted, second_opinion_rungs,
 };
+use pounce_algorithm::square_system;
 use pounce_common::types::{Index, Number};
 use pounce_nlp::SolveStatistics;
 use pounce_nlp::alg_types::SolverReturn;
@@ -124,6 +125,15 @@ impl SecondOpinionOutcome {
 /// Re-solve a failed solve along up to four different trajectories, and
 /// promote one only if it converges.
 ///
+/// On a square, equality-only, constant-objective model a fifth stage
+/// follows the option rungs when all of them fail:
+/// [`square_system::run`] solves `c(x) = 0` directly by bounded
+/// Levenberg–Marquardt and promotes only on a feasibility certificate checked
+/// at the returned point (`pounce_algorithm::square_system` has the gate,
+/// the method and the checks). It is recorded like a rung, as
+/// [`square_system::SQUARE_SYSTEM_RUNG_LABEL`], with LM iterations in
+/// [`SecondOpinionOutcome::rung_iteration_counts`].
+///
 /// Call this *after* a solve that returned a failing status, passing that
 /// status and `app.statistics()`. Returns the original status and statistics
 /// untouched when the verdict opens no ladder, when every rung is disabled or
@@ -167,28 +177,42 @@ pub fn run_second_opinion_ladder(
         statistics.quality_escalations.max(0) as u64,
     );
     let rungs = second_opinion_rungs(avail);
-    if rungs.is_empty() {
+    // The last stage, for a square constant-objective model only: solve
+    // `c(x) = 0` directly once every option rung has failed. Probed before
+    // anything runs, because a budget exit with no option rung reaches the
+    // ladder only through it; the probe reads dimensions and bounds on every model and evaluates `∇f` only on
+    // one that is already square and equality-only. It opens on every
+    // trigger `for_status` admits — including a budget exit that never
+    // escalated, which opens no option rung — because the hypothesis it
+    // tests is not about the trajectory: it replaces the method.
+    let square = square_system::probe(&tnlp, app.options()).ok();
+    if rungs.is_empty() && square.is_none() {
         finish!(status, SecondOpinionOutcome::unchanged(status, statistics));
     }
-
     let restore = OptionSnapshot::take(app);
     // The linear-solver summary follows the same rule as the statistics:
     // every rung's `optimize_tnlp` resets and refills it, so without this the
     // caller kept the original verdict beside the last *rejected* rung's
     // factorization counts.
     let base_linsol = app.linear_solver_summary_state();
-    report(&format!(
-        "pounce: {} — re-solving along {} different trajector{} before \
-         believing it (second-opinion ladder: {}).",
-        trigger.describe(),
-        rungs.len(),
-        if rungs.len() == 1 { "y" } else { "ies" },
-        rungs.iter().map(|r| r.label).collect::<Vec<_>>().join(", "),
-    ));
+    // The announcement names the option rungs only. The square-system stage
+    // is not a re-solve along another trajectory, and it narrates itself
+    // when — and only when — it runs, so a ladder that a rung settles reads
+    // exactly as it did before the stage existed.
+    if !rungs.is_empty() {
+        report(&format!(
+            "pounce: {} — re-solving along {} different trajector{} before \
+             believing it (second-opinion ladder: {}).",
+            trigger.describe(),
+            rungs.len(),
+            if rungs.len() == 1 { "y" } else { "ies" },
+            rungs.iter().map(|r| r.label).collect::<Vec<_>>().join(", "),
+        ));
+    }
 
     // Every rung solves through this gate, so a rung that is not promoted
     // never reaches the caller's `finalize_solution`.
-    let gate = Rc::new(RefCell::new(SecondOpinionTnlp::new(tnlp)));
+    let gate = Rc::new(RefCell::new(SecondOpinionTnlp::new(Rc::clone(&tnlp))));
     let gated: Rc<RefCell<dyn TNLP>> = gate.clone();
 
     let mut retry_status = status;
@@ -265,6 +289,68 @@ pub fn run_second_opinion_ladder(
         ));
     }
     app.set_in_retry_sequence(false);
+    // The option rungs above each write one knob; the square-system stage
+    // reads `tol`, `constr_viol_tol`, the scaling options and the `feral_*`
+    // configuration, and must read the caller's, not the last rung's.
+    restore.apply(app);
+    let mut square_promoted = false;
+    if let (None, Some(plan)) = (promoted_by, square.as_ref()) {
+        let label = square_system::SQUARE_SYSTEM_RUNG_LABEL;
+        // Says only what the probe established: the shape, and `∇f = 0` at
+        // the start. "Constant objective" is not known here — it is
+        // re-checked at the returned point, and the line says so. The
+        // verdict is named without `describe()`'s escalation clause, which
+        // is false on a budget exit that never escalated.
+        let escalations = statistics.quality_escalations.max(0);
+        let how = match (trigger, escalations) {
+            (SecondOpinionTrigger::IterationLimit, 0) => String::new(),
+            (SecondOpinionTrigger::IterationLimit, k) => {
+                format!(" after {k} factorization escalation(s)")
+            }
+            _ => String::new(),
+        };
+        let after_rungs = if tried.is_empty() {
+            String::new()
+        } else {
+            format!(" and {} option rung(s) failed", tried.len())
+        };
+        report(&format!(
+            "pounce: {}{how}{after_rungs} — the model is square and equality-only, \
+             with ∇f exactly zero at the starting point; solving c(x) = 0 directly \
+             ({label}: bounded Levenberg–Marquardt on the constraint Jacobian; \
+             promoted only if the returned point is feasible and ∇f is exactly \
+             zero there too)…",
+            trigger.verdict(),
+        ));
+        let backend = square_system::default_backend(app.options());
+        let out = square_system::run(
+            plan,
+            &tnlp,
+            app.options(),
+            backend,
+            square_system::RunOptions {
+                capture_iterations: app.iter_history_enabled(),
+            },
+        );
+        tried.push(label);
+        rung_iteration_counts.push(out.lm.iterations);
+        if out.accepted {
+            report(&format!(
+                "pounce: {label} recovered the problem in {} iteration(s), max|c| = {:.3e} \
+                 (scaled {:.3e}) — promoting (SolveSucceeded; multipliers reported as zero).",
+                out.lm.iterations, out.violation.1, out.violation.0,
+            ));
+            promoted_by = Some(label);
+            retry_status = ApplicationReturnStatus::SolveSucceeded;
+            retry_stats = out.statistics;
+            square_promoted = true;
+        } else {
+            report(&format!(
+                "pounce: {label} did not recover ({}).",
+                out.reason
+            ));
+        }
+    }
     if promoted_by.is_none() {
         report(&format!(
             "pounce: keeping the original {} verdict; it survived {} \
@@ -274,8 +360,11 @@ pub fn run_second_opinion_ladder(
             tried.join(", "),
         ));
     }
-    restore.apply(app);
-    if !scaling_retry_promoted(retry_status) {
+    // A square-system promotion factored with its own backend and no
+    // summary sink, so the summary still describes an interior-point solve;
+    // it should be the base solve's, as on a non-promoting ladder, not the
+    // last rejected rung's.
+    if !scaling_retry_promoted(retry_status) || square_promoted {
         app.restore_linear_solver_summary_state(base_linsol);
     }
 

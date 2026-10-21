@@ -1510,6 +1510,14 @@ impl IpoptApplication {
         self.record_iter_history = true;
     }
 
+    /// Whether [`Self::enable_iter_history`] is in force — read by a stage
+    /// that produces a verdict outside `optimize_tnlp` (the second-opinion
+    /// ladder's square-system stage) so its statistics keep the same
+    /// `iterations` / `iteration_count` pairing.
+    pub fn iter_history_enabled(&self) -> bool {
+        self.record_iter_history
+    }
+
     /// Read the run's options file, resolving *which* file the way
     /// upstream's `IpoptApplication::Initialize` does — with one
     /// deliberate difference, below.

@@ -10,6 +10,87 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **Square-system recovery: the last stage of the second-opinion ladder
+  solves `c(x) = 0` directly (`square_system_recovery`, POUNCE extension, on
+  by default).** A model with as many free variables (after fixed-variable
+  removal) as equality rows, no inequality rows and a constant objective is a
+  system of equations — the class a square flowsheet initialization hands a
+  solver — and every feasible point of it is a global optimum. When such a
+  model's solve ends on a verdict the ladder opens on
+  (`Infeasible_Problem_Detected`, `Restoration_Failed`,
+  `Maximum_Iterations_Exceeded`, `Error_In_Step_Computation`,
+  `Invalid_Number_Detected`) and every option rung that applies has failed,
+  POUNCE now runs a bounded, column-scaled trust-region Levenberg–Marquardt
+  method on the constraint Jacobian alone (Moré's `lmder`/`lmpar` step,
+  projected onto the box, the augmented system `[[λI, J̃ᵀ], [J̃, −I]]`
+  factored by FERAL) from the model's starting point. "Constant" is tested,
+  not proved: the stage opens when `∇f` is exactly zero at the start (and the
+  model does not prove it varies). It promotes to `Solve_Succeeded` only if,
+  at the returned point, `∇f` is again exactly zero, the declared box holds
+  exactly, and the IPM's own test holds at zero multipliers: scaled violation
+  at most `tol`, unscaled at most `constr_viol_tol`. The row scaling is the
+  one the IPM computes for the same model — same `pounce_nlp` helpers, the
+  full Jacobian (fixed columns included) sampled at the TNLP's unprojected
+  starting point, `equilibration-based` run as gradient-based as the IPM
+  runs it, user `g_scaling` floored at `nlp_scaling_min_value` — and the
+  unscaled half bounds the answer whatever the scaling. It reports `λ = 0`,
+  `z = 0`, which at such a point satisfy stationarity exactly. Otherwise the
+  original verdict, statistics and solution stand. Measured on
+  `square_flowsheet_resto` under `hessian_approximation=limited-memory`: on
+  FERAL PR#222 at default options, `MaximumIterationsExceeded`/3000 with
+  rung 4 failing becomes `SolveSucceeded` in 8 LM iterations,
+  `max|c| = 1.9e-10` (independently re-evaluated: same); on published FERAL
+  0.20 (this branch's `Cargo.lock`) rung 4 rescues that leg first, and with
+  `feral_increase_quality_retry=no` the stage converges in 8 iterations to
+  `max|c| = 2.874e-10` (scaled `1.710e-10`). It is appended **last**, so
+  every rescue the ladder already had keeps its answer. The LM honours
+  `max_wall_time` / `max_cpu_time` as a budget of its own (the per-solve
+  budget each rung's `optimize_tnlp` gets), and fires the TNLP's
+  `intermediate_callback` at every iterate, stopping on a `false`; either
+  ends the stage without a promotion. A promotion's statistics keep the
+  IPM's conventions: `iterations` holds one record per LM iterate (start
+  included, `iteration_count + 1` of them) when iteration history is
+  recorded, and `final_scaled_objective` carries the objective multiplier.
+  sIPOPT (`sens_sol_state_1`) and `--compute-red-hessian` need the IPM's
+  converged KKT factor, which a promotion does not have; they are not
+  produced, and the CLI says so on the console and as a
+  `square_system_no_postopt` entry in `statistics.warnings`. The console
+  line claims only what the probe established (the shape, `∇f = 0` at the
+  start) and names an escalation only when there was one. The fixture sweep moves on FERAL 0.20 only on
+  `degenerate_start_infeasible` (both legs: `kept(3)` → `kept(4)`, same
+  `tot`, since the LM stops at once on the start's zero Jacobian), and on
+  FERAL PR#222 additionally on that lbfgs line. Re-swept on FERAL 0.20
+  after the review fixes (time budget, callback, IPM row scaling, narration,
+  statistics): byte-identical to the stage's first version on both legs. The record names it
+  `square_system_lm` (`second_opinion.tried` / `promoted_by`, the sweep's
+  `2nd=`); its `it=` is LM iterations. The report's `solution.engine` (and the
+  sweep's engine column) reads `square-lm` for such a promotion, since the
+  point is LM's and not the IPM's. Cost
+  outside the class is one `get_nlp_info` and one `get_bounds_info` on a
+  failing solve; inside it, one `∇f` evaluation, then one Jacobian and up to
+  11 sparse factorizations per LM iteration, at most `min(max_iter, 200)`
+  iterations. A budget exit opens it whether or not the solve escalated, so a
+  deliberately small `max_iter` on a square model can still end
+  `Solve_Succeeded`; set `square_system_recovery=no` to keep the IPM's
+  verdict. Tests: `crates/pounce-cli/tests/square_system_recovery.rs` (the
+  recovery, plus one model per closing branch of the gate: non-square,
+  non-constant objective proved and evaluated, IPM already solves it, an
+  option rung promotes first; and, on small root-on-a-bound models that
+  reach the stage on any FERAL, a fixed variable in the middle slot, the
+  post-LM `∇f ≠ 0` rejection, a non-promotion leaving `.sol` and statistics
+  identical to `square_system_recovery=no`, zero `ipopt_zL_out`/`zU_out`
+  suffixes, a zero-iteration promotion, the IPM's statistics conventions,
+  the row scaling against the IPM's own on four arms, the narration and the
+  reduced-Hessian warning — each mutation-checked) and the unit tests in
+  `crates/pounce-algorithm/src/square_system.rs` (an active bound, a root
+  outside the box, a zero-Jacobian start, a rank-deficient non-isolated root
+  set, duplicate triplets, both time budgets, the callback stop, and `run`
+  on a TNLP). Six existing CLI test files that switch the
+  ladder off to observe the base solve on `square_flowsheet_resto` now also
+  name `square_system_recovery=no` (without it the stage rescues the solve
+  they are measuring), and `degenerate_start_ladder` now expects its
+  infeasible model to survive four attempts. The ladder's opening line still
+  lists only the option rungs; the stage narrates itself when it runs.
 - **Multistart / find-minima search from Rust: `pounce_rs::minima` and the new
   `pounce-minima` crate (gh#966).** `pounce-rs` had only a single local solve;
   the `--minima` global search lived inside `pounce-cli`, reachable only by

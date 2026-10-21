@@ -227,6 +227,7 @@ fn the_rung_can_be_turned_off_and_the_old_verdict_returns() {
             "hessian_approximation=limited-memory",
             "max_iter=500",
             "feral_increase_quality_retry=no",
+            "square_system_recovery=no",
         ],
     );
     assert!(
@@ -471,6 +472,7 @@ fn turning_the_rung_off_gives_the_mu_flip_back() {
             "hessian_approximation=limited-memory",
             "max_iter=500",
             "feral_increase_quality_retry=no",
+            "square_system_recovery=no",
         ],
     );
     assert_eq!(

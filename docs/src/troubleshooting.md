@@ -438,7 +438,48 @@ just failed* — it needs `quality_escalations >= 1`, and an escalation leaves n
 other trace, not in the status, the objective, the iteration count or the
 engine.
 
-**To switch the ladder off entirely you must name all four options** — there
+After the four rungs comes one more stage, and it is not a rung: it does not
+re-run the interior-point method under a different option, it replaces it. On a
+**square** model — as many free variables (after removing fixed ones) as
+equality rows, no inequality rows — whose objective is **constant**, every
+feasible point is a global optimum and the problem is a system of equations.
+When such a model's solve fails on any verdict above, and every rung that
+applies has failed too, POUNCE solves `c(x) = 0` directly with a bounded
+Levenberg–Marquardt method that uses only the constraint Jacobian
+(`square_system_lm` in the log and in `second_opinion.tried`). It is promoted to
+`Solve_Succeeded` only if the returned point satisfies the bounds exactly, has
+an exactly zero objective gradient, and passes the IPM's own feasibility test
+(`tol` scaled, under the row scaling the IPM computes for the same model,
+`constr_viol_tol` unscaled); the multipliers it reports are zero, which at such
+a point are exact. Otherwise the verdict stands. "Constant" is tested, not
+proved: the stage opens when `∇f` is exactly zero at the starting point, and
+the promotion re-checks it at the returned point. It honours `max_wall_time`,
+`max_cpu_time` and an intermediate callback's stop request, each of which ends
+it without a promotion. It opens on a budget exit even when the solve never
+escalated — the class is what gates it, not the trajectory — and is what
+recovers `square_flowsheet_resto`'s limited-memory leg on builds where rung 4
+does not. On FERAL 0.20, where rung 4 does, the stage can be reached by turning
+rung 4 off (`feral_increase_quality_retry=no`), and reads:
+
+```
+pounce: iteration limit after 25 factorization escalation(s) — the model is
+        square and equality-only, with ∇f exactly zero at the starting point;
+        solving c(x) = 0 directly (square_system_lm: bounded Levenberg–Marquardt
+        on the constraint Jacobian; promoted only if the returned point is
+        feasible and ∇f is exactly zero there too)…
+pounce: square_system_lm recovered the problem in 8 iteration(s), max|c| = 2.874e-10
+        (scaled 1.710e-10) — promoting (SolveSucceeded; multipliers reported as zero).
+```
+
+(On FERAL PR#222, where the stage runs at default options, the same 8
+iterations end at `max|c| = 1.9e-10`.) A promotion from this stage has no
+interior-point KKT factorization behind it, so the post-solve computations
+that need one — the sIPOPT step (`sens_sol_state_1`) and
+`--compute-red-hessian` — are not produced; the CLI prints a warning saying
+so and records it in the report's `statistics.warnings` as
+`square_system_no_postopt`.
+
+**To switch the ladder off entirely you must name all five options** — there
 is no single master switch, and each option's own text says "set to no to keep
 behaviour bit-for-bit faithful to upstream IPOPT", which is true of that rung
 and not of the solver:
@@ -448,7 +489,10 @@ feral_infeasibility_scaling_retry no
 infeasibility_mu_strategy_retry   no
 infeasibility_perturbed_start_retry no
 feral_increase_quality_retry      no
+square_system_recovery            no
 ```
+
+The fifth only ever matters on a square, constant-objective model.
 
 Naming a subset leaves the remaining rungs live. This bit four of POUNCE's
 own regression tests when rung 4 was added — three Rust ones that had used
