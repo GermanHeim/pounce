@@ -278,6 +278,23 @@ changes.
   parity test's strict `xfail` on camel deflation is now a pass.
 
 ### Fixed
+- **A restoration entry forced by a non-finite Hessian is no longer a gh#274
+  near-feasible strike.** When the Hessian evaluates to NaN/Inf (a
+  `|x|^p` term with `1 < p < 2` evaluated at exactly `x = 0`), the
+  factorization rejects the KKT matrix and the step computation falls back to
+  restoration, which moves the iterate off the kink. Each such rescue counted
+  toward the never-reset counter that ends a solve after three near-feasible
+  restoration entries, so a trajectory that met the kink three times ended
+  `Error_In_Step_Computation` however productive each rescue was. Vanderbei's
+  `dallass` did exactly that on FERAL 0.21, at `-32390.34` one iteration from
+  the optimum; it now solves to `-32393.2257` in 65 iterations (FERAL 0.20: 41,
+  where its path met the kink twice). Upstream Ipopt + MA57 stops on the same
+  point with `Invalid_Number_Detected`. Restoration still runs, and the static
+  and recovery cycle detectors and `max_iter` still bound a real cycle. The
+  fixture sweep moves only the new `dallass` fixture's exact line; its lbfgs
+  line (`Error_In_Step_Computation`/308) does not move, since that leg's
+  failure is the trajectory, not the counter. Test:
+  `crates/pounce-cli/tests/nonfinite_hessian_restoration_strike.rs`.
 - **The gh#983 scale audit's re-solve is budgeted (CLI / Python / Pyomo).**
   After a successful solve, the audit can re-solve from the returned point
   with the objective rescaled. That re-solve had no budget of its own. It ran
