@@ -2504,9 +2504,41 @@ fn real_main() -> ExitCode {
     // Reduced Hessian: print to stderr (informational), mirroring
     // upstream sIPOPT's RedHessian / Eigenvalues prints in
     // `SensReducedHessianCalculator.cpp`.
+    //
+    // A square-system promotion produces neither post-solve output, and says
+    // so here rather than leaving a `Solve_Succeeded` run silently without
+    // the `sens_sol_state_1` block or the reduced Hessian it asked for. Both
+    // are computed inside `on_converged` from the interior-point solver's
+    // converged KKT factorization, and the square-system stage answered from
+    // Levenberg–Marquardt on `c(x) = 0` instead: there is no IPM factor at
+    // its point, and its multipliers are the zero ones `∇f = 0` admits, not
+    // the ones a parametric step would be taken from. Nothing is
+    // substituted for either; the warning is also recorded in the report.
+    let postopt_withheld = square_system_promoted && (sens_active || wants_red_hessian);
+    if postopt_withheld {
+        let what = match (sens_active, wants_red_hessian) {
+            (true, true) => {
+                "the sIPOPT sensitivity step (sens_sol_state_1) and the reduced Hessian were"
+            }
+            (true, false) => "the sIPOPT sensitivity step (sens_sol_state_1) was",
+            _ => "the reduced Hessian was",
+        };
+        let text = format!(
+            "{what} not produced: the reported point came from the second-opinion \
+             ladder's square-system stage ({}), bounded Levenberg–Marquardt on c(x) = 0, \
+             not from the interior-point solve, so there is no converged IPM KKT \
+             factorization to compute it from and the multipliers are the zero ones \
+             a zero objective gradient admits",
+            pounce_algorithm::square_system::SQUARE_SYSTEM_RUNG_LABEL,
+        );
+        eprintln!("pounce: warning: {text}.");
+        solve_stats
+            .warnings
+            .push(format!("square_system_no_postopt: {text}"));
+    }
     if let Some(rh) = red_hessian_capture.borrow().as_ref() {
         sens::print_red_hessian_to_stderr(rh);
-    } else if wants_red_hessian {
+    } else if wants_red_hessian && !postopt_withheld {
         eprintln!(
             "pounce: --compute-red-hessian requested but the reduced Hessian \
              was not produced (see warnings above)."

@@ -405,3 +405,418 @@ fn an_option_rung_that_recovers_the_model_pre_empts_the_stage() {
     assert!(!r.tried().iter().any(|t| t == LABEL), "{:?}", r.tried());
     assert_eq!(r.engine(), "nlp", "a rung's answer is the IPM's");
 }
+
+// ---------------------------------------------------------------------------
+// The stage's own branches, reached deterministically.
+//
+// `square_flowsheet_resto` reaches the stage only where the IPM fails, which
+// depends on the FERAL version. The models below reach it on any build: the
+// root sits **on** a bound (`x0 ≤ 2`), so the barrier cannot converge in the
+// two iterations `max_iter=2` gives it, while the LM — which projects onto
+// the box instead of staying interior — needs at most two. Each test names
+// the branch it exists for and the mutation it was checked against: the
+// branch was broken, the test was seen to fail, and the code was restored.
+// ---------------------------------------------------------------------------
+
+/// Three variables, the **middle** one fixed (`x1 = 3`, declared start 7),
+/// `x0 ≤ 2` active at the root, rows `x0·x2 − x1 = 2` and
+/// `x0 + x1/2 − x2 = 1`, objective the constant 5. Root `(2, 3, 2.5)`.
+/// `x0`, `x2` are the starting values of the free variables.
+fn fixed_mid_slot_nl(x0: f64, x2: f64) -> String {
+    format!(
+        "g3 1 1 0\t# fixed variable in the middle slot, root on a bound\n \
+         3 2 1 0 2\n 1 0\n 0 0\n 3 0 0\n 0 0 0 1\n 0 0 0 0 0\n 6 0\n 0 0\n 0 0 0 0 0\n\
+         C0\no2\nv0\nv2\n\
+         C1\nn0\n\
+         O0 0\nn5\n\
+         x3\n0 {x0}\n1 7\n2 {x2}\n\
+         r\n4 2\n4 1\n\
+         b\n1 2\n4 3\n3\n\
+         k2\n2\n4\n\
+         J0 3\n0 0\n1 -1\n2 0\n\
+         J1 3\n0 1\n1 0.5\n2 -1\n"
+    )
+}
+
+/// The last `n` numeric lines of a `.sol` before its first `suffix` line —
+/// the primal block, which follows the dual block.
+fn sol_primal(sol: &str, n: usize) -> Vec<f64> {
+    let body: Vec<f64> = sol
+        .lines()
+        .take_while(|l| !l.starts_with("suffix") && !l.starts_with("objno"))
+        .filter_map(|l| l.trim().parse::<f64>().ok())
+        .collect();
+    body[body.len() - n..].to_vec()
+}
+
+/// `(name, number of nonzero entries)` of every `.sol` suffix block.
+fn sol_suffix_counts(sol: &str) -> Vec<(String, usize)> {
+    let lines: Vec<&str> = sol.lines().collect();
+    let mut out = Vec::new();
+    for (k, l) in lines.iter().enumerate() {
+        if let Some(rest) = l.strip_prefix("suffix ") {
+            let fields: Vec<usize> = rest
+                .split_whitespace()
+                .filter_map(|f| f.parse().ok())
+                .collect();
+            out.push((lines[k + 1].trim().to_string(), fields[1]));
+        }
+    }
+    out
+}
+
+/// Full and reduced index spaces meet in the stage: the LM iterates over the
+/// free variables and scatters into the full vector at every evaluation and
+/// at `finalize_solution`. The fixed variable sits in the middle slot, where
+/// a free-index-as-full-index slip puts a neighbour's value — plausible and
+/// wrong (gh#450's shape). Checked in both the JSON report and the `.sol`.
+///
+/// Mutation-checked: `TnlpResidual::scatter` writing `x_full[k]` instead of
+/// `x_full[j]` fails here (the LM then solves a different system and lands
+/// nowhere near `(2, 3, 2.5)`).
+#[test]
+fn a_fixed_variable_keeps_its_slot_through_the_stage() {
+    let nl = inline_nl("fixed_mid", &fixed_mid_slot_nl(1.5, 1.5));
+    let r = solve_path(&nl, &["max_iter=2"]);
+    let _ = std::fs::remove_file(&nl);
+    assert_eq!(r.promoted_by(), Some(LABEL), "{}", r.out);
+    assert_eq!(r.engine(), "square-lm");
+    let want = [2.0, 3.0, 2.5];
+    for (got, which) in [(r.vec("x"), "JSON"), (sol_primal(&r.sol, 3), ".sol")] {
+        for (k, (&g, &w)) in got.iter().zip(&want).enumerate() {
+            assert!(
+                (g - w).abs() < 1e-12,
+                "{which} x[{k}] = {g}, want {w}: {got:?}"
+            );
+        }
+    }
+}
+
+/// The stage promotes `λ = 0, z = 0`, and the `.sol`'s bound-multiplier
+/// suffixes must carry those zeros rather than the failed IPM iterate's `z`.
+/// The control is the same model with the stage off, whose `.sol` carries
+/// one nonzero entry in each block — so an empty block here is the stage's,
+/// not a model with no bound multipliers.
+///
+/// Mutation-checked: finalizing with `z_l = z_u = 1` in `square_system::run`
+/// fails here.
+#[test]
+fn a_promotion_writes_zero_bound_multiplier_suffixes() {
+    let nl = inline_nl("fixed_mid_z", &fixed_mid_slot_nl(1.5, 1.5));
+    let on = solve_path(&nl, &["max_iter=2"]);
+    let off = solve_path(&nl, &["max_iter=2", "square_system_recovery=no"]);
+    let _ = std::fs::remove_file(&nl);
+    assert_eq!(on.promoted_by(), Some(LABEL), "{}", on.out);
+    let blocks = |r: &Run| -> Vec<(String, usize)> {
+        sol_suffix_counts(&r.sol)
+            .into_iter()
+            .filter(|(n, _)| n == "ipopt_zL_out" || n == "ipopt_zU_out")
+            .collect()
+    };
+    let off_blocks = blocks(&off);
+    assert_eq!(
+        off_blocks.len(),
+        2,
+        "control writes both blocks:\n{}",
+        off.sol
+    );
+    assert!(
+        off_blocks.iter().all(|(_, k)| *k > 0),
+        "the control's failed iterate has nonzero z: {off_blocks:?}"
+    );
+    assert_eq!(
+        blocks(&on),
+        [
+            ("ipopt_zL_out".to_string(), 0),
+            ("ipopt_zU_out".to_string(), 0)
+        ],
+        "{}",
+        on.sol
+    );
+}
+
+/// The start is already a root, but on the active bound, so the IPM's
+/// `bound_push` moves it off and `max_iter=0` stops the IPM there. The
+/// stage's start is projected, not pushed: it passes the test before any
+/// step, and promotes with **zero** LM iterations — the iterate-0 path of
+/// `bounded_levenberg_marquardt`, which no other test reaches end to end.
+/// The record keeps the IPM's pairing: one iteration record, the start.
+///
+/// Mutation-checked: removing the iterate-0 `test.passes` in
+/// `bounded_levenberg_marquardt` fails here (the loop's `max_iter` check
+/// then fires first and the stage ends `IterationLimit`).
+#[test]
+fn a_start_that_is_already_a_root_promotes_with_zero_lm_iterations() {
+    let nl = inline_nl("at_root", &fixed_mid_slot_nl(2.0, 2.5));
+    let r = solve_path(&nl, &["max_iter=0", "--json-detail", "full"]);
+    let _ = std::fs::remove_file(&nl);
+    assert_eq!(
+        r.report["second_opinion"]["base_status"].as_str(),
+        Some("Maximum_Iterations_Exceeded"),
+        "{}",
+        r.out
+    );
+    assert_eq!(r.promoted_by(), Some(LABEL), "{}", r.out);
+    assert_eq!(
+        r.report["second_opinion"]["rung_iteration_counts"],
+        serde_json::json!([0])
+    );
+    assert_eq!(r.report["statistics"]["iteration_count"], 0);
+    let iters = r.report["iterations"].as_array().map(Vec::len).unwrap_or(0);
+    assert_eq!(iters, 1, "one record, iterate 0:\n{}", r.out);
+    assert_eq!(r.vec("x"), [2.0, 3.0, 2.5]);
+}
+
+/// A promoted verdict's statistics describe the LM in the IPM's
+/// conventions: `iterations` holds `iteration_count + 1` records (the start
+/// included) whenever iteration history is recorded, and
+/// `final_scaled_objective` is `f` times the objective multiplier the IPM
+/// would have used — here `obj_scaling_factor=2` on `f ≡ 5`. The IPM's own
+/// report on the same model under the same option is the reference for both
+/// conventions, so the test reads an outside number rather than restating
+/// the code.
+///
+/// Mutation-checked: `iterations: Vec::new()` in the promoted statistics,
+/// and `final_scaled_objective: obj`, each fail here.
+#[test]
+fn a_promotion_keeps_the_ipms_statistics_conventions() {
+    let nl = inline_nl("stats", &fixed_mid_slot_nl(1.5, 1.5));
+    let opts = ["obj_scaling_factor=2", "--json-detail", "full"];
+    let lm = solve_path(&nl, &[&["max_iter=2"][..], &opts[..]].concat());
+    let ipm = solve_path(&nl, &opts);
+    let _ = std::fs::remove_file(&nl);
+    assert_eq!(lm.promoted_by(), Some(LABEL), "{}", lm.out);
+    assert_eq!(ipm.engine(), "nlp", "the reference is an IPM solve");
+    for r in [&lm, &ipm] {
+        let count = r.report["statistics"]["iteration_count"].as_u64().unwrap();
+        let records = r.report["iterations"].as_array().map(Vec::len).unwrap_or(0);
+        assert_eq!(records as u64, count + 1, "{}: {}", r.engine(), r.out);
+        let st = &r.report["statistics"];
+        assert_eq!(st["final_objective"], 5.0, "{}", r.engine());
+        assert_eq!(st["final_scaled_objective"], 10.0, "{}", r.engine());
+    }
+}
+
+/// The objective `exp((x0 − 1.5)²)` has `∇f = 0` at the start `x0 = 1.5`, so
+/// the evaluated gate admits the model, and `∇f ≠ 0` at the root `x0 = 2`.
+/// The LM converges; the certificate's `∇f(x̂) = 0` check is all that stands
+/// between that and a `Solve_Succeeded` with multipliers that do not satisfy
+/// stationarity. This is the post-LM rejection branch.
+///
+/// Mutation-checked: deleting the `eval_grad_f` check in
+/// `square_system::run` promotes and fails here.
+#[test]
+fn a_nonzero_objective_gradient_at_the_root_is_rejected() {
+    let nl = inline_nl("grad_at_root", FXG);
+    let r = solve_path(&nl, &["max_iter=2"]);
+    let _ = std::fs::remove_file(&nl);
+    assert_eq!(r.tried(), [LABEL], "the stage must run:\n{}", r.out);
+    assert_eq!(r.promoted_by(), None, "{}", r.out);
+    assert_eq!(r.status(), "MaximumIterationsExceeded", "{}", r.out);
+    assert!(
+        r.out
+            .contains("objective gradient is nonzero at the returned point"),
+        "{}",
+        r.out
+    );
+}
+
+/// `fxg` from the review probes: the root on `x0 ≤ 2`, `x2` fixed, objective
+/// `exp((x0 − 1.5)²)`.
+const FXG: &str = "g3 1 1 0\t# 3 vars one fixed, objective flat only at the start\n \
+     3 2 1 0 2\n 1 0\n 0 0\n 2 1 1\n 0 0 0 1\n 0 0 0 0 0\n 6 1\n 0 0\n 0 0 0 0 0\n\
+     C0\no2\nv0\nv1\n\
+     C1\nn0\n\
+     O0 0\no44\no5\no1\nv0\nn1.5\nn2\n\
+     x3\n0 1.5\n1 1.5\n2 7\n\
+     r\n4 2\n4 1\n\
+     b\n1 2\n3\n4 3\n\
+     k2\n2\n4\n\
+     J0 3\n0 0\n1 0\n2 -1\n\
+     J1 3\n0 1\n1 -1\n2 0.5\n\
+     G0 1\n0 0\n";
+
+/// A stage that runs and does not promote must leave everything the user
+/// reads exactly as `square_system_recovery=no` leaves it: the `.sol`
+/// byte-for-byte, and the JSON statistics and linear-solver summary up to
+/// wall-clock fields. Only `second_opinion` may differ — it records that the
+/// stage ran.
+///
+/// Mutation-checked: calling `finalize_solution` on the `∇f`-rejection path
+/// of `square_system::run` (so a rejected point still reaches the TNLP)
+/// fails here on the `.sol`.
+#[test]
+fn a_stage_that_does_not_promote_changes_nothing_the_user_reads() {
+    let nl = inline_nl("no_promote", FXG);
+    let on = solve_path(&nl, &["max_iter=2"]);
+    let off = solve_path(&nl, &["max_iter=2", "square_system_recovery=no"]);
+    let _ = std::fs::remove_file(&nl);
+    assert_eq!(on.tried(), [LABEL], "the stage must run:\n{}", on.out);
+    assert!(off.tried().is_empty(), "{}", off.out);
+    assert_eq!(on.sol, off.sol, ".sol must be byte-identical");
+    fn untimed(v: &serde_json::Value) -> serde_json::Value {
+        let mut v = v.clone();
+        if let Some(o) = v.as_object_mut() {
+            o.retain(|k, _| !k.ends_with("_secs") && !k.contains("time"));
+        }
+        v
+    }
+    for block in ["statistics", "linear_solver", "solution"] {
+        assert_eq!(
+            untimed(&on.report[block]),
+            untimed(&off.report[block]),
+            "{block} differs"
+        );
+    }
+}
+
+/// Gradient-based row scaling with a row of `‖∇c_0‖∞ = 4000`, its maximum
+/// in the **fixed** column, and a start `x0 = 3` **outside** the box
+/// `x0 ≤ 2` — the two places a reimplementation of the IPM's scaling can
+/// quietly measure somewhere else (the free columns only; the projected
+/// start). `a` is the fixed column's coefficient, `b` the curvature of row 1
+/// in `x0` (`b = 0`: row 1 linear). `scaling` adds a constraint
+/// `scaling_factor` suffix for the `user-scaling` arm.
+fn row_scale_nl(a: f64, b: f64, scaling: Option<(f64, f64)>) -> String {
+    let (c1, rhs1, j1) = if b != 0.0 {
+        (
+            format!("C1\no2\nn{b}\no5\nv0\nn2\n"),
+            4.0 * b - 1.0,
+            "J1 3\n0 0\n1 0.5\n2 -1\n",
+        )
+    } else {
+        ("C1\nn0\n".to_string(), 1.0, "J1 3\n0 1\n1 0.5\n2 -1\n")
+    };
+    let mut s = format!(
+        "g3 1 1 0\t# row 0 scaled by 1000, root on x0 <= 2, start outside the box\n \
+         3 2 1 0 2\n {} 0\n 0 0\n 3 0 0\n 0 0 0 1\n 0 0 0 0 0\n 6 0\n 0 0\n 0 0 0 0 0\n\
+         C0\no2\nn1000\no2\nv0\nv2\n{c1}O0 0\nn0\n\
+         x3\n0 3\n1 7\n2 1.5\n\
+         r\n4 {}\n4 {rhs1}\n\
+         b\n1 2\n4 3\n3\n\
+         k2\n2\n4\n\
+         J0 3\n0 0\n1 {}\n2 0\n{j1}",
+        if b != 0.0 { 2 } else { 1 },
+        5000.0 - 3.0 * a,
+        -a,
+    );
+    if let Some((s0, s1)) = scaling {
+        s.push_str(&format!("S5 2 scaling_factor\n0 {s0}\n1 {s1}\n"));
+    }
+    s
+}
+
+/// The acceptance test's row scaling is the IPM's, measured against the
+/// IPM: for each arm, the IPM's own scaled/unscaled violation ratio after
+/// one iteration (row 0 dominates both, so the ratio is `s_0`) must equal
+/// the stage's ratio at its iterate 0 (row 0 dominates there too, `c_0 =
+/// −2000`). Neither number is restated from the code.
+///
+/// * `fixed_column` — row 0's maximum is the fixed variable's coefficient
+///   (`s_0 = 100/4000`, not the free columns' `100/3000`);
+/// * `projection` — row 1's `∂/∂x0 = 100·x0` and row 0's `1000·x0` are
+///   sampled at the raw start `x0 = 3` (`s_0 = 1/30`), not the projected 2
+///   (`1/20`);
+/// * `equilibration-based` — which the IPM runs as gradient-based, and the
+///   stage used to read as unscaled;
+/// * `user-scaling` — the `.nl` suffix's `0.01` on row 0.
+///
+/// Mutation-checked, one per arm: summing the row maximum over the free
+/// columns only fails `fixed_column`; sampling `J` at the projected start
+/// fails `projection`; mapping `equilibration-based` to unscaled fails that
+/// arm; and ignoring `g_scaling` under `user-scaling` fails the last.
+#[test]
+fn the_acceptance_row_scaling_is_the_ipms() {
+    let arms: [(&str, String, &[&str]); 4] = [
+        ("fixed_column", row_scale_nl(4000.0, 0.0, None), &[]),
+        ("projection", row_scale_nl(1000.0, 50.0, None), &[]),
+        (
+            "equilibration-based",
+            row_scale_nl(4000.0, 0.0, None),
+            &["nlp_scaling_method=equilibration-based"],
+        ),
+        (
+            "user-scaling",
+            row_scale_nl(1000.0, 0.0, Some((0.01, 4.0))),
+            &["nlp_scaling_method=user-scaling"],
+        ),
+    ];
+    for (arm, body, extra) in arms {
+        let nl = inline_nl(&format!("rowscale_{}", arm.replace('-', "_")), &body);
+        let ipm = solve_path(
+            &nl,
+            &[&["max_iter=1", "square_system_recovery=no"][..], extra].concat(),
+        );
+        let lm = solve_path(
+            &nl,
+            &[&["max_iter=1", "--json-detail", "full"][..], extra].concat(),
+        );
+        let _ = std::fs::remove_file(&nl);
+        let st = &ipm.report["statistics"];
+        let ipm_ratio = st["final_constr_viol"].as_f64().unwrap()
+            / st["final_declared_constr_viol"].as_f64().unwrap();
+        assert_eq!(lm.promoted_by(), Some(LABEL), "{arm}:\n{}", lm.out);
+        let rec0 = &lm.report["iterations"][0];
+        let lm_ratio = rec0["inf_pr_internal"].as_f64().unwrap() / rec0["inf_pr"].as_f64().unwrap();
+        assert!(
+            (lm_ratio / ipm_ratio - 1.0).abs() < 1e-9,
+            "{arm}: stage s_0 = {lm_ratio}, IPM s_0 = {ipm_ratio}"
+        );
+    }
+}
+
+/// The narration says only what is known. This model's solve never
+/// escalated, so "after a factorization escalation" — `describe()`'s
+/// wording, true for the option rungs — is false here; and the probe has
+/// established `∇f = 0` at the start, not that the objective is constant.
+///
+/// Mutation-checked: restoring `trigger.describe()` and "the model is square
+/// with a constant objective" in the driver's announcement fails here.
+#[test]
+fn the_stage_narration_claims_nothing_it_has_not_checked() {
+    let nl = inline_nl("narration", &fixed_mid_slot_nl(1.5, 1.5));
+    let r = solve_path(&nl, &["max_iter=2"]);
+    let _ = std::fs::remove_file(&nl);
+    assert_eq!(r.promoted_by(), Some(LABEL), "{}", r.out);
+    assert_eq!(r.report["statistics"]["quality_escalations"], 0);
+    assert!(!r.out.contains("escalation"), "{}", r.out);
+    assert!(!r.out.contains("constant objective"), "{}", r.out);
+    assert!(
+        r.out.contains("∇f exactly zero at the starting point"),
+        "{}",
+        r.out
+    );
+}
+
+/// `--compute-red-hessian` on a square-system promotion: the reduced
+/// Hessian is computed in `on_converged` from the IPM's KKT factor, which
+/// this answer never had. It must not be faked, and it must not vanish
+/// silently under a `Solve_Succeeded` either — the CLI says why, on the
+/// console and in the report's warnings, instead of "see warnings above"
+/// over no warning.
+///
+/// Mutation-checked: removing the `postopt_withheld` warning in `main.rs`
+/// fails here.
+#[test]
+fn a_promotion_says_why_the_reduced_hessian_is_missing() {
+    let nl = inline_nl("red_hessian", &fixed_mid_slot_nl(1.5, 1.5));
+    let r = solve_path(&nl, &["max_iter=2", "--compute-red-hessian"]);
+    let _ = std::fs::remove_file(&nl);
+    assert_eq!(r.promoted_by(), Some(LABEL), "{}", r.out);
+    assert!(
+        r.out.contains("the reduced Hessian was not produced") && r.out.contains(LABEL),
+        "{}",
+        r.out
+    );
+    assert!(!r.out.contains("see warnings above"), "{}", r.out);
+    let warnings = r.report["statistics"]["warnings"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        warnings.iter().any(|w| w
+            .as_str()
+            .is_some_and(|s| s.starts_with("square_system_no_postopt:"))),
+        "{warnings:?}"
+    );
+}

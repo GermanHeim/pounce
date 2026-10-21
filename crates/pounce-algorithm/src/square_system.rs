@@ -21,8 +21,14 @@
 //! `hessian_approximation=limited-memory` POUNCE on FERAL PR#222 runs to the
 //! 3000-iteration cap and every rung of the second-opinion ladder fails too;
 //! upstream Ipopt 3.14.19 declares local infeasibility at iteration 50. A
-//! Levenberg–Marquardt least-squares solve that uses only `J` reaches
-//! `max|c| ≈ 4e-10` in 18 iterations from the same start.
+//! Levenberg–Marquardt least-squares solve that uses only `J` solves it from
+//! the same start in 8 iterations. The two figures are from two FERALs and
+//! both are named: on FERAL PR#222 at default options, `max|c| = 1.9e-10`
+//! (recorded when the stage was written); on the published FERAL 0.20 this
+//! crate builds against, where rung 4 (`feral_increase_quality=no`) rescues
+//! the leg first by default and the stage is reached only with
+//! `feral_increase_quality_retry=no`, `max|c| = 2.874e-10` (scaled
+//! `1.710e-10`), at `max_iter` 500 and 3000 alike.
 //!
 //! # The gate
 //!
@@ -100,20 +106,47 @@
 //! *unscaled* constraint violation below `constr_viol_tol`, and at
 //! `(λ, z) = (0, 0)` with `∇f = 0` the dual and complementarity terms vanish,
 //! leaving `max_i s_i|c_i| ≤ tol` and `max_i |c_i| ≤ constr_viol_tol`. `s_i`
-//! is the row scaling the NLP arm applies, reproduced here: gradient-based
-//! (`min(1, nlp_scaling_max_gradient/‖∇c_i‖∞)`, floored at
-//! `nlp_scaling_min_value`, or `nlp_scaling_constr_target_gradient/‖∇c_i‖∞`
-//! when that is set) measured at the projected start, the TNLP's own
-//! `g_scaling` under `user-scaling`, and `1` otherwise — which for `none` is
-//! exact and for the remaining methods is the unscaled test. On top of that
+//! is the row scaling the NLP arm computes for the same model, by the same
+//! `pounce_nlp::orig_ipopt_nlp` helpers at the same point (`ipm_scaling`
+//! has the details): `none` is `1`; `user-scaling` and `curvature-based`
+//! are the TNLP's `g_scaling` floored at `nlp_scaling_min_value`;
+//! `gradient-based` — and `equilibration-based`, which the NLP arm runs as
+//! gradient-based — is the row-max rule over the full Jacobian sampled at
+//! the TNLP's starting point with only fixed variables lifted, applied only
+//! when some row exceeds `nlp_scaling_max_gradient` (or a constraint target
+//! gradient is set). The one thing not reproduced is a wrapper the
+//! application inserts *inside* `optimize_tnlp` that moves the start; that
+//! can change `s_i`, but the unscaled half of the test is independent of
+//! `s_i`, so no choice of `s_i` admits a point with
+//! `max|c_i| > constr_viol_tol`. On top of that
 //! the box is satisfied **exactly** (projection; no `bound_relax_factor`
 //! widening is borrowed), and `∇f(x̂)` must be exactly zero at the returned
 //! point. If any check fails the stage reports failure and the caller keeps
 //! the original verdict untouched.
 //!
+//! # Budget and callback
+//!
+//! The LM honours `max_wall_time` and `max_cpu_time`, as a budget measured
+//! from the start of the stage — the per-solve budget each option rung's
+//! `optimize_tnlp` also gets — and reads the clock once per iterate, after
+//! the convergence test. It fires the TNLP's `intermediate_callback` at
+//! every iterate, the start included, with `mode = RegularMode`, `inf_pr`
+//! the scaled violation, `inf_du = max|∇f|`, `mu = 0`, `d_norm` the
+//! accepted step's `‖s‖∞` and `regularization_size` the LM parameter; a
+//! `false` stops it. A stop or an exhausted budget ends the stage without a
+//! promotion. No live iterate is installed for the callback
+//! (`GetIpoptCurrentIterate` finds none), because there is no IPM iterate.
+//!
 //! # What is reported
 //!
-//! `Solve_Succeeded` with `x̂`, `λ = 0` and `z_l = z_u = 0`. Those are true
+//! `Solve_Succeeded` with `x̂`, `λ = 0` and `z_l = z_u = 0`, and statistics
+//! that describe the LM: `iteration_count` is its iteration count and, when
+//! the application records iteration history, `iterations` holds one record
+//! per iterate (the start included, the IPM's convention; `alpha_primal_char`
+//! `L`); `final_scaled_objective` is `f` times the objective multiplier the
+//! NLP arm would have applied. The post-solve computations that read the
+//! IPM's converged KKT factor (sIPOPT, the reduced Hessian) have nothing to
+//! read and are not run; the CLI says so. Those are true
 //! KKT multipliers, not placeholders: with `∇f(x̂) = 0` they satisfy
 //! `∇f + Jᵀλ − z_l + z_u = 0` exactly. They are unique when `J(x̂)` is
 //! nonsingular and no bound is active; when `J` is singular (as on the
@@ -242,6 +275,12 @@ pub enum LmStatus {
     EvaluationFailed,
     /// The augmented system could not be factored at any `λ` tried.
     LinearSolverFailed,
+    /// `max_cpu_time` ran out before the iterate passed the test.
+    CpuTimeExceeded,
+    /// `max_wall_time` ran out before the iterate passed the test.
+    WallTimeExceeded,
+    /// The TNLP's `intermediate_callback` returned `false`.
+    UserRequestedStop,
 }
 
 /// What an LM run returns.
@@ -482,6 +521,59 @@ impl StepSolver {
     }
 }
 
+/// One iterate of the LM, as handed to [`LmHooks::on_iterate`].
+#[derive(Debug)]
+pub struct LmIterate<'a> {
+    /// Iteration index: `0` is the (projected) start, `k` the iterate after
+    /// the `k`-th step — accepted or not; a rejected step leaves `x` as it
+    /// was and reports `accepted = false`.
+    pub iter: usize,
+    pub x: &'a [Number],
+    pub c: &'a [Number],
+    /// `‖s‖∞` of the step that produced this iterate (`0` at the start and
+    /// after a rejected step).
+    pub step_inf_norm: Number,
+    /// The Levenberg–Marquardt parameter of that step (`0` for a
+    /// Gauss–Newton step and at the start).
+    pub lambda: Number,
+    /// Whether that step was accepted (`false` at the start).
+    pub accepted: bool,
+}
+
+/// What the LM consults besides the model: a time budget and a per-iterate
+/// observer. [`LmHooks::default`] is neither.
+#[derive(Default)]
+pub struct LmHooks<'a> {
+    /// Checked once per iterate, after the convergence test and before the
+    /// next step, so an iterate that already passes is never thrown away
+    /// for being late — the same order as the IPM's convergence check.
+    pub deadline: Option<pounce_common::timing::Deadline>,
+    /// Called at every iterate, the start included, *before* the
+    /// convergence test (the IPM's order: upstream's
+    /// `OptimalityErrorConvergenceCheck` fires the intermediate callback
+    /// first). Returning `false` stops the method with
+    /// [`LmStatus::UserRequestedStop`].
+    pub on_iterate: Option<&'a mut dyn FnMut(&LmIterate<'_>) -> bool>,
+}
+
+impl LmHooks<'_> {
+    fn fire(&mut self, it: &LmIterate<'_>) -> bool {
+        match self.on_iterate.as_mut() {
+            Some(f) => f(it),
+            None => true,
+        }
+    }
+
+    fn time_exceeded(&self) -> Option<LmStatus> {
+        use pounce_common::timing::DeadlineKind;
+        match self.deadline.as_ref().and_then(|d| d.exceeded()) {
+            Some(DeadlineKind::Cpu) => Some(LmStatus::CpuTimeExceeded),
+            Some(DeadlineKind::Wall) => Some(LmStatus::WallTimeExceeded),
+            None => None,
+        }
+    }
+}
+
 /// Solve `c(x) = 0` over the box by bounded trust-region LM. See the module
 /// docs for the method, the scaling and the termination rules.
 pub fn bounded_levenberg_marquardt(
@@ -491,6 +583,7 @@ pub fn bounded_levenberg_marquardt(
     test: &FeasibilityTest,
     max_iter: usize,
     mut backend: Box<dyn SparseSymLinearSolverInterface>,
+    mut hooks: LmHooks<'_>,
 ) -> LmResult {
     let (n, m) = (prob.n, prob.m);
     let mut x = x0.to_vec();
@@ -510,8 +603,26 @@ pub fn bounded_levenberg_marquardt(
         return out;
     }
     out.c = c.clone();
+    // Iterate 0, in the order every later iterate is judged in below:
+    // observer, convergence, clock.
+    let start = LmIterate {
+        iter: 0,
+        x: &x,
+        c: &c,
+        step_inf_norm: 0.0,
+        lambda: 0.0,
+        accepted: false,
+    };
+    if !hooks.fire(&start) {
+        out.status = LmStatus::UserRequestedStop;
+        return out;
+    }
     if test.passes(&c) {
         out.status = LmStatus::Converged;
+        return out;
+    }
+    if let Some(st) = hooks.time_exceeded() {
+        out.status = st;
         return out;
     }
 
@@ -580,16 +691,18 @@ pub fn bounded_levenberg_marquardt(
     let mut delta = if xnorm > 0.0 { 100.0 * xnorm } else { 100.0 };
     let mut lambda: Number = 0.0;
     let mut ct = vec![0.0; m];
-    let mut status = LmStatus::IterationLimit;
-    for iter in 0..max_iter {
+    let status = loop {
+        // `x` is iterate `out.iterations`, and iterate 0 was judged above.
+        let iter = out.iterations;
+        if iter >= max_iter {
+            break LmStatus::IterationLimit;
+        }
         if solver.is_stationary(&c, &x, &prob.lb, &prob.ub) {
-            status = LmStatus::Stationary;
-            break;
+            break LmStatus::Stationary;
         }
         out.iterations = iter + 1;
         let Some((pt, lam)) = solver.trust_region_step(&c, delta, lambda) else {
-            status = LmStatus::LinearSolverFailed;
-            break;
+            break LmStatus::LinearSolverFailed;
         };
         lambda = lam;
         let mut xt: Vec<Number> = (0..n).map(|j| x[j] + pt[j] / dscale(&d, j)).collect();
@@ -625,26 +738,44 @@ pub fn bounded_levenberg_marquardt(
             delta = delta.max(2.0 * snorm);
         }
 
-        if rho >= 1e-4 {
+        let accepted = rho >= 1e-4;
+        if accepted {
             x = xt;
             c.copy_from_slice(&ct);
-            if test.passes(&c) {
-                status = LmStatus::Converged;
-                break;
-            }
+        }
+        let here = LmIterate {
+            iter: out.iterations,
+            x: &x,
+            c: &c,
+            step_inf_norm: if accepted {
+                s.iter().fold(0.0, |a: Number, v| a.max(v.abs()))
+            } else {
+                0.0
+            },
+            lambda,
+            accepted,
+        };
+        if !hooks.fire(&here) {
+            break LmStatus::UserRequestedStop;
+        }
+        if accepted && test.passes(&c) {
+            break LmStatus::Converged;
+        }
+        if let Some(st) = hooks.time_exceeded() {
+            break st;
+        }
+        if accepted {
             out.jacobian_evals += 1;
             if !refresh(model, &x, &mut raw, &mut jac, &mut d, &mut solver) {
-                status = LmStatus::EvaluationFailed;
-                break;
+                break LmStatus::EvaluationFailed;
             }
         }
         let floor = 1e-15 * scaled_norm(&d, &x).max(1.0);
         // Written to catch a NaN radius too.
         if delta.is_nan() || delta <= floor {
-            status = LmStatus::TrustRegionCollapsed;
-            break;
+            break LmStatus::TrustRegionCollapsed;
         }
-    }
+    };
     out.status = status;
     out.x = x;
     out.c = c;
@@ -678,6 +809,15 @@ pub struct SquareSystemPlan {
     /// Full-space starting point, projected into the box; fixed variables
     /// hold their fixed value.
     x_full: Vec<Number>,
+    /// The TNLP's starting point with only the fixed variables lifted to
+    /// their value and **no** projection — the point
+    /// `OrigIpoptNlp::determine_scaling_from_starting_point` samples the
+    /// gradient-based row scaling at, so the acceptance test's `s_i` is the
+    /// IPM's own rather than one measured somewhere nearby.
+    x_scaling: Vec<Number>,
+    /// Full Jacobian row of every TNLP triplet, fixed columns included
+    /// (the IPM's row maximum runs over all of them).
+    jac_row_full: Vec<usize>,
     g_rhs: Vec<Number>,
     /// `(TNLP triplet index, row, free column)` for every Jacobian entry in
     /// a free column.
@@ -687,10 +827,16 @@ pub struct SquareSystemPlan {
     ub: Vec<Number>,
 }
 
+/// A numeric option as the IPM reads it: the value when set, else the
+/// registered default spelled out here — the `f.then_some(v)` idiom of
+/// `IpoptApplication`, so an options list without a registry (or one whose
+/// tag reads as an unset `0`) cannot hand the stage a different number than
+/// the interior-point method got.
 fn opt_num(options: &OptionsList, tag: &str, default: Number) -> Number {
     options
         .get_numeric_value(tag, "")
-        .map(|(v, _)| v)
+        .ok()
+        .and_then(|(v, found)| found.then_some(v))
         .unwrap_or(default)
 }
 
@@ -782,6 +928,7 @@ pub fn probe(
             x[j] = lb[j];
         }
     }
+    let x_scaling = x.clone();
     project(&mut x, &lb, &ub);
     let mut grad = vec![0.0; n];
     if !t.eval_grad_f(&x, true, &mut grad) {
@@ -815,12 +962,14 @@ pub fn probe(
         free_of[j] = k;
     }
     let mut kept = Vec::with_capacity(nnz);
+    let mut jac_row_full = Vec::with_capacity(nnz);
     for k in 0..nnz {
         let i = (irow[k] - index_base) as usize;
         let j = (jcol[k] - index_base) as usize;
         if i >= m || j >= n {
             return Err(SquareSystemDecline::Unavailable);
         }
+        jac_row_full.push(i);
         if free_of[j] != usize::MAX {
             kept.push((k, i, free_of[j]));
         }
@@ -832,6 +981,8 @@ pub fn probe(
         ub: free.iter().map(|&j| ub[j]).collect(),
         free,
         x_full: x,
+        x_scaling,
+        jac_row_full,
         g_rhs: g_l,
         kept,
         nnz_full: nnz,
@@ -889,41 +1040,77 @@ impl ResidualSystem for TnlpResidual<'_> {
     }
 }
 
-/// The row scaling `s_i` the NLP arm's scaled convergence test applies —
-/// see the module docs for which methods are reproduced and how.
-fn acceptance_row_scale(
+/// The scaling the NLP arm would have run this model under, as far as the
+/// acceptance test and the reported statistics need it.
+struct IpmScaling {
+    /// Per-row `s_i` of the scaled constraint violation.
+    row_scale: Vec<Number>,
+    /// The gradient-based objective factor alone (`1` when none applies) —
+    /// `SolveStatistics::final_obj_scaling_factor`.
+    computed_obj_scale: Number,
+    /// The whole objective multiplier, signed: the caller's
+    /// `obj_scaling_factor` times the method's own factor.
+    total_obj_scale: Number,
+    /// `max |∇f|` over the free variables where gradient-based scaling
+    /// sampled it; `NaN` when it did not run.
+    start_obj_grad_max: Number,
+    /// Evaluations spent measuring it: `(∇f, J)`.
+    evals: (usize, usize),
+}
+
+/// The scaling `OrigIpoptNlp::determine_scaling_from_starting_point`
+/// computes for this model, reproduced from the same `pounce_nlp` helpers
+/// at the same point.
+///
+/// * The method is resolved the way `IpoptApplication` resolves it:
+///   `none`; `user-scaling` and `curvature-based` both read the TNLP's
+///   `get_scaling_parameters`; anything else — `gradient-based` and the
+///   registered-but-unimplemented `equilibration-based` — runs
+///   gradient-based.
+/// * Gradient-based samples `∇f` and the **full** Jacobian (fixed columns
+///   included) at the TNLP's starting point with only the fixed variables
+///   lifted — not at the projected start the LM iterates from.
+///   [`gradient_scaling_fires`] decides whether the rows get a vector at
+///   all, and [`gradient_row_scale`] gives each row its factor.
+/// * User scaling floors every `g_scaling` entry at
+///   `nlp_scaling_min_value`, and falls back to no scaling when the TNLP
+///   declines, as the IPM does.
+///
+/// What is *not* reproduced: a wrapper the application inserts inside
+/// `optimize_tnlp` (the start conditioner, the gh#486 variable-scaling
+/// substitution) can move the start the IPM sampled. The unscaled
+/// `constr_viol_tol` half of the test does not depend on any of this, so a
+/// residual difference in `s_i` can change only how far below `tol` the
+/// scaled half is met, never admit a point the unscaled half rejects.
+///
+/// [`gradient_scaling_fires`]: pounce_nlp::orig_ipopt_nlp::gradient_scaling_fires
+/// [`gradient_row_scale`]: pounce_nlp::orig_ipopt_nlp::gradient_row_scale
+fn ipm_scaling(
     tnlp: &Rc<RefCell<dyn TNLP>>,
     options: &OptionsList,
     plan: &SquareSystemPlan,
-    jac_at_start: &[Number],
-) -> Vec<Number> {
+) -> IpmScaling {
+    use pounce_nlp::orig_ipopt_nlp::{
+        gradient_obj_scale, gradient_row_scale, gradient_scaling_fires,
+    };
     let m = plan.m;
+    let user_obj = opt_num(options, "obj_scaling_factor", 1.0);
+    let min_value = opt_num(options, "nlp_scaling_min_value", 1e-8);
+    let unscaled = IpmScaling {
+        row_scale: vec![1.0; m],
+        computed_obj_scale: 1.0,
+        total_obj_scale: user_obj,
+        start_obj_grad_max: Number::NAN,
+        evals: (0, 0),
+    };
     let method = options
         .get_string_value("nlp_scaling_method", "")
-        .map(|(v, _)| v)
-        .unwrap_or_else(|_| "gradient-based".to_string());
+        .ok()
+        .and_then(|(v, found)| found.then_some(v))
+        .unwrap_or_else(|| "gradient-based".to_string());
     match method.as_str() {
-        "gradient-based" => {
-            let max_grad = opt_num(options, "nlp_scaling_max_gradient", 100.0);
-            let target = opt_num(options, "nlp_scaling_constr_target_gradient", 0.0);
-            let min_value = opt_num(options, "nlp_scaling_min_value", 1e-8);
-            let mut row_max = vec![0.0 as Number; m];
-            for (q, &(_, i, _)) in plan.kept.iter().enumerate() {
-                row_max[i] = row_max[i].max(jac_at_start[q].abs());
-            }
-            row_max
-                .iter()
-                .map(|&g| {
-                    let s = if target > 0.0 {
-                        if g > 0.0 { target / g } else { 1.0 }
-                    } else {
-                        max_grad / g.max(max_grad)
-                    };
-                    s.max(min_value)
-                })
-                .collect()
-        }
-        "user-scaling" => {
+        "none" => unscaled,
+        "user-scaling" | "curvature-based" => {
             let mut obj = 1.0;
             let mut use_x = false;
             let mut xs = vec![1.0; plan.n_full];
@@ -936,13 +1123,75 @@ fn acceptance_row_scale(
                 use_g_scaling: &mut use_g,
                 g_scaling: &mut gs,
             });
-            if ok && use_g {
-                gs.iter().map(|v| v.abs()).collect()
+            if !ok {
+                return unscaled;
+            }
+            let df = if obj.abs() < min_value {
+                min_value
             } else {
-                vec![1.0; m]
+                obj
+            };
+            IpmScaling {
+                row_scale: if use_g {
+                    gs.iter()
+                        .map(|&v| if v < min_value { min_value } else { v })
+                        .collect()
+                } else {
+                    vec![1.0; m]
+                },
+                computed_obj_scale: 1.0,
+                total_obj_scale: df * user_obj,
+                start_obj_grad_max: Number::NAN,
+                evals: (0, 0),
             }
         }
-        _ => vec![1.0; m],
+        _ => {
+            let max_grad = opt_num(options, "nlp_scaling_max_gradient", 100.0);
+            let obj_target = opt_num(options, "nlp_scaling_obj_target_gradient", 0.0);
+            let constr_target = opt_num(options, "nlp_scaling_constr_target_gradient", 0.0);
+            let x = &plan.x_scaling;
+            let mut grad = vec![0.0; plan.n_full];
+            let mut df = 1.0;
+            let mut grad_max = Number::NAN;
+            if tnlp.borrow_mut().eval_grad_f(x, true, &mut grad) {
+                let gm = plan
+                    .free
+                    .iter()
+                    .fold(0.0 as Number, |a, &j| a.max(grad[j].abs()));
+                grad_max = gm;
+                if gm.is_finite() {
+                    df = gradient_obj_scale(gm, max_grad, min_value, obj_target);
+                }
+            }
+            let mut vals = vec![0.0; plan.nnz_full];
+            let row_scale = if tnlp.borrow_mut().eval_jac_g(
+                Some(x),
+                true,
+                SparsityRequest::Values { values: &mut vals },
+            ) {
+                let mut row_max = vec![Number::MIN_POSITIVE; m];
+                for (k, &i) in plan.jac_row_full.iter().enumerate() {
+                    row_max[i] = row_max[i].max(vals[k].abs());
+                }
+                if gradient_scaling_fires(&row_max, max_grad, constr_target) {
+                    row_max
+                        .iter()
+                        .map(|&g| gradient_row_scale(g, max_grad, min_value, constr_target))
+                        .collect()
+                } else {
+                    vec![1.0; m]
+                }
+            } else {
+                vec![1.0; m]
+            };
+            IpmScaling {
+                row_scale,
+                computed_obj_scale: df,
+                total_obj_scale: df * user_obj,
+                start_obj_grad_max: grad_max,
+                evals: (1, 1),
+            }
+        }
     }
 }
 
@@ -961,22 +1210,47 @@ pub struct SquareSystemOutcome {
     pub violation: (Number, Number),
 }
 
+/// How [`run`] is to treat its caller's per-iteration surfaces.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RunOptions {
+    /// Fill `SolveStatistics::iterations` with one record per LM iterate
+    /// (the start included, so `iterations.len() == iteration_count + 1`,
+    /// the IPM's convention) — set it when the application records
+    /// iteration history, so a promoted verdict keeps the
+    /// `iterations`/`iteration_count` pairing every other verdict has.
+    pub capture_iterations: bool,
+}
+
 /// Run the LM on a probed model and, if the result passes every check in the
 /// module docs, finalize it through `tnlp` as `Solve_Succeeded`.
 ///
 /// On any failure `tnlp` receives no `finalize_solution` call, so the caller's
 /// captured solution stays the one its original verdict describes.
+///
+/// The LM honours `max_cpu_time` / `max_wall_time` as a budget of its own,
+/// measured from this call — the same per-solve budget each option rung's
+/// `optimize_tnlp` gets — and fires the TNLP's `intermediate_callback` at
+/// every iterate (unless the TNLP says it does not want one), stopping on a
+/// `false`. Running out of time and a stop request both end the stage
+/// without a promotion.
 pub fn run(
     plan: &SquareSystemPlan,
     tnlp: &Rc<RefCell<dyn TNLP>>,
     options: &OptionsList,
     backend: Box<dyn SparseSymLinearSolverInterface>,
+    run_opts: RunOptions,
 ) -> SquareSystemOutcome {
+    use pounce_nlp::solve_statistics::IterRecord;
     let wall0 = pounce_common::utils::wallclock_time();
     let cpu0 = pounce_common::utils::cpu_time();
+    let deadline = pounce_common::timing::Deadline::new(
+        opt_num(options, "max_wall_time", 1e6),
+        opt_num(options, "max_cpu_time", 1e6),
+    );
     let max_iter = options
         .get_integer_value("max_iter", "")
-        .map(|(v, _)| v.max(0) as usize)
+        .ok()
+        .and_then(|(v, found)| found.then_some(v.max(0) as usize))
         .unwrap_or(3000)
         .min(LM_ITERATION_CAP);
     let prob = LmProblem {
@@ -1002,30 +1276,108 @@ pub fn run(
         reason,
         statistics: SolveStatistics::default(),
     };
-    let mut jac0 = vec![0.0; prob.jac_rows.len()];
-    if !model.eval_jac(&x0, &mut jac0) {
-        let lm = LmResult {
-            status: LmStatus::EvaluationFailed,
-            x: x0.clone(),
-            c: vec![0.0; plan.m],
-            iterations: 0,
-            residual_evals: 0,
-            jacobian_evals: 1,
-            factorizations: 0,
-        };
-        return fail(
-            lm,
-            "the Jacobian could not be evaluated at the start".into(),
-        );
-    }
+    let scaling = ipm_scaling(tnlp, options, plan);
     let test = FeasibilityTest {
-        row_scale: acceptance_row_scale(tnlp, options, plan, &jac0),
+        row_scale: scaling.row_scale.clone(),
         tol: opt_num(options, "tol", 1e-8),
         constr_viol_tol: opt_num(options, "constr_viol_tol", 1e-4),
     };
-    let lm = bounded_levenberg_marquardt(&mut model, &prob, &x0, &test, max_iter, backend);
+
+    // The per-iterate observer: the user's `intermediate_callback` and the
+    // iteration record. Each needs `f` and `∇f` at the iterate, which the LM
+    // itself never evaluates, so they are evaluated only when one of the two
+    // is wanted — and counted.
+    let wants_callback = tnlp.borrow().wants_intermediate_callback();
+    let mut records: Vec<IterRecord> = Vec::new();
+    let mut extra_f_evals = 0usize;
+    let mut extra_grad_evals = 0usize;
+    let mut observe = |it: &LmIterate<'_>| -> bool {
+        if !(wants_callback || run_opts.capture_iterations) {
+            return true;
+        }
+        let mut xf = plan.x_full.clone();
+        for (k, &j) in plan.free.iter().enumerate() {
+            xf[j] = it.x[k];
+        }
+        extra_f_evals += 1;
+        let obj = tnlp.borrow_mut().eval_f(&xf, true).unwrap_or(Number::NAN);
+        let mut grad = vec![0.0; plan.n_full];
+        extra_grad_evals += 1;
+        let inf_du = if tnlp.borrow_mut().eval_grad_f(&xf, false, &mut grad) {
+            plan.free
+                .iter()
+                .fold(0.0 as Number, |a, &j| a.max(grad[j].abs()))
+        } else {
+            Number::NAN
+        };
+        let (scaled, unscaled) = test.violations(it.c);
+        let alpha = if it.accepted { 1.0 } else { 0.0 };
+        if run_opts.capture_iterations {
+            records.push(IterRecord {
+                iter: it.iter as Index,
+                objective: obj,
+                inf_pr: unscaled,
+                inf_pr_internal: scaled,
+                inf_du,
+                mu: 0.0,
+                d_norm: it.step_inf_norm,
+                regularization: it.lambda,
+                alpha_dual: 0.0,
+                alpha_primal: alpha,
+                alpha_primal_char: if it.iter == 0 { ' ' } else { 'L' },
+                ls_trials: 0,
+                phase: Default::default(),
+            });
+        }
+        if wants_callback {
+            return tnlp.borrow_mut().intermediate_callback(
+                pounce_nlp::tnlp::IterStats {
+                    mode: pounce_nlp::AlgorithmMode::RegularMode,
+                    iter: it.iter as Index,
+                    obj_value: obj,
+                    inf_pr: scaled,
+                    inf_du,
+                    mu: 0.0,
+                    d_norm: it.step_inf_norm,
+                    regularization_size: it.lambda,
+                    alpha_du: 0.0,
+                    alpha_pr: alpha,
+                    ls_trials: 0,
+                },
+                &IpoptData::default(),
+                &IpoptCq::default(),
+            );
+        }
+        true
+    };
+    let lm = bounded_levenberg_marquardt(
+        &mut model,
+        &prob,
+        &x0,
+        &test,
+        max_iter,
+        backend,
+        LmHooks {
+            deadline: Some(deadline),
+            on_iterate: Some(&mut observe),
+        },
+    );
     if lm.status != LmStatus::Converged {
-        let reason = format!("{:?} after {} iteration(s)", lm.status, lm.iterations);
+        let reason = match lm.status {
+            LmStatus::CpuTimeExceeded => format!(
+                "max_cpu_time reached after {} iteration(s), before a root",
+                lm.iterations
+            ),
+            LmStatus::WallTimeExceeded => format!(
+                "max_wall_time reached after {} iteration(s), before a root",
+                lm.iterations
+            ),
+            LmStatus::UserRequestedStop => format!(
+                "the intermediate callback requested a stop after {} iteration(s)",
+                lm.iterations
+            ),
+            st => format!("{st:?} after {} iteration(s)", lm.iterations),
+        };
         return fail(lm, reason);
     }
 
@@ -1084,16 +1436,26 @@ pub fn run(
         &IpoptCq::default(),
     );
 
+    // Recorded iterates go to any enclosing capture as well, the way
+    // `optimize_tnlp` forwards its own.
+    pounce_observability::extend_active_capture(&records);
     let statistics = SolveStatistics {
         iteration_count: lm.iterations as Index,
         total_cpu_time_secs: pounce_common::utils::cpu_time() - cpu0,
         total_wallclock_time_secs: pounce_common::utils::wallclock_time() - wall0,
-        num_obj_evals: 1,
+        // The certificate's `f` and `∇f` plus the observer's and the
+        // scaling measurement's, and the certificate's `g` on top of the
+        // LM's own.
+        num_obj_evals: (1 + extra_f_evals) as Index,
         num_constr_evals: (lm.residual_evals + 1) as Index,
-        num_obj_grad_evals: 1,
-        num_constr_jac_evals: (lm.jacobian_evals + 1) as Index,
+        num_obj_grad_evals: (1 + extra_grad_evals + scaling.evals.0) as Index,
+        num_constr_jac_evals: (lm.jacobian_evals + scaling.evals.1) as Index,
         final_objective: obj,
-        final_scaled_objective: obj,
+        // In the units the IPM reports it in: `total · f`.
+        final_scaled_objective: scaling.total_obj_scale * obj,
+        final_obj_scaling_factor: scaling.computed_obj_scale,
+        final_total_obj_scaling_factor: scaling.total_obj_scale.abs(),
+        start_obj_grad_max: scaling.start_obj_grad_max,
         final_dual_inf: 0.0,
         final_constr_viol: scaled,
         final_compl: 0.0,
@@ -1106,6 +1468,7 @@ pub fn run(
         final_declared_constr_viol: unscaled,
         final_declared_box_viol: 0.0,
         final_mu: 0.0,
+        iterations: records,
         ..SolveStatistics::default()
     };
     SquareSystemOutcome {
@@ -1198,8 +1561,15 @@ mod tests {
                 v.copy_from_slice(&[2.0 * x[0], 2.0 * x[1], 1.0, -1.0]);
             },
         };
-        let r =
-            bounded_levenberg_marquardt(&mut sys, &prob, &[0.2, 3.0], &strict(), 200, backend());
+        let r = bounded_levenberg_marquardt(
+            &mut sys,
+            &prob,
+            &[0.2, 3.0],
+            &strict(),
+            200,
+            backend(),
+            LmHooks::default(),
+        );
         assert_eq!(r.status, LmStatus::Converged, "{r:?}");
         assert!(r.x[0] <= 1.0, "x0 = {} left the box", r.x[0]);
         assert!(
@@ -1223,8 +1593,15 @@ mod tests {
             },
             j: |_x: &[Number], v: &mut [Number]| v.copy_from_slice(&[1.0, 0.0, 0.0, 1.0]),
         };
-        let r =
-            bounded_levenberg_marquardt(&mut sys, &prob, &[0.0, 0.5], &strict(), 200, backend());
+        let r = bounded_levenberg_marquardt(
+            &mut sys,
+            &prob,
+            &[0.0, 0.5],
+            &strict(),
+            200,
+            backend(),
+            LmHooks::default(),
+        );
         assert_eq!(r.status, LmStatus::Stationary, "{r:?}");
         assert!(r.x[0] <= 1.0);
         assert!(
@@ -1249,8 +1626,15 @@ mod tests {
                 v.copy_from_slice(&[2.0 * x[0], 2.0 * x[1], x[1], x[0]]);
             },
         };
-        let r =
-            bounded_levenberg_marquardt(&mut sys, &prob, &[0.0, 0.0], &strict(), 200, backend());
+        let r = bounded_levenberg_marquardt(
+            &mut sys,
+            &prob,
+            &[0.0, 0.0],
+            &strict(),
+            200,
+            backend(),
+            LmHooks::default(),
+        );
         assert_eq!(r.status, LmStatus::Stationary, "{r:?}");
         assert_eq!(r.iterations, 0);
     }
@@ -1274,8 +1658,15 @@ mod tests {
                 v.copy_from_slice(&[1.0, -1.0, 2.0 * x[0], -2.0 * x[1]]);
             },
         };
-        let r =
-            bounded_levenberg_marquardt(&mut sys, &prob, &[3.0, -1.0], &strict(), 200, backend());
+        let r = bounded_levenberg_marquardt(
+            &mut sys,
+            &prob,
+            &[3.0, -1.0],
+            &strict(),
+            200,
+            backend(),
+            LmHooks::default(),
+        );
         assert_eq!(r.status, LmStatus::Converged, "{r:?}");
         assert!((r.x[0] - r.x[1]).abs() < 1e-10, "{:?}", r.x);
     }
@@ -1301,10 +1692,313 @@ mod tests {
             },
             j: |_x: &[Number], v: &mut [Number]| v.copy_from_slice(&[0.5, 0.5, 1.0, 2.0, 2.0]),
         };
-        let r =
-            bounded_levenberg_marquardt(&mut sys, &prob, &[5.0, 7.0], &strict(), 200, backend());
+        let r = bounded_levenberg_marquardt(
+            &mut sys,
+            &prob,
+            &[5.0, 7.0],
+            &strict(),
+            200,
+            backend(),
+            LmHooks::default(),
+        );
         assert_eq!(r.status, LmStatus::Converged, "{r:?}");
         assert!((r.x[0] + r.x[1] - 2.0).abs() < 1e-10);
+    }
+
+    /// The bound-root system of `converges_to_a_root_on_an_active_bound`,
+    /// shared by the budget and callback tests below so each differs from a
+    /// converging run in exactly the hook it exercises.
+    fn bound_root_system() -> (
+        LmProblem,
+        Sys<impl FnMut(&[Number], &mut [Number]), impl FnMut(&[Number], &mut [Number])>,
+    ) {
+        let prob = dense2([-10.0, -10.0], [1.0, 10.0]);
+        let sys = Sys {
+            f: |x: &[Number], c: &mut [Number]| {
+                c[0] = x[0] * x[0] + x[1] * x[1] - 2.0;
+                c[1] = x[0] - x[1];
+            },
+            j: |x: &[Number], v: &mut [Number]| {
+                v.copy_from_slice(&[2.0 * x[0], 2.0 * x[1], 1.0, -1.0]);
+            },
+        };
+        (prob, sys)
+    }
+
+    /// An exhausted time budget stops the method before its first step, and
+    /// says which budget. `Deadline::new(0, ·)` is exceeded on its first
+    /// read whatever the clock resolution (`elapsed ≥ 0`), so this is
+    /// deterministic. Mutation-checked: with the `time_exceeded` checks
+    /// removed from `bounded_levenberg_marquardt` both arms run to
+    /// `Converged` and the test fails.
+    #[test]
+    fn an_exhausted_time_budget_stops_the_method_and_names_the_budget() {
+        use pounce_common::timing::Deadline;
+        for (deadline, want) in [
+            (Deadline::new(0.0, 1e6), LmStatus::WallTimeExceeded),
+            (Deadline::new(1e6, 0.0), LmStatus::CpuTimeExceeded),
+        ] {
+            let (prob, mut sys) = bound_root_system();
+            let r = bounded_levenberg_marquardt(
+                &mut sys,
+                &prob,
+                &[0.2, 3.0],
+                &strict(),
+                200,
+                backend(),
+                LmHooks {
+                    deadline: Some(deadline),
+                    on_iterate: None,
+                },
+            );
+            assert_eq!(r.status, want, "{r:?}");
+            assert_eq!(r.iterations, 0, "{r:?}");
+        }
+    }
+
+    /// The clock is read after the convergence test, so a start that is
+    /// already a root is reported as one even with no time left — the same
+    /// order as the IPM's check. Mutation-checked: moving the iterate-0
+    /// clock check above `test.passes` turns this `WallTimeExceeded`.
+    #[test]
+    fn a_root_is_not_discarded_for_being_late() {
+        let (prob, mut sys) = bound_root_system();
+        let r = bounded_levenberg_marquardt(
+            &mut sys,
+            &prob,
+            &[1.0, 1.0],
+            &strict(),
+            200,
+            backend(),
+            LmHooks {
+                deadline: Some(pounce_common::timing::Deadline::new(0.0, 0.0)),
+                on_iterate: None,
+            },
+        );
+        assert_eq!(r.status, LmStatus::Converged, "{r:?}");
+        assert_eq!(r.iterations, 0);
+    }
+
+    /// The observer sees every iterate from the start on, in order, and a
+    /// `false` stops the method on that iterate. Mutation-checked: ignoring
+    /// the observer's return value runs to `Converged` and fails here. (Every
+    /// step of this system is accepted, so the test cannot tell an observer
+    /// fired on every iterate from one fired on accepted steps only; that
+    /// mutation was tried and survives.)
+    #[test]
+    fn the_observer_sees_every_iterate_and_can_stop_the_method() {
+        let (prob, mut sys) = bound_root_system();
+        let mut seen: Vec<usize> = Vec::new();
+        let mut obs = |it: &LmIterate<'_>| {
+            seen.push(it.iter);
+            it.iter < 2
+        };
+        let r = bounded_levenberg_marquardt(
+            &mut sys,
+            &prob,
+            &[0.2, 3.0],
+            &strict(),
+            200,
+            backend(),
+            LmHooks {
+                deadline: None,
+                on_iterate: Some(&mut obs),
+            },
+        );
+        assert_eq!(r.status, LmStatus::UserRequestedStop, "{r:?}");
+        assert_eq!(r.iterations, 2);
+        assert_eq!(seen, [0, 1, 2]);
+
+        // Unstopped, it sees iterates 0..=iterations: one per iteration
+        // plus the start, the IPM's record convention.
+        let (prob, mut sys) = bound_root_system();
+        let mut seen: Vec<usize> = Vec::new();
+        let mut obs = |it: &LmIterate<'_>| {
+            seen.push(it.iter);
+            true
+        };
+        let r = bounded_levenberg_marquardt(
+            &mut sys,
+            &prob,
+            &[0.2, 3.0],
+            &strict(),
+            200,
+            backend(),
+            LmHooks {
+                deadline: None,
+                on_iterate: Some(&mut obs),
+            },
+        );
+        assert_eq!(r.status, LmStatus::Converged, "{r:?}");
+        assert_eq!(seen, (0..=r.iterations).collect::<Vec<_>>());
+    }
+
+    /// A 3-variable TNLP for [`run`]: `x1` fixed at 3 in the **middle**
+    /// slot (so a full/free index mix-up lands a value in the wrong place),
+    /// `x0 ≤ 2` active at the root `(2, 3, 2.5)`, rows `x0·x2 − x1 = 2` and
+    /// `x0 + x1/2 − x2 = 1`, objective the constant 5. Counts what the
+    /// stage does to it.
+    struct Fxm {
+        finalized: Vec<Vec<Number>>,
+        callbacks: usize,
+        /// Callback returns `false` from this iterate on.
+        stop_at: Option<Index>,
+    }
+
+    impl Fxm {
+        fn new() -> Self {
+            Self {
+                finalized: Vec::new(),
+                callbacks: 0,
+                stop_at: None,
+            }
+        }
+    }
+
+    impl TNLP for Fxm {
+        fn get_nlp_info(&mut self) -> Option<pounce_nlp::tnlp::NlpInfo> {
+            Some(pounce_nlp::tnlp::NlpInfo {
+                n: 3,
+                m: 2,
+                nnz_jac_g: 6,
+                nnz_h_lag: 0,
+                index_style: IndexStyle::C,
+            })
+        }
+        fn get_bounds_info(&mut self, b: BoundsInfo<'_>) -> bool {
+            b.x_l.copy_from_slice(&[-1e20, 3.0, -1e20]);
+            b.x_u.copy_from_slice(&[2.0, 3.0, 1e20]);
+            b.g_l.copy_from_slice(&[2.0, 1.0]);
+            b.g_u.copy_from_slice(&[2.0, 1.0]);
+            true
+        }
+        fn get_starting_point(&mut self, sp: StartingPoint<'_>) -> bool {
+            sp.x.copy_from_slice(&[1.5, 7.0, 1.5]);
+            true
+        }
+        fn eval_f(&mut self, _x: &[Number], _new_x: bool) -> Option<Number> {
+            Some(5.0)
+        }
+        fn eval_grad_f(&mut self, _x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g.iter_mut().for_each(|v| *v = 0.0);
+            true
+        }
+        fn eval_g(&mut self, x: &[Number], _new_x: bool, g: &mut [Number]) -> bool {
+            g[0] = x[0] * x[2] - x[1];
+            g[1] = x[0] + 0.5 * x[1] - x[2];
+            true
+        }
+        fn eval_jac_g(
+            &mut self,
+            x: Option<&[Number]>,
+            _new_x: bool,
+            mode: SparsityRequest<'_>,
+        ) -> bool {
+            match mode {
+                SparsityRequest::Structure { irow, jcol } => {
+                    irow.copy_from_slice(&[0, 0, 0, 1, 1, 1]);
+                    jcol.copy_from_slice(&[0, 1, 2, 0, 1, 2]);
+                }
+                SparsityRequest::Values { values } => {
+                    let x = x.unwrap();
+                    values.copy_from_slice(&[x[2], -1.0, x[0], 1.0, 0.5, -1.0]);
+                }
+            }
+            true
+        }
+        fn intermediate_callback(
+            &mut self,
+            stats: pounce_nlp::tnlp::IterStats,
+            _d: &IpoptData,
+            _q: &IpoptCq,
+        ) -> bool {
+            self.callbacks += 1;
+            self.stop_at.is_none_or(|k| stats.iter < k)
+        }
+        fn finalize_solution(&mut self, sol: Solution<'_>, _d: &IpoptData, _q: &IpoptCq) {
+            self.finalized.push(sol.x.to_vec());
+        }
+    }
+
+    fn run_fxm(
+        fxm: Fxm,
+        opts: &[(&str, Number)],
+        capture: bool,
+    ) -> (SquareSystemOutcome, Rc<RefCell<Fxm>>) {
+        let mut options = OptionsList::new();
+        for &(tag, v) in opts {
+            options.set_numeric_value(tag, v, true, true).unwrap();
+        }
+        let cell = Rc::new(RefCell::new(fxm));
+        let tnlp: Rc<RefCell<dyn TNLP>> = cell.clone();
+        let plan = probe(&tnlp, &options).expect("Fxm is in the class");
+        let out = run(
+            &plan,
+            &tnlp,
+            &options,
+            backend(),
+            RunOptions {
+                capture_iterations: capture,
+            },
+        );
+        (out, cell)
+    }
+
+    /// The baseline the two tests below each break one hook of: promoted,
+    /// finalized once, with the fixed variable in its own (middle) slot, a
+    /// callback per iterate, `iterations.len() == iteration_count + 1`, and
+    /// `final_scaled_objective` carrying `obj_scaling_factor`.
+    #[test]
+    fn run_promotes_and_reports_in_the_ipm_conventions() {
+        let (out, fxm) = run_fxm(Fxm::new(), &[("obj_scaling_factor", 2.0)], true);
+        assert!(out.accepted, "{}", out.reason);
+        let fxm = fxm.borrow();
+        assert_eq!(fxm.finalized.len(), 1);
+        let x = &fxm.finalized[0];
+        assert_eq!(x[1], 3.0, "the fixed variable keeps its slot: {x:?}");
+        assert!(
+            (x[0] - 2.0).abs() < 1e-12 && (x[2] - 2.5).abs() < 1e-12,
+            "{x:?}"
+        );
+        let st = &out.statistics;
+        assert_eq!(st.iterations.len(), st.iteration_count as usize + 1);
+        assert_eq!(fxm.callbacks, st.iteration_count as usize + 1);
+        assert_eq!(st.final_objective, 5.0);
+        assert_eq!(st.final_scaled_objective, 10.0);
+    }
+
+    /// `max_wall_time` reaches the LM through [`run`], and running out
+    /// means no promotion and no `finalize_solution`. `0` is exceeded on the
+    /// first read of the clock, so this is deterministic. Mutation-checked:
+    /// passing `deadline: None` in `run` promotes and the test fails.
+    #[test]
+    fn run_honours_max_wall_time_and_does_not_promote() {
+        for (tag, want) in [
+            ("max_wall_time", LmStatus::WallTimeExceeded),
+            ("max_cpu_time", LmStatus::CpuTimeExceeded),
+        ] {
+            let (out, fxm) = run_fxm(Fxm::new(), &[(tag, 0.0)], true);
+            assert!(!out.accepted, "{tag}");
+            assert_eq!(out.lm.status, want, "{tag}");
+            assert!(out.reason.contains(tag), "{tag}: {}", out.reason);
+            assert!(fxm.borrow().finalized.is_empty(), "{tag}");
+        }
+    }
+
+    /// The TNLP's intermediate callback is fired at every iterate and its
+    /// stop request is honoured: no promotion, no `finalize_solution`.
+    /// Mutation-checked: discarding the callback's return value in `run`'s
+    /// observer promotes and the test fails.
+    #[test]
+    fn run_honours_an_intermediate_callback_stop() {
+        let mut fxm = Fxm::new();
+        fxm.stop_at = Some(1);
+        let (out, fxm) = run_fxm(fxm, &[], false);
+        assert!(!out.accepted);
+        assert_eq!(out.lm.status, LmStatus::UserRequestedStop);
+        assert_eq!(out.lm.iterations, 1);
+        assert_eq!(fxm.borrow().callbacks, 2, "iterates 0 and 1");
+        assert!(fxm.borrow().finalized.is_empty());
     }
 
     /// The scaled test is the NLP arm's: a row's violation is judged after

@@ -296,14 +296,42 @@ pub fn run_second_opinion_ladder(
     let mut square_promoted = false;
     if let (None, Some(plan)) = (promoted_by, square.as_ref()) {
         let label = square_system::SQUARE_SYSTEM_RUNG_LABEL;
+        // Says only what the probe established: the shape, and `∇f = 0` at
+        // the start. "Constant objective" is not known here — it is
+        // re-checked at the returned point, and the line says so. The
+        // verdict is named without `describe()`'s escalation clause, which
+        // is false on a budget exit that never escalated.
+        let escalations = statistics.quality_escalations.max(0);
+        let how = match (trigger, escalations) {
+            (SecondOpinionTrigger::IterationLimit, 0) => String::new(),
+            (SecondOpinionTrigger::IterationLimit, k) => {
+                format!(" after {k} factorization escalation(s)")
+            }
+            _ => String::new(),
+        };
+        let after_rungs = if tried.is_empty() {
+            String::new()
+        } else {
+            format!(" and {} option rung(s) failed", tried.len())
+        };
         report(&format!(
-            "pounce: {} — the model is square with a constant objective; \
-             solving c(x) = 0 directly ({label}: bounded Levenberg–Marquardt on the \
-             constraint Jacobian)…",
-            trigger.describe(),
+            "pounce: {}{how}{after_rungs} — the model is square and equality-only, \
+             with ∇f exactly zero at the starting point; solving c(x) = 0 directly \
+             ({label}: bounded Levenberg–Marquardt on the constraint Jacobian; \
+             promoted only if the returned point is feasible and ∇f is exactly \
+             zero there too)…",
+            trigger.verdict(),
         ));
         let backend = square_system::default_backend(app.options());
-        let out = square_system::run(plan, &tnlp, app.options(), backend);
+        let out = square_system::run(
+            plan,
+            &tnlp,
+            app.options(),
+            backend,
+            square_system::RunOptions {
+                capture_iterations: app.iter_history_enabled(),
+            },
+        );
         tried.push(label);
         rung_iteration_counts.push(out.lm.iterations);
         if out.accepted {
