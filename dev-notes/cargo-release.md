@@ -1,6 +1,6 @@
 # crates.io release
 
-POUNCE ships **20** Rust crates to crates.io. This file is the procedure.
+POUNCE ships **22** Rust crates to crates.io. This file is the procedure.
 For the PyPI side (`pounce-solver` + `pyomo-pounce`), see `pypi-release.md`.
 
 The publish list and its dependency order live in
@@ -63,12 +63,13 @@ Layer 3: `pounce-convex`, `pounce-feral`, `pounce-hsl`, `pounce-l1penalty`,
          `pounce-solve-report`
 Layer 4: `pounce-algorithm`
 Layer 5: `pounce-minima`, `pounce-restoration`, `pounce-sensitivity`
-Layer 6: `pounce-cinterface`, `pounce-cli`
+Layer 6: `pounce-cinterface`, `pounce-cli`, `pounce-rs`
 
 `pounce-convex` (LP/QP/SOCP/SDP conic IPM) depends only on `pounce-common` +
 `pounce-linsol` + `pounce-linalg`, so it sits in layer 3. `pounce-nl` depends
-on `pounce-common` + `pounce-nlp`, also layer 3. `pounce-cli` is the sink:
-it depends (transitively) on nearly everything, so it always publishes last.
+on `pounce-common` + `pounce-nlp`, also layer 3. `pounce-cli` and the
+`pounce-rs` facade are the sinks: they depend (transitively) on nearly
+everything, so they publish last.
 
 The exact order the script uses can be re-derived at any time with:
 
@@ -82,14 +83,12 @@ crates.io rate-limits **new crate names** to 5 publishes burst, then 1 per
 ~10 minutes. New *versions* of *existing* crates are 1/min (burst 30), so a
 routine release is unaffected.
 
-As of 0.6.0, **all 19** crates are published (the last new name,
-`pounce-convex`, first published in 0.5.0). Every release since is a version
-bump of existing crates — 1/min, burst 30 — so the new-crate rate limit does
-not apply to a routine release.
-
-`pounce-minima` (gh#966) is a new name: the first release that carries it
-publishes one new crate, well inside the 5-burst limit, so it needs no
-exemption.
+As of 0.12.0, 21 of the 22 are published. The exception is
+`pounce-minima` (gh#966), a new name that first ships in the release after
+0.12.0 — one new crate, well inside the 5-burst limit, so it needs no
+exemption. Everything else is a version bump of an existing crate — 1/min,
+burst 30. Confirm with the `curl` check in the root `CLAUDE.md` rather than
+trusting this paragraph.
 
 The new-crate burst limit only matters if a future release introduces **new**
 crate names. If one does and you would exceed the 5-burst limit, either set
@@ -100,31 +99,113 @@ note they all share the `pounce-` prefix under account `jkitchin`.
 
 ## Cutting a release
 
+### Benchmarks — on a clean `main`, current with `origin`
+
+Do this first, once the release's content is frozen (nothing solver-facing
+left to merge). A release report must describe the commit being tagged, and
+the last three releases each had to learn that separately: the August
+baseline was regenerated off `perf/feral-refine-target @ …-dirty` (a branch
+that never merged, flattering CUTEst by 19 points of "POUNCE faster"), 0.11.0
+was first swept 27 commits behind its tag, and 0.12.0 ran from a
+`bench/v0.12.0-sweep` branch.
+
+1. **Run from a worktree at `origin/main`, not the working checkout.** A
+   sweep takes hours; anything that edits the main checkout in that time
+   (another session, a branch switch) dirties the tree and the provenance
+   line records `-dirty`.
+
+   ```sh
+   git fetch origin
+   git worktree add --detach ../pounce-bench-main origin/main
+   cd ../pounce-bench-main
+   echo "$POUNCE_BENCH_DATA"          # the .nl data root; a fresh worktree has no .nl files
+   make -C benchmarks benchmark-rerun  # builds target/release/pounce, then every suite
+   ```
+
+   `benchmark-rerun`, not `benchmark`: the incremental target skips any
+   suite whose `pounce.json` is newer than the binary and its inputs, which
+   in a reused tree is a stale result silently carried forward.
+2. **Check what ran.** The report's "POUNCE binary" row (from
+   `target/release/pounce --about`) must name the `origin/main` commit,
+   and its POUNCE row must read a tree with no `-dirty`. The two rows can
+   name different commits legitimately: a report regenerated after a
+   harness or reference fix is generated from the fix's commit, while the
+   numbers still come from the swept binary. Every suite's `<suite>/pounce.env.json` records
+   the time limit and thread settings it ran under; keep them the same as
+   the previous release's (0.12.0: 300 s, threads unpinned) or say in the
+   commit which changed — otherwise timing deltas are not comparable.
+3. **Diff against the previous release, not just read the headline.**
+   `BENCHMARK_REPORT.json` is the status/objective regression baseline:
+   compare the new one with the committed one problem by problem, and
+   account for every status flip and every objective that moves. Timing
+   is only comparable on the machine that produced the Ipopt reference
+   (see `benchmarks/README.md`).
+4. **Run the fixture sweep against the previous release binary.**
+   `scripts/sweep-fixtures.sh`, both legs, previous tag's `pounce` vs this
+   one. The benchmark report asserts status and objective; the sweep is
+   what shows iteration counts and engine routing moving — the gh#544
+   206 → 812 regression shipped through a release because nothing at
+   release time compared iteration counts. If `crates/pounce-minima` or
+   `crates/pounce-cli/src/minima` changed since the last tag, run
+   `scripts/sweep-minima.sh` too.
+
+   **Sweep on x86_64 as well as on the Mac.** FERAL has separate NEON
+   (aarch64) and AVX2+FMA (x86_64) dense kernels, so on nonconvex models
+   the two architectures take different trajectories. That is legitimate
+   rounding, not a defect, but it means an arm64 sweep says nothing about
+   x86, which is what CI and most users run. The FERAL 0.21 bump (#1038)
+   is the case. On arm64, `pooling_rt2stp` looked better (−4391.826 in 82
+   iterations). On x86 the base solve stalled for 700 iterations behind a
+   δ_x-ladder latch and needed a rescue (904 iterations against 0.20's
+   162). Only the first CI run showed it. An amd64 container reproduces
+   CI's kernel path: colima's Rosetta for Linux reports `avx2` and `fma`.
+
+   ```sh
+   docker run --rm --platform linux/amd64 -v "$PWD":/src -w /src \
+     -e CARGO_TARGET_DIR=/src/target-x86 rust:1-bookworm \
+     bash -c 'cargo build --release --bin pounce &&
+              scripts/sweep-fixtures.sh target-x86/release/pounce sweep-x86.txt'
+   ```
+
+   Build the previous tag's binary the same way. colima shares only
+   `$HOME` with the VM, so keep the worktree and its output under `$HOME`.
+   The benchmark suites still run on the Mac, so their per-model objective
+   and iteration moves on nonconvex models describe arm64 trajectories:
+   say so in the report.
+5. Copy the regenerated `benchmarks/BENCHMARK_REPORT.{md,json}` and
+   `benchmarks/figures/` into the release PR, with a commit message naming
+   the swept SHA and what moved. If anything solver-facing merges after the
+   sweep, re-run it — the version bump below does not count, since it
+   touches no solve path.
+
 ### Pre-flight
 
 1. Make sure `cargo login` is set up (one-time: `cargo login <token>` from
    https://crates.io/me) — only needed for a local publish; CI uses the
    `CARGO_REGISTRY_TOKEN` secret (see Automation below).
-2. Bump the workspace version in `Cargo.toml` (root `[workspace.package]` and
+2. Move the CHANGELOG's `## [Unreleased]` entries under a new
+   `## [X.Y.Z] - YYYY-MM-DD` heading. That section becomes the GitHub
+   Release body.
+3. Bump the workspace version in `Cargo.toml` (root `[workspace.package]` and
    every entry in `[workspace.dependencies]` that points at one of our crates
    — they must all match the new version) **and** the two PyPI projects
    (`python/pyproject.toml`, `pyomo-pounce/pyproject.toml`) to the same
    X.Y.Z. `scripts/check-release-consistency.sh` verifies all three agree; run
    it before tagging. If the version bump is non-trivial, do it as its own
    commit.
-3. Bump `ARG POUNCE_VERSION` in `docker/Dockerfile.release` to the same
+4. Bump `ARG POUNCE_VERSION` in `docker/Dockerfile.release` to the same
    X.Y.Z. `scripts/check-release-consistency.sh` fails if you forget — and
    it is worth knowing why it is checked rather than trusted: the release
    image *pip-installs* that pinned version, so a stale ARG produces an
    image **tagged** X.Y.Z that **contains** the previous release. The build
    succeeds and the smoke test passes, because the old wheel works fine.
-4. Bump `CITATION.cff` to match: set `version:` to the new release version and
+5. Bump `CITATION.cff` to match: set `version:` to the new release version and
    `date-released:` to the release date. GitHub's "Cite this repository"
    widget reads these. (The `doi:` is the Zenodo *concept* DOI and stays put.)
-5. Rebuild the browser demo's Pyodide wheel with
+6. Rebuild the browser demo's Pyodide wheel with
    `crates/pounce-wasm/build-wheel.sh` and commit what it stages under
    `crates/pounce-wasm/web-python/wheels/`. The wheel is committed and its
-   filename carries the `python/pyproject.toml` version, so after step 2 the
+   filename carries the `python/pyproject.toml` version, so after step 3 the
    staged one is stale: `build-wheel.sh --check`, run by CI's `WebAssembly
    build + smoke` job, fails the release PR with `staged wheel is
    pounce_solver-<old>-… but python/pyproject.toml is at <new>`.
@@ -132,7 +213,7 @@ note they all share the `pounce-` prefix under account `jkitchin`.
    a fix — the wheel embeds the solver, so the demo would run the previous
    release under the new version's name. The script installs its own
    Pyodide toolchain under `target/` on first run (needs CPython 3.13).
-6. Run `cargo package --workspace --exclude pounce-py --exclude
+7. Run `cargo package --workspace --exclude pounce-py --exclude
    pounce-studio-pyo3 --exclude iter-diff --exclude pounce-wasm` to catch
    missing metadata, broken links, or dirty-tree errors. It packages and then
    compiles every publishable crate, so breakage appears here rather than
@@ -148,7 +229,7 @@ note they all share the `pounce-` prefix under account `jkitchin`.
      candidate versions found which didn't match: 0.10.0, 0.9.0, 0.8.0, ...
    ```
 
-   That is not a defect in the tree — it is what step 2 just did. `cargo
+   That is not a defect in the tree — it is what step 3 just did. `cargo
    publish --dry-run` resolves each crate's dependencies against the **live**
    crates.io index, and the whole point of a release commit is that the new
    version is not there yet. Only the leaves (`pounce-common`,
@@ -201,15 +282,26 @@ note they all share the `pounce-` prefix under account `jkitchin`.
    `target/`. This bites local pre-flight only, which is exactly where the
    step is supposed to earn its keep.
 
-### Real release
+### Real release — the tags are the release
 
-The crates.io publish is automated by `.github/workflows/release-crates.yml`
-(triggered on a `v*` tag push, or manually via `workflow_dispatch` — which
-defaults to a dry run). It runs `scripts/publish-crates.sh`, which is
-idempotent (skips any crate already live at the target version), so a re-run
-or a resumed run is safe.
+Merge the release PR, then tag the merge commit on `main`. Pushing the tags
+*is* the publish: each prefix drives its own workflow, so there is no
+separate "publish, then tag" step.
 
-To publish locally instead:
+```sh
+git checkout main && git pull --ff-only
+scripts/check-release-consistency.sh
+git tag python-vX.Y.Z && git tag pyomo-pounce-vX.Y.Z && git tag vX.Y.Z
+git push origin python-vX.Y.Z pyomo-pounce-vX.Y.Z   # PyPI first
+git push origin vX.Y.Z                              # crates.io + container images
+```
+
+Push the two PyPI tags **at or before** `v*`: `release-docker.yml` fires on
+`v*` and pip-installs the release from PyPI (see Container images below).
+
+`release-crates.yml` runs `scripts/publish-crates.sh`, which is idempotent
+(skips any crate already live at the target version), so a re-run or a
+resumed run is safe. To publish locally instead:
 
 ```sh
 # Option A: no new-crate rate-limit concern (the common case):
@@ -228,15 +320,16 @@ scripts/publish-crates.sh --start-from pounce-algorithm
 
 ### After publish
 
-Tag the release in git so the release point is reproducible:
-
-```sh
-git tag vX.Y.Z && git push origin vX.Y.Z
-```
-
-(The Python distributions use their own tag prefixes — `python-v*` and
-`pyomo-pounce-v*` — so the bare `v*` tag namespace is reserved for the Rust
-crates and drives `release-crates.yml`.)
+1. **Verify every surface reached X.Y.Z.** crates.io with the `curl` check
+   in the root `CLAUDE.md` (sanity-check `serde` first; a request without a
+   User-Agent reads as NOT PUBLISHED), `pip index versions pounce-solver`
+   and `pyomo-pounce`, and the container commands below.
+2. **Create the GitHub Release by hand.** No workflow does it, and a tag
+   alone does not make one:
+   `gh release create vX.Y.Z --notes-file <the ## [X.Y.Z] CHANGELOG section>`.
+3. Add a fresh `## [Unreleased]` heading to the CHANGELOG, close the release
+   tracking issue, and remove the benchmark worktree
+   (`git worktree remove ../pounce-bench-main`).
 
 ## Automation
 
@@ -245,7 +338,7 @@ crates and drives `release-crates.yml`.)
 | crates.io (22 crates)   | `release-crates.yml`                  | `v*` tag / manual        |
 | PyPI `pounce-solver`    | `release-pounce.yml`                  | `python-v*` tag          |
 | PyPI `pyomo-pounce`     | `release-pyomo-pounce.yml`            | `pyomo-pounce-v*` tag    |
-| ghcr.io container images| `release-docker.yml`                  | `v*` tag / push to main  |
+| ghcr.io container images| `release-docker.yml`                  | `v*` tag / manual        |
 | wasm demo pages         | `docs.yml`                            | push to main             |
 
 `release-crates.yml` needs the `CARGO_REGISTRY_TOKEN` secret and runs in the
