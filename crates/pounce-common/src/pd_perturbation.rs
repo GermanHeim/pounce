@@ -687,6 +687,19 @@ impl PdPerturbationHandler {
         if self.delta_x_curr > self.delta_xs_max {
             self.delta_x_last = 0.0;
             self.delta_s_last = 0.0;
+            // The ladder has given up on this system; forget the rung that
+            // overflowed as well. Otherwise the next `consider_new_system`
+            // (reset_last == false) promotes this over-max `delta_x_curr`
+            // into `delta_x_last`, undoing the reset above, and every later
+            // ladder starts at max(min, last * dec_fact) >= delta_xs_max/3 and
+            // overflows again within one or two rungs -- a self-sustaining
+            // latch. Upstream IpPDPerturbationHandler.cpp:395-402 / :166-169
+            // carries the same latent defect. Measured on pooling_rt2stp
+            // (x86_64, feral 0.21): 161 overflows, 167 restoration entries and
+            // a gh#274 exit at 848 iterations without this; 492 and
+            // `Solve_Succeeded` with it.
+            self.delta_x_curr = 0.0;
+            self.delta_s_curr = 0.0;
             append_info(ip_data, "dx");
             return false;
         }
@@ -781,6 +794,36 @@ fn set_info_regu_x(sink: Option<&dyn PerturbationSink>, v: Number) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ladder that overflows `δ_xs_max` gives up on the system *and*
+    /// forgets it: the next system's ladder starts from the first rung, not
+    /// from one third of the cap. Without clearing `δ_x_curr` on overflow,
+    /// `consider_new_system` promoted the over-max value into `δ_x_last`
+    /// and every later ladder overflowed within one or two rungs
+    /// (pooling_rt2stp on x86_64 / feral 0.21: 161 overflows, gh#274 exit at
+    /// 848 iterations). Revert the two `*_curr = 0.0` lines and this fails.
+    #[test]
+    fn an_overflowed_ladder_does_not_poison_the_next_system() {
+        let mut h = PdPerturbationHandler::new();
+        h.consider_new_system(0.1, None).unwrap();
+        let mut rungs = 0;
+        while h.perturb_for_wrong_inertia(0.1, None).is_some() {
+            rungs += 1;
+            assert!(rungs < 1000, "the ladder never reached delta_xs_max");
+        }
+
+        h.consider_new_system(0.1, None).unwrap();
+        assert_eq!(h.delta_x_last, 0.0, "the overflowed rung was remembered");
+        let d = h
+            .perturb_for_wrong_inertia(0.1, None)
+            .expect("a fresh system's first rung must not fail");
+        assert!(
+            d.delta_x < h.delta_xs_max / 1e6,
+            "the next ladder started at {:e}, near the cap {:e}",
+            d.delta_x,
+            h.delta_xs_max,
+        );
+    }
 
     /// gh#592: three rungs of the `δ_x` ladder with `δ_c` on and still
     /// no acceptable inertia is `δ_c` failing at the job it was raised

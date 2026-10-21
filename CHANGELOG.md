@@ -278,6 +278,28 @@ changes.
   parity test's strict `xfail` on camel deflation is now a pass.
 
 ### Fixed
+- **An overflowed `δ_x` ladder no longer poisons every later one.** When the
+  inertia-correction ladder climbs past `max_hessian_perturbation` it gives up
+  on the system and clears the remembered `δ_x_last`. It left the overflowed
+  current rung in place, though, and the next `consider_new_system` promoted
+  that over-cap value straight back into `δ_x_last`. Every later ladder then
+  started at a third of the cap and overflowed within one or two rungs: a
+  self-sustaining latch. Upstream `IpPDPerturbationHandler.cpp` has the same
+  latent defect (lines 395–402 and 166–169). It surfaced on FERAL 0.21 on
+  x86_64. There, `pooling_rt2stp` reached `-3273.955` but could not converge
+  the duals. It hit 161 overflows and 167 restoration entries, then the gh#274
+  exit at 848 iterations, and only the `mu_strategy=adaptive` rung rescued it
+  (904 iterations in total; FERAL 0.20: 162). It now solves in 492 iterations
+  with no rescue. The fixture sweep moves only that line, on both arches. On
+  arm64 its final attempt goes from `-4391.826`/82 to `-3273.955`/85 with a
+  `mu_strategy=adaptive` rescue, and the total work falls from 349 iterations
+  (a 267-iteration first attempt that the sweep did not show) to 242.
+  `pooling_rt2stp` is bistable between those two certified optima, and which
+  one a run reaches moves with FERAL's NEON vs AVX2+FMA rounding. The tests
+  that pinned the global optimum (`issue_250`, `issue_592`, the wasm shim)
+  now accept either one, and still pin the certificate and the iteration
+  bound. Test: `pd_perturbation::tests::an_overflowed_ladder_does_not_poison_the_next_system`,
+  which fails with the fix reverted.
 - **A restoration entry forced by a non-finite Hessian is no longer a gh#274
   near-feasible strike.** When the Hessian evaluates to NaN/Inf (a
   `|x|^p` term with `1 < p < 2` evaluated at exactly `x = 0`), the

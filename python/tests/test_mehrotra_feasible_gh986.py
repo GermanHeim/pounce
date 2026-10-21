@@ -70,34 +70,36 @@ def test_mehrotra_clnlbeam_is_not_sent_to_restoration_at_a_feasible_point(ni):
     assert min(abs(info["obj_val"] - v) for v in _BEAM_LOCAL_VALUES) < 1e-2, info["obj_val"]
 
 
-def test_mehrotra_clnlbeam_reaches_the_default_local_solution():
-    """gh#986 review item 8, at a size where the stale-predictor fix moves the
-    answer: before it, the recentring step at iteration 1 built its corrector
-    from the PREVIOUS iterate's affine step, and unglobalised Mehrotra stopped
-    at the other local solution, 346.497; dropping the stale predictor reaches
-    the default algorithm's 344.876.
+def test_mehrotra_clnlbeam_ends_at_a_stationary_value_at_ni_500():
+    """gh#986 review item 8 (the stale predictor) at ni = 500.
 
-    The witness size is a trajectory fact and moves with the factorization.
-    It was ni = 500 on FERAL 0.20 (346.4972/320 it before the fix, 344.8762/336
-    after). On FERAL 0.21 ni = 500 ends at 346.4972 either way, so it no longer
-    tells the two apart. Measured on 0.21, Mehrotra with the fix against Mehrotra
-    with both ``delta_aff = None`` drops reverted:
+    This test used to assert that dropping the stale predictor moves ni = 500
+    from the other local solution (346.4972) to the default algorithm's
+    344.8762. That was true on FERAL 0.20, and it is a statement about which
+    of two nearby stationary points unglobalised Mehrotra falls into, which
+    is a rounding fact, not a property of the fix. FERAL has separate NEON
+    and AVX2+FMA dense kernels, and on FERAL 0.21 the outcome flips with the
+    architecture and the size. Measured, Mehrotra with the fix against
+    Mehrotra with both ``delta_aff = None`` drops reverted:
 
-    ==== ========================= ==========================
-    ni   fixed                     stale predictor
-    ==== ========================= ==========================
-    450  344.8761 / 1360 it        346.4977 / 1240 it
-    500  346.4972 / 169 it         346.4972 / 737 it
-    600  344.8761 / 544 it         346.4968 / 1049 it
-    700  344.8761 / 194 it         346.4965 / 1350 it
-    ==== ========================= ==========================
+    ===== ================== ================== ================== ==================
+    ni    arm64 fixed        arm64 stale        x86_64 fixed       x86_64 stale
+    ===== ================== ================== ================== ==================
+    450   344.8761           346.4977           346.4977           344.8765
+    500   346.4972           346.4972           346.4972           (not measured)
+    600   344.8761           346.4968           344.8761           344.8761
+    700   344.8761           346.4965           346.4965           344.8761
+    ===== ================== ================== ================== ==================
 
-    So ni = 700, the cheapest size that separates them. At 1000/2000 Mehrotra
-    still ends at the other local solution either way."""
-    ref = _solve(700)
-    info = _solve(700, mehrotra_algorithm="yes")
+    No size separates the two on both architectures, so no end-to-end witness
+    of the fix exists here. The fix itself is pinned deterministically by
+    ``accept_trial_point_drops_the_affine_step`` in
+    ``crates/pounce-algorithm/src/ipopt_data.rs``. What this test keeps is
+    the platform-independent contract: at ni = 500 Mehrotra solves and ends
+    at one of the beam problem's two stationary values."""
+    info = _solve(500, mehrotra_algorithm="yes")
     assert info["status_msg"] == "Solve_Succeeded"
-    assert abs(info["obj_val"] - ref["obj_val"]) < 1e-3, (info["obj_val"], ref["obj_val"])
+    assert min(abs(info["obj_val"] - v) for v in _BEAM_LOCAL_VALUES) < 1e-2, info["obj_val"]
 
 
 def test_default_algorithm_unchanged_on_clnlbeam():
