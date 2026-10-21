@@ -148,6 +148,30 @@ was first swept 27 commits behind its tag, and 0.12.0 ran from a
    release time compared iteration counts. If `crates/pounce-minima` or
    `crates/pounce-cli/src/minima` changed since the last tag, run
    `scripts/sweep-minima.sh` too.
+
+   **Sweep on x86_64 as well as on the Mac.** FERAL has separate NEON
+   (aarch64) and AVX2+FMA (x86_64) dense kernels, so on nonconvex models
+   the two architectures take different trajectories. That is legitimate
+   rounding, not a defect, but it means an arm64 sweep says nothing about
+   x86, which is what CI and most users run. The FERAL 0.21 bump (#1038)
+   is the case. On arm64, `pooling_rt2stp` looked better (−4391.826 in 82
+   iterations). On x86 the base solve stalled for 700 iterations behind a
+   δ_x-ladder latch and needed a rescue (904 iterations against 0.20's
+   162). Only the first CI run showed it. An amd64 container reproduces
+   CI's kernel path: colima's Rosetta for Linux reports `avx2` and `fma`.
+
+   ```sh
+   docker run --rm --platform linux/amd64 -v "$PWD":/src -w /src \
+     -e CARGO_TARGET_DIR=/src/target-x86 rust:1-bookworm \
+     bash -c 'cargo build --release --bin pounce &&
+              scripts/sweep-fixtures.sh target-x86/release/pounce sweep-x86.txt'
+   ```
+
+   Build the previous tag's binary the same way. colima shares only
+   `$HOME` with the VM, so keep the worktree and its output under `$HOME`.
+   The benchmark suites still run on the Mac, so their per-model objective
+   and iteration moves on nonconvex models describe arm64 trajectories:
+   say so in the report.
 5. Copy the regenerated `benchmarks/BENCHMARK_REPORT.{md,json}` and
    `benchmarks/figures/` into the release PR, with a commit message naming
    the swept SHA and what moved. If anything solver-facing merges after the
