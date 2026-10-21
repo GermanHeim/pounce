@@ -184,7 +184,21 @@ fn solve(extra: &[&str]) -> SolveReport {
 /// has to climb against it.
 const NO_WALKBACK: [&str; 1] = ["perturb_delta_c_max_rungs=0"];
 
-const POOLING_OPTIMUM: f64 = -3273.9549;
+/// MINLPLib's global optimum for pooling_rt2stp (primal -4391.825893).
+const POOLING_OPTIMUM: f64 = -4391.8260;
+
+/// The local optimum Ipopt reports, and the one pounce reached on
+/// feral <= 0.20.
+const POOLING_LOCAL_OPTIMUM: f64 = -3273.9549;
+
+/// Whether `obj` is one of the two certified optima. Which one a run lands in
+/// is a rounding fact on this nonconvex model -- on feral 0.21 it differs
+/// between FERAL's NEON (arm64) and AVX2+FMA (x86_64) dense kernels -- so the
+/// tests below accept either and pin what is platform-independent: the
+/// certificate, and the iteration count.
+fn is_known_optimum(obj: f64) -> bool {
+    (obj - POOLING_OPTIMUM).abs() < 1e-3 || (obj - POOLING_LOCAL_OPTIMUM).abs() < 1e-3
+}
 
 /// The headline, with its scope corrected by gh#693.
 ///
@@ -211,8 +225,8 @@ fn pooling_reaches_its_optimum_without_the_gh544_detour() {
         r.statistics.final_dual_inf,
     );
     assert!(
-        (r.solution.objective - POOLING_OPTIMUM).abs() < 1e-3,
-        "pooling_rt2stp did not reach its known optimum: {}",
+        is_known_optimum(r.solution.objective),
+        "pooling_rt2stp did not reach a known optimum: {}",
         r.solution.objective,
     );
     assert!(
@@ -262,14 +276,26 @@ fn the_walkback_is_inert_on_this_fixture_since_gh693() {
 }
 
 /// The walk-back must not cost the certificate it is meant to reach
-/// sooner: same point, either way. Still true after gh#693, though now
-/// for the trivial reason that the walk-back does nothing here.
+/// sooner. Through feral 0.20 it reached the same point either way, for the
+/// trivial reason that it did nothing here. On feral 0.21 the two legs can
+/// land on different optima (measured on arm64: -4391.826 with it on,
+/// -3273.955 with it off), and which one each reaches moves with the
+/// platform's rounding, so that is not pinned. Neither leg may lose its
+/// certificate or stop anywhere but a known optimum.
 #[test]
-fn the_walkback_reaches_the_same_point_it_used_to() {
-    let with = solve(&[]).solution.objective;
-    let without = solve(&NO_WALKBACK).solution.objective;
-    assert!(
-        (with - without).abs() < 1e-4,
-        "withdrawing delta_c moved the answer: {with} vs {without}",
-    );
+fn the_walkback_does_not_cost_the_certificate() {
+    let with = solve(&[]);
+    let without = solve(&NO_WALKBACK);
+    for (leg, r) in [("walk-back on", &with), ("walk-back off", &without)] {
+        assert_eq!(
+            r.solution.status,
+            ApplicationReturnStatus::SolveSucceeded,
+            "{leg}: lost the certificate",
+        );
+        assert!(
+            is_known_optimum(r.solution.objective),
+            "{leg}: {} is neither known optimum",
+            r.solution.objective,
+        );
+    }
 }

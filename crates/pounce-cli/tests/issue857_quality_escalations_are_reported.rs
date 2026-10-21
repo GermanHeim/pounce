@@ -18,7 +18,7 @@
 //!
 //! # What the numbers are
 //!
-//! On `square_flowsheet_resto`, measured on this tree:
+//! On `square_flowsheet_resto`, measured when the counter landed (FERAL 0.20):
 //!
 //! ```text
 //!   exact  default   base solve   Restoration_Failed/131   q=2
@@ -36,15 +36,25 @@
 //! six times, because the rescue rung is a whole second solve. `q=` is
 //! per-solve, like every other field beside it.
 //!
+//! On FERAL 0.21 the exact leg no longer fails: one solve, `Optimal`/95,
+//! `q=4`, no rung. The lbfgs leg still reports heavy escalation at the cap.
+//! So the per-solve-versus-reported test moved to `circle_parabola_t0p5`'s
+//! lbfgs leg, which is a promotion in which **both** solves escalate — base
+//! `q=8`, the promoted `feral_scaling=mc64` rung `q=4` — and the restoration
+//! test stayed on this fixture, where the one remaining solve still shows the
+//! gap between what prints and what happened (two printed `q`s, four
+//! counted).
+//!
 //! # The restoration half is the part that needed the plumbing
 //!
 //! `PdFullSpaceSolver` already appended a `q` to the info-string column on
 //! every successful escalation, so a reader might reasonably ask why counting
 //! the `q`s was not enough. Because the restoration sub-solve runs its own
 //! `PdFullSpaceSolver` against its own `IpoptData`, and its info strings never
-//! reach the printed table: the base solve above prints **one** `q`, at
-//! iteration 26, while two escalations happened — the second at `76r`, inside
-//! restoration, invisible.
+//! reach the printed table: on FERAL 0.20 the base solve above printed **one**
+//! `q`, at iteration 26, while two escalations happened — the second at
+//! `76r`, inside restoration, invisible. On 0.21 the solve prints two (on rows
+//! 2 and 3) and counts four.
 //!
 //! That is why the counter is a shared cell handed to every builder the
 //! application mints rather than a field on one solver.
@@ -53,11 +63,13 @@
 //!
 //! # What this file does not claim
 //!
-//! Nothing here asserts that escalating is bad. `deb7` escalates exactly as
-//! many times as `square_flowsheet_resto`'s base solve and *gains* 15–25% of
-//! its iterations by it; that pair is pinned below precisely because it is the
-//! evidence that a count alone cannot separate the two, which is why
-//! `feral_increase_quality` is an option and not a changed default.
+//! Nothing here asserts that escalating is bad. On FERAL 0.20 `deb7` escalated
+//! exactly as many times as `square_flowsheet_resto`'s base solve and *gained*
+//! 15–25% of its iterations by it; that pair was the evidence that a count
+//! alone cannot separate the two, which is why `feral_increase_quality` is an
+//! option and not a changed default. On 0.21 the same fixture is the
+//! evidence on its own: it escalates four times and reaches `Optimal`, which
+//! is the case pinned below.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -132,24 +144,38 @@ fn per_solve_counts(out: &str) -> Vec<i64> {
         .collect()
 }
 
-/// The exact leg: the base solve escalates twice and fails, and the rescue
-/// rung is a second solve with its own count.
+/// A promotion in which both solves escalate: the console reports each solve's
+/// own count, and the JSON report carries the promoted solve's.
+///
+/// `circle_parabola_t0p5` on the lbfgs leg: the base solve escalates 8 times
+/// and exits `Infeasible_Problem_Detected` at 48; the ladder's first rung,
+/// `feral_scaling=mc64`, escalates 4 times and promotes. On FERAL 0.20 the
+/// test ran on `square_flowsheet_resto`'s exact leg (`[2, 4]`, rung 3
+/// promoting), which on 0.21 is a single solve with nothing to tell apart.
+/// The ladder record is asserted first, so a run that stops promoting fails
+/// here rather than as a puzzling count.
 #[test]
-fn the_exact_leg_reports_the_escalations_that_rerouted_it() {
-    let (out, reported) = solve("square_flowsheet_resto.nl", &[]);
+fn a_promoted_run_reports_each_solves_escalations_and_ships_the_last() {
+    let (out, reported) = solve(
+        "circle_parabola_t0p5.nl",
+        &["hessian_approximation=limited-memory"],
+    );
+    assert!(
+        out.contains("feral_scaling=mc64 re-solve recovered the problem — promoting"),
+        "premise: the base solve fails and rung 1 promotes:\n{out}"
+    );
     let counts = per_solve_counts(&out);
     assert_eq!(
         counts,
-        vec![2, 4],
-        "expected the base solve to report 2 escalations and the rescue rung \
-         4 — the base figure is the one `feral_increase_quality`'s option text \
-         has carried since gh#850, so a change here is a change to that \
-         claim:\n{out}"
+        vec![8, 4],
+        "expected the base solve to report 8 escalations and the promoted \
+         rung 4 — one line per solve, each its own:\n{out}"
     );
     assert_eq!(
         reported, 4,
         "the JSON report carries the promoted rung's statistics, as `it=` \
-         does, so it should report that solve's 4 and not the base solve's 2"
+         does, so it should report that solve's 4 — not the base solve's 8, \
+         and not their sum"
     );
 }
 
@@ -216,19 +242,30 @@ fn the_lbfgs_leg_reports_heavy_escalation_and_the_option_stops_it() {
 
 /// The reason the counter is shared rather than per-solver.
 ///
-/// The base solve escalates twice, but only **one** `q` reaches the printed
-/// iteration table: the second escalation happens inside the restoration
-/// sub-solve, which owns a separate `PdFullSpaceSolver` and a separate
-/// `IpoptData`, and its info strings are never printed. Counting the printed
-/// `q`s — the obvious simplification — would silently report half.
+/// The solve escalates four times, but only **two** `q`s reach the printed
+/// iteration table, on rows 2 and 3: the other two happen inside the
+/// restoration sub-solve (82 `r` rows, one call), which owns a separate
+/// `PdFullSpaceSolver` and a separate `IpoptData`, and its info strings are
+/// never printed. Counting the printed `q`s — the obvious simplification —
+/// would silently report half. (On FERAL 0.20 this was the base solve of a
+/// promoted run, one printed against two counted.)
 #[test]
 fn the_restoration_escalation_is_counted_though_it_never_prints() {
     let (out, _) = solve("square_flowsheet_resto.nl", &["print_info_string=yes"]);
-    // The base solve's block: everything up to its own summary line.
+    // The first solve's block: everything up to its own summary line.
     let base = out
         .split_once("Number of linear solver quality escalations")
         .expect("a summary line")
         .0;
+    assert!(
+        base.lines()
+            .any(|l| l.trim_start().starts_with(|c: char| c.is_ascii_digit())
+                && l.split_whitespace()
+                    .next()
+                    .is_some_and(|t| t.ends_with('r'))),
+        "premise: the solve must spend iterations in restoration, or there is \
+         nowhere for an unprinted escalation to happen:\n{base}"
+    );
     let printed = base
         .lines()
         .filter(|l| {
@@ -240,17 +277,17 @@ fn the_restoration_escalation_is_counted_though_it_never_prints() {
         .map(|tail| tail.matches('q').count())
         .sum::<usize>();
     assert_eq!(
-        printed, 1,
-        "expected exactly one `q` in the printed table — the main loop's, at \
-         iteration 26:\n{base}"
+        printed, 2,
+        "expected exactly two `q`s in the printed table — the main loop's, on \
+         rows 2 and 3:\n{base}"
     );
     let counts = per_solve_counts(&out);
     assert_eq!(
         counts.first().copied(),
-        Some(2),
-        "the base solve escalated twice; if this reads 1 the counter has been \
-         narrowed to the main loop and the restoration escalation at `76r` is \
-         being dropped again"
+        Some(4),
+        "the solve escalated four times; if this reads 2 the counter has been \
+         narrowed to the main loop and the restoration escalations are being \
+         dropped again"
     );
 }
 
@@ -269,40 +306,41 @@ fn a_solve_that_never_escalates_says_nothing() {
 /// The other side of the trade, and the reason the gh#857 gate consults the
 /// *verdict* rather than the count.
 ///
-/// On macOS/aarch64 `deb7` escalates exactly as often as
-/// `square_flowsheet_resto`'s base solve — twice — and is *faster* for it:
-/// 147 iterations to `Optimal`. Same count, opposite outcome, which is the
-/// measured reason `feral_increase_quality` is an option rather than a flipped
-/// default.
+/// On FERAL 0.21 `square_flowsheet_resto`'s exact leg escalates four times
+/// and reaches `Optimal` in 95 — the fixture whose escalations used to *lose*
+/// its verdict now escalates more and wins it. So the count says nothing
+/// about the outcome, which is the measured reason `feral_increase_quality` is
+/// an option rather than a flipped default, and the claim the gate rests on is
+/// asserted below: an `Optimal` verdict opens no rung whatever its count. A
+/// count-only gate could not say that.
 ///
-/// **The count is not asserted, because it is not portable.** On
-/// linux/x86_64 the same fixture reaches `Optimal` in 143 iterations having
-/// escalated **zero** times. Nothing is wrong on either machine: an
-/// escalation fires when the interior-point refinement stalls, which is a
-/// floating-point-level property of the trajectory, so whether a given model
-/// trips it is exactly the kind of thing that differs across targets. Pinning
-/// `deb7 == 2` here pinned one machine's arithmetic, and that is the same
-/// mistake `issue857_escalation_gated_quality_rung.rs`'s module header
-/// documents for the other fixture.
-///
-/// What *is* portable is the claim the gate rests on, and it is asserted
-/// below: `deb7` reaches `Optimal`, so no rung opens on it whatever its count
-/// — 0 or 2 or twenty. A count-only gate could not say that. The exact
-/// macOS figures above stay in prose, where a number that describes one
-/// platform belongs.
+/// The count is asserted only as `>= 1`, because without an escalation the
+/// test is about nothing. On FERAL 0.20 this was `deb7`, at `Optimal`/147
+/// with two escalations on macOS/aarch64 and zero on linux/x86_64 — which is
+/// why the count was not asserted there at all. On 0.21 `deb7`'s exact leg
+/// ends `Solved_To_Acceptable_Level` (the gh#983 downgrade of a run that
+/// showed the gh#884 signature), so it is no longer the winning side; and this
+/// fixture's count was pinned exactly across both CI platforms by this file's
+/// tests on 0.20, so `>= 1` is the portable floor.
 #[test]
 fn the_verdict_and_not_the_count_is_what_excludes_a_winning_solve() {
-    let (out, deb7) = solve("deb7.nl", &[]);
+    let (out, reported) = solve("square_flowsheet_resto.nl", &[]);
     assert!(
         out.contains("EXIT: Optimal Solution Found"),
-        "deb7 is the gaining side of the trade and should still solve:\n{out}"
+        "the exact leg is the winning side of the trade on FERAL 0.21 and \
+         should solve:\n{out}"
+    );
+    assert!(
+        reported >= 1,
+        "premise: the winning solve must have escalated, or a gate that ignored \
+         the count would pass here for the wrong reason:\n{out}"
     );
     assert!(
         !out.lines()
             .any(|l| l.starts_with("pounce:")
                 && (l.contains("re-solving") || l.contains("re-solve"))),
         "and an `Optimal` verdict opens no second-opinion rung, however many \
-         times the solve escalated ({deb7} here) — which is precisely what a \
-         gate on the count alone could not deliver:\n{out}"
+         times the solve escalated ({reported} here) — which is precisely what \
+         a gate on the count alone could not deliver:\n{out}"
     );
 }

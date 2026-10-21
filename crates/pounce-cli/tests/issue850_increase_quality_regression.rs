@@ -1,6 +1,7 @@
-//! The `increase_quality` rung costs two solves on `square_flowsheet_resto`,
-//! and `feral_increase_quality=no` is the recovery (gh #850, the underlying
-//! regression rather than the reporting one).
+//! The `increase_quality` rung cost two solves on `square_flowsheet_resto`
+//! under FERAL 0.20, and `feral_increase_quality=no` was the recovery (gh #850,
+//! the underlying regression rather than the reporting one). Under FERAL 0.21
+//! neither half holds as filed — see "What FERAL 0.21 did to both lines".
 //!
 //! # What it is
 //!
@@ -16,7 +17,8 @@
 //! factorization safer. FERAL's ladder changes *which pivots are taken* — a
 //! lateral move in trajectory terms — and it persists identically, across every
 //! later factorization including a restoration sub-solve's. So it reroutes
-//! solves, and on this fixture it reroutes both legs into failure:
+//! solves, and on this fixture under FERAL 0.20 it rerouted both legs into
+//! failure:
 //!
 //! ```text
 //!   exact   Optimal/99   ->  RestorationFailed/131, shipped only because a
@@ -26,18 +28,38 @@
 //!
 //! The lbfgs line reads "rescued by nothing" as of gh#850, and gh#857 changed
 //! that: `feral_increase_quality_retry` re-solves it without the escalation
-//! and promotes `Optimal`/178 at 3178 total. That rung is on by default, so
-//! the lbfgs test below now passes `feral_increase_quality_retry=no` in order
-//! to still see the **base** solve's 3000 — which is what this file is about.
-//! The rung is the cost whether or not something later recovers it, and the
-//! recovery costs a second full budget to buy the same 178 iterations the
-//! option buys outright. `feral_increase_quality` remains on by default and
-//! remains the trade this file pins; `issue857_escalation_gated_quality_rung.rs`
-//! is where the recovery itself is pinned.
+//! and promoted `Optimal`/178 at 3178 total.
 //!
 //! The lbfgs leg is worse than the reported exact one and was found by the
 //! `2nd=` sweep column added alongside this: it showed the leg failing with no
 //! ladder behind it at all.
+//!
+//! # What FERAL 0.21 did to both lines
+//!
+//! The 0.21 bump moved this fixture on both legs, in opposite directions for
+//! the claim this file makes, and the tests below are the measured result
+//! rather than the claim as it was filed:
+//!
+//! ```text
+//!                      FERAL 0.20                     FERAL 0.21
+//!   exact   rung on    RestorationFailed/131          Optimal/95, no ladder
+//!   exact   rung off   Optimal/99                     Optimal/59
+//!   lbfgs   rung on    3000, at the cap               3000, at the cap
+//!   lbfgs   rung off   Optimal/178                    3000, at the cap
+//! ```
+//!
+//! On the exact leg the regression is **gone**: the rung still costs
+//! iterations (95 against 59) but no longer the verdict, so the test that
+//! pinned the loss now pins its absence. On the lbfgs leg the rung is **no
+//! longer the cause**: the leg runs to the cap with it off as well, so
+//! `feral_increase_quality=no` is not a recovery there any more, and rung 4
+//! (which is that option, taken automatically) cannot be either. What recovers
+//! the leg at the default options on 0.21 is the square-system stage, in 8
+//! iterations, pinned in `square_system_recovery.rs`. Both lbfgs runs below
+//! switch that stage off, because with it on the second run's last summary
+//! block is the stage's and the run reads `Optimal` for a reason that has
+//! nothing to do with this option — which is how this file's lbfgs test kept
+//! passing across the bump with its premise false.
 //!
 //! # Why this is an option and not a changed default
 //!
@@ -49,8 +71,9 @@
 //! success-shaped status, which is worse than an honest failure. It also buys
 //! 15–25% of the iterations on five fixture-legs.
 //!
-//! And nothing separates the two sides. The rung fires exactly twice in this
-//! fixture's **base solve** on the exact leg — once in the main loop, printed
+//! And nothing separated the two sides on FERAL 0.20 (the figures in this
+//! paragraph and the next are that version's). The rung fired exactly twice in
+//! this fixture's **base solve** on the exact leg — once in the main loop, printed
 //! as a `q` on the row labelled 26, and once inside restoration at `76r`,
 //! printed nowhere — and allowing **only the first** still loses the leg, so
 //! scoping it out of restoration would not help. Nor does a count: `deb7` and
@@ -73,9 +96,11 @@
 //! `feral_pivtol` in {1e-6, 3.16e-5, 4.2e-4, 1e-2, 0.5} loses the lbfgs leg
 //! from iteration 0.
 //!
-//! So the default stands, the option is the documented recovery, and what this
-//! file pins is the **trade itself** — that the rung is what costs the two
-//! solves, and that turning it off recovers them. Resolving it properly needs a
+//! So the default stands, and what this file pins is the **trade itself** as
+//! the current FERAL leaves it — on 0.20, that the rung cost the two solves and
+//! that turning it off recovered them; on 0.21, that the exact leg keeps its
+//! verdict with the rung on and pays only iterations, and that the lbfgs leg
+//! is lost with the rung off too. Resolving it properly needs a
 //! *revertible* escalation, which FERAL's `quality_level` cannot express today.
 
 use std::path::PathBuf;
@@ -93,7 +118,7 @@ fn fixture(name: &str) -> PathBuf {
     p
 }
 
-/// `(stdout + stderr, exit banner, iteration count)` for one solve.
+/// `(stdout + stderr, exit banner, base-solve iteration count)` for one solve.
 ///
 /// Both streams, because the two things this file reads live on different
 /// ones: the `EXIT:` banner and the iteration count are printed to stdout, and
@@ -119,30 +144,43 @@ fn solve(extra: &[&str]) -> (String, String, i64) {
         .next_back()
         .unwrap_or("<no EXIT>")
         .to_string();
+    // The FIRST block: every claim in this file is about the base solve. A
+    // run that ends on a failure can print a further attempt after it
+    // ("Re-solving the same problem"), and that block's count is not the base
+    // solve's — on ubuntu CI it read 200 where the base solve ran to 3000.
     let iters = stdout
         .lines()
         .filter_map(|l| l.trim_start().strip_prefix("Number of Iterations....:"))
-        .next_back()
+        .next()
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(-1);
     (s, exit, iters)
 }
 
-/// The exact leg, which gh #850 reports: with the rung on, the base solver
-/// fails and only a second-opinion rung makes the verdict come out right.
-/// Turning the rung off recovers the base solve outright.
+/// The exact leg, which gh #850 reports, as FERAL 0.21 leaves it: the rung no
+/// longer loses the verdict. With it on, the base solver reaches `Optimal`
+/// itself and no second-opinion rung runs; with it off the base solver
+/// reaches the same verdict in fewer iterations. So the rung is still a cost
+/// here — 95 iterations against 59 — but a cost in iterations, not the
+/// verdict.
+///
+/// This is the inverted form of the test gh#850 wrote, which asserted the
+/// exact leg reached `Optimal` *only* through a promotion (131 failing, 54 in
+/// the rescue rung, 185 total, on 0.20). If the escalation starts losing the
+/// verdict again, the first assertion block fails and the old pin is the one
+/// to restore.
 #[test]
-fn the_exact_leg_is_lost_to_the_rung_and_recovered_by_the_option() {
+fn the_exact_leg_is_no_longer_lost_to_the_rung() {
     let (out, exit, iters) = solve(&[]);
     assert!(
         exit.starts_with("Optimal Solution Found"),
-        "the ladder should still deliver a verdict, got {exit:?}"
+        "with the rung on, FERAL 0.21's base solver reaches Optimal on this \
+         leg, got {exit:?}"
     );
     assert!(
-        out.contains("promoting"),
-        "with the rung on, this fixture reaches its verdict only through the \
-         second-opinion rescue — if it no longer does, the regression is gone \
-         by some other route and this file's subject has moved:\n{out}"
+        !out.contains("second-opinion ladder") && !out.contains("promoting"),
+        "and it reaches it without a second opinion — on FERAL 0.20 this leg \
+         failed in restoration and only a promoted rung rescued it:\n{out}"
     );
 
     let (out, exit, iters_off) = solve(&["feral_increase_quality=no"]);
@@ -155,9 +193,9 @@ fn the_exact_leg_is_lost_to_the_rung_and_recovered_by_the_option() {
         "with the rung off no rescue should be needed:\n{out}"
     );
     assert!(
-        (0..300).contains(&iters_off),
-        "expected ~99 iterations with the rung off, got {iters_off} \
-         (the rescued path reports {iters})"
+        iters_off < iters,
+        "the rung still costs iterations on this leg: {iters} with it, \
+         {iters_off} without (95 and 59 when FERAL 0.21 was taken)"
     );
 }
 
@@ -167,17 +205,22 @@ fn the_exact_leg_is_lost_to_the_rung_and_recovered_by_the_option() {
 /// plugin both select `limited-memory` on their own whenever no exact
 /// Lagrangian Hessian is available.
 ///
-/// `feral_increase_quality_retry=no` is what keeps this measuring the *base*
-/// cost. gh#857 added a second-opinion rung that catches exactly this exit and
-/// re-solves without the escalation, so without the flag the run reports the
-/// promoted `Optimal`/178 and the regression this file exists to pin becomes
-/// invisible. Disabling the recovery is not disabling the subject: the rung
-/// under test is `feral_increase_quality`, which stays on here.
+/// On FERAL 0.20 turning the rung off recovered this leg (`Optimal`/178). On
+/// 0.21 it does not: the leg runs to the cap either way, so the rung is not
+/// what loses it any more. That is pinned here as the inverted claim, with the
+/// recovery paths switched off on both runs so the verdict read is the base
+/// solve's — `feral_increase_quality_retry=no` on the first (rung 4 would
+/// re-solve with the option off, which is the second run), and
+/// `square_system_recovery=no` on both (the stage recovers the leg in 8, and
+/// with it on the second run reads `Optimal` whatever this option does). If
+/// the option starts recovering this leg again, the second assertion fails
+/// and the 0.20 pin — `Optimal` in under 1000 — is the one to restore.
 #[test]
-fn the_limited_memory_leg_hits_the_cap_and_the_option_recovers_it() {
+fn the_limited_memory_leg_hits_the_cap_with_or_without_the_rung() {
     let (_out, exit, iters) = solve(&[
         "hessian_approximation=limited-memory",
         "feral_increase_quality_retry=no",
+        "square_system_recovery=no",
     ]);
     assert!(
         iters >= 1000,
@@ -188,13 +231,11 @@ fn the_limited_memory_leg_hits_the_cap_and_the_option_recovers_it() {
     let (_out, exit, iters) = solve(&[
         "hessian_approximation=limited-memory",
         "feral_increase_quality=no",
+        "square_system_recovery=no",
     ]);
     assert!(
-        exit.starts_with("Optimal Solution Found"),
-        "with the rung off this leg should solve, got {exit:?} at {iters}"
-    );
-    assert!(
-        iters < 1000,
-        "expected ~178 iterations with the rung off, got {iters}"
+        exit.starts_with("Maximum Number of Iterations Exceeded"),
+        "on FERAL 0.21 this leg runs to the cap with the rung off as well; \
+         got {exit:?} at {iters}"
     );
 }

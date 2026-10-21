@@ -760,5 +760,10 @@ clean-bench-nl:
 	rm -f $(LBFGS_DIR)/exact.json $(LBFGS_DIR)/limited.json
 	rm -rf $(REPO_ROOT)/benchmarks/logs
 
+# BENCHMARK_REPORT.md is tracked, so deleting it here would leave the tree
+# dirty for the rest of the sweep: `benchmark-rerun` runs this before
+# `pounce-bin` builds, which stamps the binary `+dirty` in `--about`, and the
+# report's own provenance line then reads `-dirty` on a clean checkout. Restore
+# the committed copy instead; `benchmark-report` overwrites it at the end.
 clean-bench-report:
-	rm -f $(REPO_ROOT)/benchmarks/BENCHMARK_REPORT.md
+	git -C $(REPO_ROOT) checkout -- benchmarks/BENCHMARK_REPORT.md 2>/dev/null || true

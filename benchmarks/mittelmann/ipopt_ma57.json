@@ -5,7 +5,7 @@
   "n": 1872,
   "m": 2138,
   "status": "Solve_Succeeded",
-  "objective": 3795.200950556614,
+  "objective": -3795.200950556614,
   "iterations": 322,
   "solve_time": 0.546555
  },
@@ -15,7 +15,7 @@
   "n": 6220,
   "m": 5924,
   "status": "Solve_Succeeded",
-  "objective": -207096.6075400124,
+  "objective": 207096.6075400124,
   "iterations": 353,
   "solve_time": 3.068758
  },
@@ -35,7 +35,7 @@
   "n": 6400,
   "m": 19197,
   "status": "Solve_Succeeded",
-  "objective": -4.4483776974762925,
+  "objective": 4.4483776974762925,
   "iterations": 87,
   "solve_time": 0.561789
  },
@@ -435,7 +435,7 @@
   "n": 51201,
   "m": 38400,
   "status": "Solve_Succeeded",
-  "objective": -1.0127923088139736,
+  "objective": 1.0127923088139736,
   "iterations": 30,
   "solve_time": 1.896045
  },

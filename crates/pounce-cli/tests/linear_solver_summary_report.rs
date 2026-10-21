@@ -109,19 +109,35 @@ fn a_solve_without_restoration_reports_none() {
     assert!(ls.get("restoration").is_none());
 }
 
-/// The ladder promotes `start_point_perturbation=1e-2` on this fixture. The
-/// shipped summary must be that rung's, which is the same solve as running
-/// with the option from the start and the ladder off.
+/// The ladder promotes `feral_increase_quality=no` on this fixture at
+/// `max_iter=75`: the escalating base solve runs out of budget, and rung 4's
+/// un-escalated re-solve converges in 59 (see
+/// `issue857_escalation_gated_quality_rung.rs` for the cap). The shipped
+/// summary must be that rung's, which is the same solve as running with the
+/// option from the start and the ladder off. Both solves enter restoration,
+/// so the comparison covers that object too.
+///
+/// On FERAL 0.20 this ran at the default options, where the exact leg failed
+/// in restoration and `start_point_perturbation=1e-2` promoted; on 0.21 the
+/// default run solves with no ladder, and no restoration failure in the
+/// corpus is recovered by a rung.
 #[test]
 fn a_promoted_rung_reports_its_own_summary() {
-    let laddered = solve_report("ladder", "square_flowsheet_resto.nl", &[]);
-    let mut direct_opts = vec!["start_point_perturbation=1e-2"];
+    const CAP: &str = "max_iter=75";
+    let laddered = solve_report("ladder", "square_flowsheet_resto.nl", &[CAP]);
+    assert_eq!(
+        laddered["second_opinion"]["promoted_by"].as_str(),
+        Some("feral_increase_quality=no"),
+        "the ladder no longer promotes the rung this test is about: {}",
+        laddered["second_opinion"]
+    );
+    let mut direct_opts = vec![CAP, "feral_increase_quality=no"];
     direct_opts.extend(NO_LADDER);
     let direct = solve_report("direct", "square_flowsheet_resto.nl", &direct_opts);
 
     assert_eq!(
         laddered["solution"]["status"], direct["solution"]["status"],
-        "the ladder no longer promotes the rung this test is about"
+        "the promoted rung and the direct solve must agree on the verdict"
     );
     assert_eq!(
         u(&laddered["statistics"], "iteration_count"),

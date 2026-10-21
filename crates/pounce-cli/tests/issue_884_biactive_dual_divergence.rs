@@ -551,11 +551,31 @@ fn a_diverging_iterate_is_not_the_signature() {
 ///
 /// So this test is not about `deb7`. It is about the scope, pinned on
 /// the model that measured it.
+///
+/// **FERAL 0.21 moved the exit, so the test now names a cap.** Run free,
+/// the leg no longer ends `Error_In_Step_Computation` at 715: it ends
+/// `Restoration_Failed` at 1893, which *is* in `retry_worthy`, and is
+/// declined there by the answer gate before anything is spent (gh#887) —
+/// a true statement, but about the other gate. At `max_iter=1000` the
+/// same trajectory ends `Maximum_Iterations_Exceeded`, the other generic
+/// exhaustion exit, with the detector already fired, so the status scope
+/// is the thing standing between it and a retry. Measured with
+/// `retry_worthy` widened to all four statuses: the retry runs a third
+/// 1000-iteration solve and is declined on the answer (unscaled KKT
+/// `2.4e2` against the base attempt's `7.3e2`) — the same pure cost the
+/// paragraph above measured at 715 → 3000.
 #[test]
 fn a_generic_exhaustion_exit_does_not_buy_a_retry() {
     let (r, stdout) = solve_stem(
         "deb7",
-        &["hessian_approximation=limited-memory", "max_iter=3000"],
+        &["hessian_approximation=limited-memory", "max_iter=1000"],
+    );
+    assert_eq!(
+        r.solution.status,
+        ApplicationReturnStatus::MaximumIterationsExceeded,
+        "deb7/lbfgs: the cap is what makes this a generic exhaustion exit; \
+         if the leg now ends elsewhere this test has stopped measuring the \
+         status scope; stdout=\n{stdout}"
     );
     assert!(
         r.statistics.dual_divergence_signature,
@@ -572,13 +592,15 @@ fn a_generic_exhaustion_exit_does_not_buy_a_retry() {
         !r.statistics.dual_divergence_retry_promoted,
         "deb7/lbfgs: stdout=\n{stdout}"
     );
-    // The trajectory itself, which is what the sweep would have caught.
-    // Generous: the claim is "did not multiply", not "715".
+    // The cost itself, which the sweep cannot see: the retry would be a
+    // whole extra summary block. Two is the base attempt and the μ flip,
+    // which `Maximum_Iterations_Exceeded` buys on its own account.
+    let counts = iteration_counts(&stdout);
     assert!(
-        r.statistics.iteration_count < 1500,
-        "deb7/lbfgs: {} iterations — it takes 715 without a retry and 3000 \
-         with one; stdout=\n{stdout}",
-        r.statistics.iteration_count
+        counts.len() <= 2,
+        "deb7/lbfgs: expected the base attempt and at most the μ flip, saw \
+         {counts:?}; a third block is the retry this scope excludes; \
+         stdout=\n{stdout}"
     );
 }
 

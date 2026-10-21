@@ -227,8 +227,14 @@ fn dual_guard_diversion_returns_a_stationary_point() {
 /// Fails if the default is flipped back on.
 #[test]
 fn pooling_rt2stp_solves_at_default_settings() {
-    // Ipopt on the identical .nl: -3273.9549927585640, NLP error ~1e-8.
-    const EXPECTED: f64 = -3_273.954_991_374_754_6;
+    // The model has two certified optima a default solve reaches: Ipopt's
+    // local -3273.9549927585640 (pounce on feral <= 0.20, and on 0.21 on
+    // x86_64) and the global -4391.826007 (MINLPLib's primal bound
+    // -4391.825893, closed by BARON/ANTIGONE/SCIP; reached on some feral 0.21
+    // arm64 builds). Which one is a rounding fact -- FERAL's NEON and
+    // AVX2+FMA dense kernels round differently -- and this test is about the
+    // guard default, not about which basin the model falls into.
+    const KNOWN_OPTIMA: [f64; 2] = [-3_273.954_992_758_564, -4_391.826_007_391_657];
     let report = solve("pooling_rt2stp.nl", &[HANG_GUARD]);
     // `0` exactly: since gh #591 the `0..=99` solved band also holds `1`
     // (`Solved_To_Acceptable_Level`), which is not what this model did before
@@ -243,10 +249,13 @@ fn pooling_rt2stp_solves_at_default_settings() {
         report.solution.status,
     );
     let obj = report.solution.objective;
-    let rel = (obj - EXPECTED).abs() / EXPECTED.abs();
+    let rel = KNOWN_OPTIMA
+        .iter()
+        .map(|e| (obj - e).abs() / e.abs())
+        .fold(f64::INFINITY, f64::min);
     assert!(
         rel < 1e-6,
-        "pooling_rt2stp: got {obj}, expected {EXPECTED} (rel err {rel:.3e})",
+        "pooling_rt2stp: got {obj}, expected one of {KNOWN_OPTIMA:?} (rel err {rel:.3e})",
     );
 }
 

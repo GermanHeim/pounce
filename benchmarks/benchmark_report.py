@@ -624,7 +624,12 @@ def collect_provenance():
 
     git_sha = _run(['git', '-C', os.path.dirname(SCRIPT_DIR), 'rev-parse', '--short', 'HEAD']) or 'unknown'
     git_branch = _run(['git', '-C', os.path.dirname(SCRIPT_DIR), 'rev-parse', '--abbrev-ref', 'HEAD']) or 'unknown'
-    git_dirty = _run(['git', '-C', os.path.dirname(SCRIPT_DIR), 'status', '--porcelain'])
+    # The report's own outputs are excluded: this script has just rewritten
+    # them, so counting them would mark every regeneration `-dirty` and the
+    # flag would stop distinguishing a clean release tree from a modified one.
+    git_dirty = _run(['git', '-C', os.path.dirname(SCRIPT_DIR), 'status', '--porcelain', '--',
+                      '.', ':!benchmarks/BENCHMARK_REPORT.md',
+                      ':!benchmarks/BENCHMARK_REPORT.json', ':!benchmarks/figures'])
     if git_dirty:
         git_sha = f'{git_sha}-dirty'
 
@@ -658,10 +663,18 @@ def collect_provenance():
         except (OSError, ValueError):
             pass
 
+    # The binary the suites ran, by its own build stamp. The git row below
+    # describes the tree the *report* was generated from, which is not the
+    # same thing when a report is regenerated after a harness or reference
+    # fix; this row is the one that says which solver produced the numbers.
+    pounce_bin = os.path.join(os.path.dirname(SCRIPT_DIR), 'target', 'release', 'pounce')
+    pounce_binary = (_run([pounce_bin, '--about']).splitlines() or ['unknown'])[0]
+
     # Pounce default linear solver is FERAL — pounce-ma57 is the
     # MA57-feature build (not the default).
     return {
         'pounce_version': pounce_version,
+        'pounce_binary': pounce_binary,
         'pounce_linear_solver': 'feral (default)',
         'ipopt_version': ipopt_version,
         'ipopt_linear_solver': ipopt_linear_solver,
@@ -996,6 +1009,7 @@ def generate_report(suites, output_path, baseline=None, profile_dirs=None,
     lines.append("| Component | Version / Detail |")
     lines.append("|-----------|------------------|")
     lines.append(f"| POUNCE | v{prov['pounce_version']} ({prov['git_branch']} @ {prov['git_sha']}) |")
+    lines.append(f"| POUNCE binary | {prov.get('pounce_binary', 'unknown')} |")
     lines.append(f"| POUNCE linear solver | {prov['pounce_linear_solver']} |")
     lines.append(f"| Ipopt | {prov['ipopt_version']} |")
     lines.append(f"| Ipopt linear solver | {prov['ipopt_linear_solver']} |")

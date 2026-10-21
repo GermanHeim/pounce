@@ -952,10 +952,14 @@ mod tests {
             r["restoration_calls"].as_i64().unwrap_or(0) > 0,
             "the fixture no longer exercises restoration: {r}"
         );
-        // Same optimum the CLI reports for this fixture.
+        // One of the fixture's two certified optima: Ipopt's local -3273.955
+        // or the global -4391.826 (MINLPLib -4391.825893). Which one a run
+        // reaches is a rounding fact on this nonconvex model -- it differs
+        // between FERAL's NEON and AVX2 kernels on feral 0.21 -- so pinning
+        // one would pin the platform, not the restoration wiring.
         let obj = r["objective"].as_f64().unwrap_or(f64::NAN);
         assert!(
-            (obj + 3273.9549922501797).abs() < 1e-4,
+            (obj + 3273.954993).abs() < 1e-4 || (obj + 4391.826007).abs() < 1e-4,
             "unexpected objective {obj}"
         );
     }

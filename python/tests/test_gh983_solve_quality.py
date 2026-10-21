@@ -173,20 +173,118 @@ def _toll(**opts):
     return x, info, json.load(open(path))
 
 
-def test_toll_mpcc_residual_at_its_roundoff_floor_keeps_success_with_caveats():
-    # gh#983 demoted this run; gh#1000 (II.22) keeps it. The residual 3.3e-2
-    # is assembled from terms of 3e14 -- half an ulp of them -- and the
-    # answer agrees with the default-options solve to 9e-10 relative, so the
-    # 3.3e-2 is roundoff, not a miss. Both caveats still attach.
-    x, info, rep = _toll(bound_relax_factor=0.0)
-    assert info["final_unscaled_dual_inf"] > 1e-3  # the premise: the retry was accepted
+# gh#1000 (II.22): the gh#983 item-5 downgrade spares a residual that sits at
+# the rounding floor of its own terms. This model reaches that branch by
+# construction rather than by trajectory.
+#
+# History. The witness used to be `_toll(bound_relax_factor=0.0)`: on x86_64
+# it ended Solve_Succeeded in 129 iterations at an unscaled residual of
+# 3.26e-2 against terms of 3e14 (half an ulp of them), with both caveats. It
+# got there only through the delta_x-ladder latch fixed in 2599c2be ("an
+# overflowed delta_x ladder no longer poisons every later one"); with the
+# fix it is Solve_Succeeded in 15 iterations at 1.7e-5 with no warnings, and
+# on arm64 (FERAL's NEON kernels, fix or no fix) it is
+# Solved_To_Acceptable_Level in 72 iterations at 0.62 with only
+# unscaled_dual_inf_above_acceptable. A nonconvex trajectory picks the
+# branch per arch, so it witnessed nothing portable.
+#
+# The model: a well-conditioned QP whose stationarity terms are ~4e20, so
+# the objective scale is pinned at nlp_scaling_min_value (1e-8) and every
+# scaled term is ~4e12, whose ulp is 4.9e-4 -- 4.9e4 in the model's units.
+# x[3] enters only linearly, through the constant gradient _RO_G4 and a row
+# coefficient of 3, so its residual is fl(1e-8*_RO_G4) + 3*lambda for one
+# float lambda, and _RO_G4 is chosen so that no float lambda zeroes it
+# (fused or not; asserted below). So the residual can be neither zero nor
+# below one rounding step of its terms, whatever the trajectory:
+#   * it is >= du_floor (1e2) at every settled iterate, so the gh#884
+#     signature fires and the downgrade's guard is live;
+#   * it is > max(acceptable_tol, 1e-3), so both caveats attach;
+#   * a converged Newton step leaves it within an ulp or two, far inside
+#     UNSCALED_DUAL_ROUNDOFF_ULPS (64), so the run keeps Solve_Succeeded.
+# The answer is known in closed form and matches the a = 1 twin (which
+# stops at tol = 1e-8; the gh#200 masked-certificate veto carries this run
+# on to mu = 1e-13, so it is the closer of the two).
+# Measured, both arches: Solve_Succeeded, 8 iterations, residual 4.88e4
+# (exactly one ulp of the scaled terms) against a scale of 3.87e20.
+# Mutation: with `&& !unscaled_dual_inf_is_roundoff(du, du_scale)` removed
+# from finalize_quality_verdict the run is downgraded to
+# Solved_To_Acceptable_Level and this test fails.
+_RO_A = 1e20
+_RO_C = np.array([0.3, -0.7, 1.1])
+_RO_G4 = 3.872983346207417e20  # 1e20 * sqrt(15); see _fl3_reaches
+
+
+def _fl3_reaches(t):
+    """Is there a float lam with fl(3*lam) == t, or 3*lam == t exactly?
+
+    Both are monotone in lam, so only the floats next to t/3 can hit.
+    """
+    from fractions import Fraction
+
+    lam = t / 3.0
+    for _ in range(8):
+        lam = np.nextafter(lam, -np.inf)
+    for _ in range(17):
+        if 3.0 * lam == t or 3 * Fraction(float(lam)) == Fraction(t):
+            return True
+        lam = np.nextafter(lam, np.inf)
+    return False
+
+
+def _roundoff_qp(a, g4):
+    class Qp:
+        def objective(self, x):
+            return a * (_RO_C @ x[:3] + 0.5 * x[:3] @ x[:3]) + g4 * x[3]
+
+        def gradient(self, x):
+            return np.r_[a * (_RO_C + x[:3]), g4]
+
+        def constraints(self, x):
+            return np.array([x[0] + x[1] + x[2] + 3.0 * x[3]])
+
+        def jacobianstructure(self):
+            return (np.zeros(4, int), np.arange(4))
+
+        def jacobian(self, x):
+            return np.array([1.0, 1.0, 1.0, 3.0])
+
+        def hessianstructure(self):
+            return (np.arange(3), np.arange(3))
+
+        def hessian(self, x, lam, of):
+            return of * a * np.ones(3)
+
+    p = pounce.Problem(n=4, m=1, problem_obj=Qp(), lb=[-10.0] * 3 + [-1e20],
+                       ub=[10.0] * 3 + [1e20], cl=[1.0], cu=[1.0])
+    p.add_option("print_level", 0)
+    path = os.path.join(tempfile.mkdtemp(), "r.json")
+    x, info = p.solve(np.zeros(4), report_path=path, report_detail="full")
+    return x, info, json.load(open(path))
+
+
+def test_residual_at_its_roundoff_floor_keeps_success_with_caveats():
+    x, info, rep = _roundoff_qp(_RO_A, _RO_G4)
+    # the premises: the scale is clamped, x[3]'s residual cannot vanish, and
+    # the run carries the signature the downgrade is guarded by
+    assert info["objective_scaling"]["factor"] == 1e-8
+    assert not _fl3_reaches(-1e-8 * _RO_G4)
+    assert rep["statistics"]["dual_divergence_signature"]
+    du, scale = info["final_unscaled_dual_inf"], info["final_unscaled_dual_scale"]
+    assert du > 1e-3
+    assert du <= 64 * np.finfo(float).eps * scale, (du, scale)
+    # the verdict
     assert info["status_msg"] == "Solve_Succeeded"
     codes = [w.split(":")[0] for w in info["warnings"]]
     assert "large_dual_scale" in codes, info["warnings"]
     assert "unscaled_dual_inf_above_acceptable" in codes, info["warnings"]
     assert not any("status is downgraded" in w for w in info["warnings"]), info["warnings"]
-    _, ref, _ = _toll()
-    assert info["obj_val"] == pytest.approx(ref["obj_val"], rel=1e-8)
+    # the answer: closed form, and the well-scaled twin (a = 1) agrees
+    xs = _RO_G4 / (3 * _RO_A) - _RO_C
+    np.testing.assert_allclose(x, np.r_[xs, (1 - xs.sum()) / 3], rtol=0, atol=1e-10)
+    x1, ref, _ = _roundoff_qp(1.0, _RO_G4 / _RO_A)
+    assert ref["status_msg"] == "Solve_Succeeded" and ref["warnings"] == []
+    np.testing.assert_allclose(x, x1, rtol=0, atol=1e-8)  # the twin stops at tol
+    assert info["obj_val"] == pytest.approx(_RO_A * ref["obj_val"], rel=1e-9)
     # the report describes the run that produced the returned point
     assert rep["statistics"]["iteration_count"] == info["iter_count"]
     assert rep["statistics"]["warnings"] == info["warnings"]

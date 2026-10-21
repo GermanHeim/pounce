@@ -530,6 +530,11 @@ pub struct IpoptAlgorithm {
     /// recovered point already satisfies constraint feasibility
     /// within `tol`.
     resto_near_feasible_count: usize,
+    /// The pending restoration entry was forced by a non-finite Hessian
+    /// (the factorization rejected the KKT before inertia was read), so it
+    /// is not a `resto_near_feasible_count` strike. Set at the
+    /// step-computation-failure hand-off, consumed by `invoke_restoration`.
+    resto_entry_nonfinite_w: bool,
     /// Snapshot of the most recent iterate that the convergence check
     /// flagged "acceptable" (NLP error ≤ `acceptable_tol`). Mirrors
     /// upstream `IpBacktrackingLineSearch::acceptable_iterate_`
@@ -691,6 +696,7 @@ impl IpoptAlgorithm {
             decline_floor: None,
             decline_deadline_iter: None,
             resto_near_feasible_count: 0,
+            resto_entry_nonfinite_w: false,
             acceptable_iterate: None,
             vetoed: None,
             vetoed_acceptable: None,
@@ -3169,6 +3175,19 @@ impl IpoptAlgorithm {
                 // fallback is available does upstream throw
                 // `STEP_COMPUTATION_FAILED`.
                 if self.restoration.is_some() {
+                    // A non-finite Hessian (e.g. `|x|^2·|x|^0.85` evaluated
+                    // at exactly `x = 0`: `0·∞` in the second derivative)
+                    // fails the factorization before any inertia question
+                    // is asked. Restoration is the right fallback — its
+                    // Hessian drops the objective term and it moves `x`
+                    // off the point — but the entry says nothing about a
+                    // restoration cycle, so it must not be a gh#274 strike.
+                    self.resto_entry_nonfinite_w = self
+                        .data
+                        .borrow()
+                        .w
+                        .as_ref()
+                        .is_some_and(|w| !w.has_valid_numbers());
                     return self.invoke_restoration_debugged();
                 }
                 return IterateOutcome::Terminate(SolverReturn::ErrorInStepComputation);
@@ -3791,6 +3810,9 @@ impl IpoptAlgorithm {
     /// `IpBacktrackingLineSearch::ActivateLineSearch` → `PerformRestoration`
     /// chain.
     fn invoke_restoration(&mut self) -> IterateOutcome {
+        // Consumed on every entry, whichever exit below is taken, so a
+        // flag set by one entry can never exempt a later one.
+        let entry_nonfinite_w = std::mem::take(&mut self.resto_entry_nonfinite_w);
         // Snapshot the outer reference iterate's `(theta, barr)` and
         // build the orig-progress callback the inner IPM will consult
         // at every iteration (mirrors upstream
@@ -4098,7 +4120,9 @@ impl IpoptAlgorithm {
         // strike limit.
         let outer_tol = self.bundle.conv_check.tol_or_default();
         if reference_theta <= outer_tol {
-            self.resto_near_feasible_count = self.resto_near_feasible_count.saturating_add(1);
+            if !entry_nonfinite_w {
+                self.resto_near_feasible_count = self.resto_near_feasible_count.saturating_add(1);
+            }
             if self.resto_near_feasible_count >= 3 {
                 // Constraint feasibility is met, but a near-feasible iterate is
                 // only "acceptable" if its objective is finite. CUTE `himmelbj`

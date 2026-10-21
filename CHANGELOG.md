@@ -278,6 +278,64 @@ changes.
   parity test's strict `xfail` on camel deflation is now a pass.
 
 ### Fixed
+- **An overflowed `δ_x` ladder no longer poisons every later one.** When the
+  inertia-correction ladder climbs past `max_hessian_perturbation` it gives up
+  on the system and clears the remembered `δ_x_last`. It left the overflowed
+  current rung in place, though, and the next `consider_new_system` promoted
+  that over-cap value straight back into `δ_x_last`. Every later ladder then
+  started at a third of the cap and overflowed within one or two rungs: a
+  self-sustaining latch. Upstream `IpPDPerturbationHandler.cpp` has the same
+  latent defect (lines 395–402 and 166–169). It surfaced on FERAL 0.21 on
+  x86_64. There, `pooling_rt2stp` reached `-3273.955` but could not converge
+  the duals. It hit 161 overflows and 167 restoration entries, then the gh#274
+  exit at 848 iterations, and only the `mu_strategy=adaptive` rung rescued it
+  (904 iterations in total; FERAL 0.20: 162). It now solves in 492 iterations
+  with no rescue. The fixture sweep moves only that line, on both arches. On
+  arm64 its final attempt goes from `-4391.826`/82 to `-3273.955`/85 with a
+  `mu_strategy=adaptive` rescue, and the total work falls from 349 iterations
+  (a 267-iteration first attempt that the sweep did not show) to 242.
+  `pooling_rt2stp` is bistable between those two certified optima, and which
+  one a run reaches moves with FERAL's NEON vs AVX2+FMA rounding. The tests
+  that pinned the global optimum (`issue_250`, `issue_592`, the wasm shim)
+  now accept either one, and still pin the certificate and the iteration
+  bound. Test: `pd_perturbation::tests::an_overflowed_ladder_does_not_poison_the_next_system`,
+  which fails with the fix reverted.
+- **A restoration entry forced by a non-finite Hessian is no longer a gh#274
+  near-feasible strike.** When the Hessian evaluates to NaN/Inf (a
+  `|x|^p` term with `1 < p < 2` evaluated at exactly `x = 0`), the
+  factorization rejects the KKT matrix and the step computation falls back to
+  restoration, which moves the iterate off the kink. Each such rescue counted
+  toward the never-reset counter that ends a solve after three near-feasible
+  restoration entries, so a trajectory that met the kink three times ended
+  `Error_In_Step_Computation` however productive each rescue was. Vanderbei's
+  `dallass` did exactly that on FERAL 0.21, at `-32390.34` one iteration from
+  the optimum; it now solves to `-32393.2257` in 65 iterations (FERAL 0.20: 41,
+  where its path met the kink twice). Upstream Ipopt + MA57 stops on the same
+  point with `Invalid_Number_Detected`. Restoration still runs, and the static
+  and recovery cycle detectors and `max_iter` still bound a real cycle. The
+  fixture sweep moves only the new `dallass` fixture's exact line; its lbfgs
+  line (`Error_In_Step_Computation`/308) does not move, since that leg's
+  failure is the trajectory, not the counter. Test:
+  `crates/pounce-cli/tests/nonfinite_hessian_restoration_strike.rs`.
+- **The gh#983 scale audit's re-solve is budgeted (CLI / Python / Pyomo).**
+  After a successful solve, the audit can re-solve from the returned point
+  with the objective rescaled. That re-solve had no budget of its own. It ran
+  to the caller's full `max_iter` and was given a fresh `max_cpu_time` /
+  `max_wall_time`, so a run could take twice its time limit after it had
+  already succeeded. On the Vanderbei `brainpc3`–`9` models a 1–2 s solve was
+  followed by a re-solve of a minute or more that was then declined. Under a
+  300 s external limit it never returned, so the base `Optimal` was lost as a
+  timeout. `meyer3` spent 3000 + 3000 iterations (the re-solve's own mu flip)
+  on a re-solve that was declined. The re-solve now gets
+  `max(3 × base iterations, 50)` iterations, never more than `max_iter`, and
+  only the time the caller's limits have left; when nothing is left it is
+  skipped. It also runs once: it no longer takes a mu-strategy flip of its
+  own, which spent the same budget a second time whenever the re-solve hit
+  its cap. A declined or capped re-solve keeps the base answer, as before.
+  Across the 64 audited solves of the release benchmark sweep, every promoted
+  re-solve stays inside the budget except `robot_b` (271 → 1425 iterations,
+  23 s → 178 s, for a 1.3e-6 relative objective move). It now returns its
+  base `Solve_Succeeded` answer. The fixture sweep diffs empty on both legs.
 - **The active-set SQP arm takes the model's starting multipliers under
   `warm_start_init_point=yes`.** Only a warm start staged through
   `set_sqp_warm_start` reached it; the TNLP's own starting duals (a `.nl` `d`

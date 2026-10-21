@@ -84,6 +84,16 @@ parse_nm() {
   awk 'NR==2 {gsub(/[\t#].*/,""); print $1, $2; exit}' "$nl"
 }
 
+# Does the .nl declare its (first) objective as maximize? The `O<i> <sigma>`
+# segment header carries sigma = 1 for maximize. Ipopt's AMPL driver minimizes
+# -f and prints that internal value, so on a maximize model its "Objective"
+# line has the opposite sign to the model's own; pounce reports the declared
+# sense (gh#959). The ipopt (AMPL-protocol) row is negated below so both rows are recorded in
+# the model's sense and the report compares like with like.
+nl_is_maximize() {
+  [ "$(grep -a -m1 '^O[0-9]' "$1" | awk '{print $2}')" = "1" ]
+}
+
 # Map ipopt's free-form termination message → cutest-style status label.
 ipopt_status_from_log() {
   local log="$1"
@@ -253,10 +263,13 @@ run_one() {
       linear_solver="$IPOPT_LINEAR_SOLVER" max_cpu_time="$TIMELIMIT" > "$log" 2>&1
     rc=$?
   elif [ ${#POUNCE_EXTRA_ARR[@]} -gt 0 ]; then
-    timeout "$TIMELIMIT" "$bin" "$nl" --no-sol "${POUNCE_EXTRA_ARR[@]}" > "$log" 2>&1
+    rm -f "$log.json"
+    timeout "$TIMELIMIT" "$bin" "$nl" --no-sol --json-output "$log.json" \
+      "${POUNCE_EXTRA_ARR[@]}" > "$log" 2>&1
     rc=$?
   else
-    timeout "$TIMELIMIT" "$bin" "$nl" --no-sol > "$log" 2>&1
+    rm -f "$log.json"
+    timeout "$TIMELIMIT" "$bin" "$nl" --no-sol --json-output "$log.json" > "$log" 2>&1
     rc=$?
   fi
   end=$(python3 -c 'import time; print(time.time())')
@@ -287,6 +300,37 @@ run_one() {
   local obj iter
   obj=$(extract_obj "$log"); obj=${obj:-null}
   iter=$(extract_iters "$log"); iter=${iter:-0}
+  # The console scrape takes the LAST summary block, which is the shipped
+  # answer only when one solve ran. A declined gh#983 scale-audit re-solve,
+  # or a second-opinion rung that did not promote, prints its own block
+  # after the reported one: brainpc4's base solve is Optimal at 4.35e-4 in
+  # 53 iterations, the declined audit re-solve ends at 6862 after 164, and
+  # the scrape recorded 6862/164 under the base solve's Optimal. pounce's
+  # JSON report carries the shipped attempt's objective and count, so read
+  # those whenever the solve got far enough to write one.
+  if [ -s "$log.json" ]; then
+    local from_json
+    from_json=$(python3 - "$log.json" <<'PY'
+import json, math, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    o = d["solution"].get("objective")
+    i = d["statistics"].get("iteration_count")
+except Exception:
+    sys.exit(0)
+ok = isinstance(o, (int, float)) and math.isfinite(o)
+print(repr(float(o)) if ok else "null", i if isinstance(i, int) else "")
+PY
+)
+    if [ -n "$from_json" ]; then
+      obj=${from_json%% *}
+      local ji=${from_json##* }
+      [ -n "$ji" ] && iter=$ji
+    fi
+  fi
+  if [ "$ampl_protocol" = "yes" ] && [ "$obj" != "null" ] && nl_is_maximize "$nl"; then
+    case "$obj" in -*) obj=${obj#-} ;; +*) obj="-${obj#+}" ;; *) obj="-$obj" ;; esac
+  fi
 
   # JSON solver label: "ipopt" for the AMPL-protocol invocation (so the
   # report's load_domain_results() finds it under the canonical key). A
