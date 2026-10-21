@@ -71,15 +71,31 @@ def test_mehrotra_clnlbeam_is_not_sent_to_restoration_at_a_feasible_point(ni):
 
 
 def test_mehrotra_clnlbeam_reaches_the_default_local_solution():
-    """gh#986 review item 8, at the size where the stale-predictor fix moves the
+    """gh#986 review item 8, at a size where the stale-predictor fix moves the
     answer: before it, the recentring step at iteration 1 built its corrector
-    from the PREVIOUS iterate's affine step, and ni = 500 stopped at 346.4972
-    (320 iterations); dropping the stale predictor reaches the default
-    algorithm's 344.8762 (336 iterations). ni = 500 rather than the issue's
-    1000/2000 for the tight band, because at those sizes unglobalised Mehrotra
-    still ends at the other local solution either way (measured)."""
-    ref = _solve(500)
-    info = _solve(500, mehrotra_algorithm="yes")
+    from the PREVIOUS iterate's affine step, and unglobalised Mehrotra stopped
+    at the other local solution, 346.497; dropping the stale predictor reaches
+    the default algorithm's 344.876.
+
+    The witness size is a trajectory fact and moves with the factorization.
+    It was ni = 500 on FERAL 0.20 (346.4972/320 it before the fix, 344.8762/336
+    after). On FERAL 0.21 ni = 500 ends at 346.4972 either way, so it no longer
+    tells the two apart. Measured on 0.21, Mehrotra with the fix against Mehrotra
+    with both ``delta_aff = None`` drops reverted:
+
+    ==== ========================= ==========================
+    ni   fixed                     stale predictor
+    ==== ========================= ==========================
+    450  344.8761 / 1360 it        346.4977 / 1240 it
+    500  346.4972 / 169 it         346.4972 / 737 it
+    600  344.8761 / 544 it         346.4968 / 1049 it
+    700  344.8761 / 194 it         346.4965 / 1350 it
+    ==== ========================= ==========================
+
+    So ni = 700, the cheapest size that separates them. At 1000/2000 Mehrotra
+    still ends at the other local solution either way."""
+    ref = _solve(700)
+    info = _solve(700, mehrotra_algorithm="yes")
     assert info["status_msg"] == "Solve_Succeeded"
     assert abs(info["obj_val"] - ref["obj_val"]) < 1e-3, (info["obj_val"], ref["obj_val"])
 

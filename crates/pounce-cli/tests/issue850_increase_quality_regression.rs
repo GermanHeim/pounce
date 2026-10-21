@@ -118,7 +118,7 @@ fn fixture(name: &str) -> PathBuf {
     p
 }
 
-/// `(stdout + stderr, exit banner, iteration count)` for one solve.
+/// `(stdout + stderr, exit banner, base-solve iteration count)` for one solve.
 ///
 /// Both streams, because the two things this file reads live on different
 /// ones: the `EXIT:` banner and the iteration count are printed to stdout, and
@@ -144,10 +144,14 @@ fn solve(extra: &[&str]) -> (String, String, i64) {
         .next_back()
         .unwrap_or("<no EXIT>")
         .to_string();
+    // The FIRST block: every claim in this file is about the base solve. A
+    // run that ends on a failure can print a further attempt after it
+    // ("Re-solving the same problem"), and that block's count is not the base
+    // solve's — on ubuntu CI it read 200 where the base solve ran to 3000.
     let iters = stdout
         .lines()
         .filter_map(|l| l.trim_start().strip_prefix("Number of Iterations....:"))
-        .next_back()
+        .next()
         .and_then(|v| v.trim().parse().ok())
         .unwrap_or(-1);
     (s, exit, iters)
