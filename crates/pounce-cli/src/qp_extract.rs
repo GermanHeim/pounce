@@ -847,13 +847,25 @@ fn centre_soc(f_rows: &[Vec<(usize, f64)>], a: &[(usize, f64)]) -> (Vec<(usize, 
         .collect();
     // Cholesky M = L Lᵀ in place (lower triangle), then two triangular solves.
     for j in 0..r {
-        let mut d = m[j * r + j];
+        let diag = m[j * r + j];
+        let mut d = diag;
         for k in 0..j {
             d -= m[j * r + k] * m[j * r + k];
         }
-        if !(d > 0.0) {
+        // A dependent row's pivot is the difference of `diag` and what the
+        // earlier rows explain of it, so it lands at roundoff of `diag` —
+        // often just *above* zero — not at zero. Testing `d <= 0` alone let
+        // that through and solved with a pivot of pure noise.
+        if d.is_nan() || d <= 16.0 * f64::EPSILON * diag {
             // Numerically rank-deficient factor: leave the cone uncentred,
-            // which is exactly the pre-gh#1041 reformulation.
+            // which is exactly the pre-gh#1041 reformulation. Traced, because
+            // an offset ball that lands here is back to the conditioning
+            // gh#1041 fixed and would otherwise fail with no clue why.
+            tracing::debug!(
+                target: "pounce::socp",
+                rank = r, pivot = j, value = d,
+                "centre_soc: FFᵀ not positive definite; SOC block left uncentred"
+            );
             return (a.to_vec(), vec![0.0; r]);
         }
         let d = d.sqrt();
@@ -1678,6 +1690,20 @@ mod tests {
             .collect::<Vec<Vec<(usize, f64)>>>();
         let a_perp = check(&f, &[(0, -4000.0), (1, -4000.0), (2, -1.0)], 3);
         assert_eq!(a_perp, vec![(2, -1.0)], "roundoff in range must be dropped");
+    }
+
+    /// The fallback branch of `centre_soc`: factor rows that are linearly
+    /// dependent make `FFᵀ` singular, and the block must come back exactly
+    /// uncentred (`a_⊥ = a`, `w = 0`). Before the pivot test was relative,
+    /// this case's second pivot came out at roundoff *above* zero and the
+    /// solve returned `w = (48, −2048)` from a pivot of pure noise.
+    #[test]
+    fn centre_soc_falls_back_to_uncentred_on_a_singular_gram() {
+        let row = vec![(0, 1.0), (1, 1.0)];
+        let a = [(0, -2000.0), (1, -2000.0)];
+        let (a_perp, w) = centre_soc(&[row.clone(), row], &a);
+        assert_eq!(a_perp, a.to_vec());
+        assert_eq!(w, vec![0.0, 0.0]);
     }
 
     /// min (x0)^2 + (x1)^2 s.t. x0 + x1 = 2, no var bounds → (1,1), f*=2.
