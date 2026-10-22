@@ -666,6 +666,42 @@ fn retry_answer_is_admissible(
     true
 }
 
+/// May a retry's point ship, as far as the box the caller *declared* goes?
+///
+/// Only when it sits no further outside that box than the base attempt's
+/// point does, up to [`RETRY_VIOL_NOISE_FLOOR`]. Every interior-point solve
+/// runs on bounds widened by `bound_relax_factor`, so "outside the declared
+/// box" is something any converged point can be, by up to the widening; what
+/// this refuses is a retry that *uses more of it* than the answer already in
+/// hand. That is the gh#983 scale audit's failure mode exactly: its re-solve
+/// drives complementarity down, which on a bound-active variable is the same
+/// as driving the point onto the widened bound, so `ex1_320`'s re-solve
+/// shipped `1.0e-8` outside the box its base attempt satisfied exactly.
+///
+/// Unconditional, unlike rule 2 of [`retry_answer_is_admissible`]: a point
+/// outside the box is the defect whatever the objective did, and a re-solve
+/// whose objective move is under that rule's tolerance shipped it all the
+/// same. The scale audit runs its re-solve un-widened when the caller left
+/// `bound_relax_factor` alone, so there this conjunct is a backstop; it bites
+/// when the caller named a widening, where both attempts solve the widened
+/// model and the re-solve may not exploit it further.
+///
+/// `NaN` means "not measured" (an arm that does not snapshot the declared
+/// bounds). A retry that cannot be measured is refused unless the base could
+/// not be either: there is then nothing to compare and the rule has no
+/// opinion.
+fn retry_keeps_declared_box(base_box_viol: Number, retry_box_viol: Number) -> bool {
+    if retry_box_viol.is_nan() {
+        return base_box_viol.is_nan();
+    }
+    let base = if base_box_viol.is_nan() {
+        0.0
+    } else {
+        base_box_viol.max(0.0)
+    };
+    retry_box_viol <= base + RETRY_VIOL_NOISE_FLOOR
+}
+
 /// What [`IpoptApplication::initialize_with_option_file`] did — enough
 /// for a caller to tell the user which file (if any) configured the run.
 #[derive(Debug, Default, Clone)]
@@ -1034,6 +1070,12 @@ pub struct IpoptApplication {
     /// converged KKT state the callback borrows belongs to the retry by
     /// then, and cannot be rewound).
     answer_restored_from_floor: std::cell::Cell<bool>,
+    /// Set only for the duration of the gh#983 scale audit's re-solve: the
+    /// interior-point arm then widens the inequality rows by
+    /// `bound_relax_factor` as usual but leaves the **variable box as the
+    /// caller declared it** (`OrigIpoptNlp::relax_bounds_keeping_box`). See
+    /// `run_scale_retry` for why.
+    retry_keeps_declared_box: std::cell::Cell<bool>,
     /// The payload of the most recent `finalize_solution` POUNCE sent to the
     /// user's TNLP, so a second-opinion retry that loses can put the winning
     /// attempt's answer back (pounce#870).
@@ -1234,6 +1276,7 @@ impl IpoptApplication {
             obj_scale_refused: std::cell::Cell::new((false, false)),
             dual_divergence_retry_promoted: std::cell::Cell::new(false),
             answer_restored_from_floor: std::cell::Cell::new(false),
+            retry_keeps_declared_box: std::cell::Cell::new(false),
             last_finalize: RefCell::new(None),
             last_iter_stats: Rc::new(RefCell::new(None)),
             sqp_warm_start: None,
@@ -5149,6 +5192,48 @@ impl IpoptApplication {
         let _ = self
             .options
             .set_integer_value("max_iter", retry_iter, true, false);
+        // Solve the re-solve on the caller's own variable box: the rows are
+        // widened by `bound_relax_factor` exactly as in the base attempt, the
+        // box is not -- unless the caller named a widening.
+        //
+        // The re-solve exists to drive complementarity down (`Upscale`) or the
+        // unscaled residual (`Rescale`), and on a bound-active variable that
+        // is the same motion as driving the point onto its bound: `s · z = mu`
+        // with `z` multiplied by the objective factor, so the slack to the
+        // *widened* bound shrinks by that factor and the point lands at
+        // `x_U + bound_relax_factor · max(1, |x_U|)` -- outside the box the
+        // caller wrote. The base attempt, less converged, usually sat inside
+        // it. So every promoted re-solve on a bound-active model shipped a
+        // point outside its declared bounds: measured with `pounce verify`,
+        // `ex1_320` `1.0e-8` across thousands of controls, `trainf` `7.0e-8`,
+        // `reading1` `9.9e-9`, against `0` from the base attempt.
+        //
+        // The improvement itself is real, not bought with that slack: solved
+        // with the declared box the re-solve reaches the same objective
+        // (`reading1` `-1.604802802e-1` against `-1.604802843e-1` widened, the
+        // base attempt's `-1.604578481e-1`) with the box held exactly. So the
+        // box widening is dropped for this one solve rather than the re-solve
+        // refused: it starts from a point that already satisfies the box, and
+        // `bound_push` moves the seed off any bound it sits on.
+        //
+        // Why the box and not `bound_relax_factor=0`: that also un-widens the
+        // inequality rows, which makes the re-solve a strictly tighter model
+        // than the base attempt, and its objective then reads *worse* than
+        // the base's by the row widening's worth -- measured on
+        // `masked_certificate_fuzz` case 12, `-3.453863914e7` against
+        // `-3.453863947e7`, with both points inside their box. The rows are
+        // what the base attempt's `final_unscaled_constr_viol` and rule 2 of
+        // `retry_answer_is_admissible` already compare like with like; the box
+        // is the one thing neither did.
+        //
+        // A caller who named the factor defined the model that way and keeps
+        // it; for that case the declared-box conjunct of the promotion gate
+        // below is what holds the line.
+        let caller_named_relax = self
+            .options
+            .get_numeric_value("bound_relax_factor", "")
+            .is_ok_and(|(_, found)| found);
+        self.retry_keeps_declared_box.set(!caller_named_relax);
         if let Some(t) = cpu_left {
             let _ = self
                 .options
@@ -5177,6 +5262,7 @@ impl IpoptApplication {
                 self.options.unset_value("max_iter");
             }
         }
+        self.retry_keeps_declared_box.set(false);
         for (tag, prev) in [("max_cpu_time", prev_cpu), ("max_wall_time", prev_wall)] {
             match prev {
                 Some((v, true)) => {
@@ -5226,14 +5312,25 @@ impl IpoptApplication {
             acceptable_tol,
             sense,
         );
-        let promote = clean && better && admissible;
+        let keeps_box = retry_keeps_declared_box(
+            certificate_floor.declared_box_viol,
+            retry.final_declared_box_viol,
+        );
+        let promote = clean && better && admissible && keeps_box;
         let console_output = match self.options.get_integer_value("print_level", "") {
             Ok((v, true)) => v >= 1,
             _ => true,
         };
         if console_output {
             println!();
-            if promote {
+            if clean && better && admissible && !keeps_box {
+                println!(
+                    "gh#983 scale audit: declined (the re-solve's point is {:.4e} outside the \
+                     declared variable bounds, the base attempt's {:.4e}); the base attempt's \
+                     answer is the one reported.",
+                    retry.final_declared_box_viol, certificate_floor.declared_box_viol
+                );
+            } else if promote {
                 println!(
                     "gh#983 scale audit: promoted -- unscaled KKT error {:.4e} -> {:.4e}, \
                      unscaled complementarity {:.4e} -> {:.4e}.",
@@ -5268,10 +5365,18 @@ impl IpoptApplication {
                 );
             }
         }
-        let detail = format!(
-            "was declined: the re-solve returned {retry_status:?} with unscaled KKT error {:.2e}",
-            retry.final_unscaled_kkt_error
-        );
+        let detail = if keeps_box {
+            format!(
+                "was declined: the re-solve returned {retry_status:?} with unscaled KKT error {:.2e}",
+                retry.final_unscaled_kkt_error
+            )
+        } else {
+            format!(
+                "was declined: the re-solve returned {retry_status:?} at a point {:.2e} outside \
+                 the declared variable bounds",
+                retry.final_declared_box_viol
+            )
+        };
         self.statistics
             .borrow_mut()
             .warnings
@@ -5948,7 +6053,11 @@ impl IpoptApplication {
             .ok()
             .and_then(|(v, f)| f.then_some(v))
             .unwrap_or(1e-4);
-        orig_nlp.relax_bounds(bound_relax_factor, constr_viol_tol);
+        if self.retry_keeps_declared_box.get() {
+            orig_nlp.relax_bounds_keeping_box(bound_relax_factor, constr_viol_tol);
+        } else {
+            orig_nlp.relax_bounds(bound_relax_factor, constr_viol_tol);
+        }
 
         // `honor_original_bounds` (default `no`, matching upstream):
         // project the reported point back into the un-relaxed box. Must
@@ -8820,6 +8929,15 @@ struct SolutionCertificate {
     unscaled_kkt_error: Number,
     kkt_error_above_noise: Number,
     mu: Number,
+    /// How far the attempt's point sits outside the model as declared --
+    /// rows and box. Both are read off the statistics beside the residuals
+    /// above, and both describe the *point*; leaving them out meant a
+    /// declined retry's measurement was reported beside the base attempt's
+    /// point (`Variable bound violation` and `final_declared_box_viol` naming
+    /// the discarded re-solve's `9.9e-9` next to a point that sits inside
+    /// its box).
+    declared_constr_viol: Number,
+    declared_box_viol: Number,
     /// gh#983 item 5: the iteration count and per-iteration rows of the
     /// attempt being floored. A solve report reads both from the statistics,
     /// so restoring the certificate without them left a report whose
@@ -8862,6 +8980,8 @@ impl SolutionCertificate {
             unscaled_kkt_error: s.final_unscaled_kkt_error,
             kkt_error_above_noise: s.final_kkt_error_above_noise,
             mu: s.final_mu,
+            declared_constr_viol: s.final_declared_constr_viol,
+            declared_box_viol: s.final_declared_box_viol,
             iteration_count: s.iteration_count,
             iterations: s.iterations.clone(),
             evals: [
@@ -8900,6 +9020,8 @@ impl SolutionCertificate {
         s.final_unscaled_kkt_error = self.unscaled_kkt_error;
         s.final_kkt_error_above_noise = self.kkt_error_above_noise;
         s.final_mu = self.mu;
+        s.final_declared_constr_viol = self.declared_constr_viol;
+        s.final_declared_box_viol = self.declared_box_viol;
         s.iteration_count = self.iteration_count;
         s.iterations = self.iterations.clone();
         s.num_obj_evals = self.evals[0];

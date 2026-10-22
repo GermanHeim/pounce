@@ -278,6 +278,48 @@ changes.
   parity test's strict `xfail` on camel deflation is now a pass.
 
 ### Fixed
+- **The gh#983 scale audit no longer ships a point outside the declared
+  variable bounds.** The audit re-solves a successful run from its returned
+  point with the objective rescaled. On a bound-active model that re-solve
+  drives each bound's slack `mu/z` below the `bound_relax_factor` widening, so
+  the promoted point sat on the *widened* bound, outside the box the model
+  declares. The base attempt's point was inside it. Measured with `pounce
+  verify`: `ex1_320` `1.0e-8` outside, `ex1_160` `1.0e-8`, `reading1`
+  `9.9e-9`, `sreadin3` `6.2e-9`, `trainf` `7.0e-8`, `trainh` `8.0e-8`, and
+  `ex4_2_160`/`ex4_2_320` `7.1e-8`. The improvement itself was real and was
+  not bought with that slack. The re-solve now runs on the caller's own box:
+  the rows are still widened as in the base attempt, the box is not. It
+  promotes on all eight with the box held exactly and the same objective to
+  8–9 digits (`reading1` `-1.604802802e-1`, `ex1_320` `6.52887856e-2`,
+  `trainf` `3.10338436`). `cont5_2_3_l`'s genuinely better point is
+  unchanged (`5.1312222e-4`, bound violation 0). Un-widening the rows as well
+  (`bound_relax_factor=0`) was measured and rejected. It makes the re-solve a
+  tighter model than the base, and its objective then reads worse by the row
+  widening's worth (`masked_certificate_fuzz` case 12). A caller who *names*
+  `bound_relax_factor` keeps the widening in the re-solve. For that case a new
+  promotion conjunct, `retry_keeps_declared_box`, declines any re-solve that
+  sits further outside the declared box than the base attempt. The decline
+  shows up as a console line and in the `objective_scale_small` warning.
+  Adjacent defect, also fixed: the certificate floor that puts a declined
+  retry's statistics back (the scale audit, the gh#884 retry and the
+  mu-strategy fallback all use it) did not restore `final_declared_box_viol`
+  or `final_declared_constr_viol`. A declined retry's box measurement was
+  therefore reported (`Variable bound violation`, JSON, Python `info`) next to
+  the base attempt's point: `4.97e-9` beside a point inside its box. The other
+  shipping paths were checked and do not leak this way. The second-opinion
+  ladder and the mu fallback promote only over a failed base, as fresh solves
+  of the same widened model. The gh#884 retry is a from-scratch solve of that
+  same model. The square-system LM projects onto the bounds from
+  `get_bounds_info` and rejects any point outside them before promoting, so
+  its `final_declared_box_viol: 0.0` is checked, not assumed. Fixture sweep,
+  both legs: only the new `scale_audit_bound_active` exact line moves,
+  `-3.000000015e-3` (below `f* = -3e-3`, the infimum over the declared box) →
+  `-2.999999985e-3`. Tests: `crates/pounce-cli/tests/issue_983_scale_audit_declared_box.rs`
+  (`.sol`/JSON/`pounce verify`) and
+  `crates/pounce-algorithm/tests/issue_983_scale_audit_declared_box.rs` (the
+  `optimize_tnlp` path the C interface and Python drive). Each was
+  mutation-checked against reverting the box change, the conjunct, and the
+  certificate restore separately.
 - **An overflowed `δ_x` ladder no longer poisons every later one.** When the
   inertia-correction ladder climbs past `max_hessian_perturbation` it gives up
   on the system and clears the remembered `δ_x_last`. It left the overflowed
