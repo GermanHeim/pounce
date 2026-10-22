@@ -29,8 +29,8 @@ it."
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional
 
 import numpy as np
 
@@ -56,15 +56,15 @@ class QpExtract:
     """
 
     kind: str
-    P: Optional[np.ndarray]
+    P: np.ndarray | None
     c: np.ndarray
     obj_const: float
-    A: Optional[np.ndarray]
-    b: Optional[np.ndarray]
-    G: Optional[np.ndarray]
-    h: Optional[np.ndarray]
-    lb: Optional[np.ndarray]
-    ub: Optional[np.ndarray]
+    A: np.ndarray | None
+    b: np.ndarray | None
+    G: np.ndarray | None
+    h: np.ndarray | None
+    lb: np.ndarray | None
+    ub: np.ndarray | None
 
 
 @dataclass
@@ -84,13 +84,13 @@ class SocpExtract:
     """
 
     kind: str
-    P: Optional[np.ndarray]
+    P: np.ndarray | None
     c: np.ndarray
     obj_const: float
-    A: Optional[np.ndarray]
-    b: Optional[np.ndarray]
-    G: Optional[np.ndarray]
-    h: Optional[np.ndarray]
+    A: np.ndarray | None
+    b: np.ndarray | None
+    G: np.ndarray | None
+    h: np.ndarray | None
     cones: list
 
 
@@ -101,7 +101,7 @@ class _NotConvex(Exception):
 _MISS = object()
 
 
-def _point_cache(f: Optional[Callable]) -> Optional[Callable]:
+def _point_cache(f: Callable | None) -> Callable | None:
     """Wrap a callable so repeated evaluations at the *same point* return a
     cached result, keyed on the point's exact float64 bytes.
 
@@ -135,7 +135,7 @@ def _point_cache(f: Optional[Callable]) -> Optional[Callable]:
     return wrapped
 
 
-def _grad_fn(fun: Callable, jac: Optional[Callable]) -> Callable:
+def _grad_fn(fun: Callable, jac: Callable | None) -> Callable:
     """Return a gradient callable: the user's ``jac`` if given, else a
     central finite-difference of ``fun`` (central, not forward, because the
     structure tests want the extra accuracy)."""
@@ -156,7 +156,7 @@ def _grad_fn(fun: Callable, jac: Optional[Callable]) -> Callable:
     return g
 
 
-def _hessian(grad: Callable, x: np.ndarray, hess: Optional[Callable]) -> np.ndarray:
+def _hessian(grad: Callable, x: np.ndarray, hess: Callable | None) -> np.ndarray:
     """Symmetric Hessian at ``x`` — the user's ``hess`` if given, else a
     central finite-difference of the gradient."""
     if hess is not None:
@@ -345,7 +345,7 @@ def classify_and_extract(
     rtol: float = 1e-5,
     seed: int = 0,
     allow_indefinite: bool = False,
-) -> Optional[QpExtract]:
+) -> QpExtract | None:
     """Detect an LP/QP behind the callable problem and extract its data.
 
     Returns a :class:`QpExtract` if the objective is linear or convex-quadratic
@@ -371,7 +371,7 @@ def classify_and_extract(
         A, b, G, h = _linear_constraints(g_combined, jac_combined, cl, cu, probes, m)
     except _NotConvex:
         return None
-    except Exception:
+    except Exception:  # noqa: BLE001 — any probe failure means "not routable"
         # Probing blew up (domain error, NaN, bad shape) — stay on the NLP path.
         return None
 
@@ -464,7 +464,7 @@ def classify_and_extract_socp(
     x0,
     rtol: float = 1e-5,
     seed: int = 0,
-) -> Optional[SocpExtract]:
+) -> SocpExtract | None:
     """Detect a convex QCQP behind the callable problem and reformulate it to a
     standard-form SOCP.
 
@@ -609,15 +609,35 @@ def classify_and_extract_socp(
         sqrt2 = np.sqrt(2.0)
         for f_rows, a_vec, b_eff in soc_blocks:
             r = len(f_rows)
+            # Centre the cone (gh #1041): complete the square so the slack is
+            # √2·(Fx + w) rather than √2·Fx. Uncentred, a ball far from the
+            # origin carries ‖Fx‖² and −2(a·x + b_eff) as two ~1e6 numbers
+            # whose difference is the constraint, and the conic IPM stalls at
+            # an infeasible point. Same as the CLI's `centre_soc`.
+            a_vec = np.asarray(a_vec, dtype=np.float64)
+            w = np.zeros(r)
+            if r:
+                F = np.asarray(f_rows, dtype=np.float64)
+                w = np.linalg.lstsq(F.T, a_vec, rcond=None)[0]
+                ftw = F.T @ w
+                a_vec = a_vec - ftw
+                # Drop roundoff left by an in-range `a`.
+                roundoff = (
+                    16.0
+                    * np.finfo(float).eps
+                    * np.maximum(np.abs(a_vec + ftw), np.abs(ftw))
+                )
+                a_vec[np.abs(a_vec) <= roundoff] = 0.0
+                b_eff = b_eff - 0.5 * float(w @ w)
             # s0 = (1 − b_eff) − a·x ;  s1 = −(1 + b_eff) − a·x.
-            G_rows.append(np.array(a_vec, dtype=np.float64))
+            G_rows.append(a_vec.copy())
             h_vals.append(1.0 - b_eff)
-            G_rows.append(np.array(a_vec, dtype=np.float64))
+            G_rows.append(a_vec.copy())
             h_vals.append(-(1.0 + b_eff))
-            # s_{2+k} = √2·(Fx)_k  ⇒  G row = −√2·F_k, h = 0.
-            for f in f_rows:
+            # s_{2+k} = √2·(Fx + w)_k  ⇒  G row = −√2·F_k, h = √2·w_k.
+            for f, wk in zip(f_rows, w):
                 G_rows.append(-sqrt2 * np.asarray(f, dtype=np.float64))
-                h_vals.append(0.0)
+                h_vals.append(sqrt2 * float(wk))
             cones.append(("soc", r + 2))
 
         A = np.array(A_rows, dtype=np.float64) if A_rows else None
@@ -626,7 +646,7 @@ def classify_and_extract_socp(
         h = np.array(h_vals, dtype=np.float64) if h_vals else None
     except _NotConvex:
         return None
-    except Exception:
+    except Exception:  # noqa: BLE001 — any probe failure means "not routable"
         return None
 
     return SocpExtract(
