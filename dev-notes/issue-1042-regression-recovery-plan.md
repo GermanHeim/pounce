@@ -54,8 +54,8 @@ iterations after a now-*correct* inertia report.
 | **R3** | `dallass` (exact, x86) | 41 → **123** it (arm64 41 → 65, *issue*) | FERAL 0.21 path lands on `x = 0` of `|x|²·|x|^0.85` terms 12 times instead of 2; each is a non-finite Hessian → restoration entry; `5fc8c797` only stops the third from ending the solve | **partial** — (A) the Hessian is an evaluator artefact (`0·∞` from the product rule; the true second derivative of `|x|^2.85` at 0 is 0), fixable in `pounce-nl`; (B) R2 may move it; re-baseline after R2 | **done** (2026-10-22, option A: `.nl` reader merges `|e|^p·|e|^q`; exact 123 → **28** it, 12 → **0** restoration calls; lbfgs ErrorInStep/146 → SolveSucceeded/301; see log) |
 | **R4** | minima `circle_parabola_t0p5` mlsl | found 2 of 2 → **1** | #993 `91b6dcda`: `MLSL_GAMMA` 2 → 0.5; at 0.5 the extra launches re-find the first minimum and the stagnation counter (`patience 8`) stops the search | **partial** — no single gamma wins at seed 0 (table in R4); needs a 10-seed measurement; the structural stagnation rule is now its own item, **R4b** | todo |
 | **R4b** | minima `circle_parabola_t0p5` mlsl (sibling of R4) | at gamma 0.5 the search ends `converged` after 9 solves: 8 consecutive launches re-find minimum 1 and trip `patience 8` with 21 of 30 solves unused | the stagnation counter treats an MLSL launch that converges to an archived minimum as a failed independent draw; it is basin information | **candidate** — grow that minimum's exclusion radius and do not count the re-find as a full strike; gamma stays 0.5 | todo |
-| **B1** | benchmark `qcqp1000-2c` (mittelmann) | 99 it / 28 s → 163 it / 112 s (*comment*) | pounce reuses the symbolic ordering FERAL chose for the least-squares multiplier-init matrix (W = 0, D = I) for every later KKT; `invalidate_symbolic_cache()` after the init factor halves factor time (*comment*) | **yes** for the code change; **measurement blocked** here (no benchmark corpus on this machine); a branch `perf/feral-symbolic-after-init` is said to be in progress — check `origin` first | todo |
-| B2 | benchmark `brainpc0/1` (vanderbei) | 58 it / 1.1 s → 1073 + 52 it / 75 s; 185 + 24 → 2117 + 24 (*comment*) | after a now-correct inertia at one iterate, pounce's restoration takes 811 of 1073 iterations (*comment*) | **unknown** — investigate only after B1 lands (B1 changes the trajectory) and only with the corpus | blocked |
+| **B1** | benchmark `qcqp1000-2c` (mittelmann) | 99 it / 28 s → 163 it / 112 s (*comment*) | pounce reuses the symbolic ordering FERAL chose for the least-squares multiplier-init matrix (W = 0, D = I) for every later KKT; `invalidate_symbolic_cache()` after the init factor halves factor time (*comment*) | **yes** for the code change; **measurement blocked** here (no benchmark corpus on this machine); a branch `perf/feral-symbolic-after-init` is said to be in progress — check `origin` first | **skipped — owner's work in progress** (2026-10-22: the branch is on `origin` at `c9182194` and is draft PR **#1046**, open; the owner's follow-up comment 6346290866 records it as model-dependent — wins qcqp1000-2c 106 → 76 s wall, NARX_CFy, clnlbeam, pooling; losses qcqp1000-2nc, qcqp1500-1c 206 → 586 it, nql180, dallasl, x86 deb7 — and moves the principled fix into FERAL, jkitchin/feral#227. Not duplicated here; see §6 B1 log) |
+| B2 | benchmark `brainpc0/1` (vanderbei) | 58 it / 1.1 s → 1073 + 52 it / 75 s; 185 + 24 → 2117 + 24 (*comment*) | after a now-correct inertia at one iterate, pounce's restoration takes 811 of 1073 iterations (*comment*) | **unknown** — investigate only after B1 lands (B1 changes the trajectory) and only with the corpus | blocked (and owner's work in progress: open PR **#1047**, branch `fix/brainpc-restoration-path`, plus the restoration outer-progress item in comment 6350601458; B1 log) |
 | B3 | benchmark `qcqp1500-1c` | Optimal → `Maximum_CpuTime_Exceeded` at 300 s (*issue*) | presumably B1 (same family); **unverified** | follows B1 | blocked |
 | B4 | benchmark `cresc132` Optimal → Infeasible (Ipopt agrees); `ssebnln` Optimal → Acceptable | (*issue*) | FERAL 0.21 trajectory | **no / out of scope** (§5) | n/a |
 | X1 | exact `deb7` arm64 Optimal/147 → Acceptable/180 | (*issue*) | FERAL 0.21 NEON trajectory | **not recoverable here** (x86 improves 143 → 114) (§5) | n/a |
@@ -119,6 +119,10 @@ to the rest of a family once one member recovers the target.
    pivoting can move trajectories, which would confound the sibling
    re-baselines. Code change implementable and unit-testable without the
    corpus; the benchmark claim can only be *verified* with it.
+   **Skipped 2026-10-22:** the owner's `perf/feral-symbolic-after-init` is on
+   `origin` as draft PR #1046, and the owner has since routed the
+   principled fix to FERAL (jkitchin/feral#227) — not duplicated (§6 B1
+   log). B2's restoration path is likewise in the owner's open PR #1047.
 6. **R4** MLSL gamma — independent, own sweep (`sweep-minima.sh`); its
    10-seed table is also R4b's measure-first step, so R4 runs first.
 7. **R4b** structural MLSL-aware stagnation rule — sibling of R4; drop or
@@ -484,8 +488,9 @@ systems.
 **Before starting:** `git fetch origin && git branch -r | grep -i symbolic`
 and search open PRs for `perf/feral-symbolic-after-init`. If that branch or
 PR exists, do not duplicate it — record its state in the item log and skip
-B1 (it is the owner's in-progress work). It was **not** on `origin` on
-2026-10-22.
+B1 (it is the owner's in-progress work). It was **not** on `origin` when
+this plan was written; it **was** by the B1 iteration (2026-10-22,
+`c9182194`, draft PR #1046), so B1 is skipped — see the §6 B1 log.
 
 **Files / symbols.**
 - `crates/pounce-feral/src/lib.rs`: the per-pattern symbolic cache ("pattern-
@@ -3087,3 +3092,82 @@ additively). The scratch worktrees and their target dirs were removed.
 fallback visible. The R2 family stays closed with its target unmet
 (pooling exact 492 on the first attempt); any new lever on it is a new
 item, scored on the first attempt per §4's C1 rule.
+
+### B1 — 2026-10-22 — skipped (owner's work in progress: draft PR #1046)
+
+Checked on `c5e5984d` (branch tip after C1), x86_64. `POUNCE_BENCH_DATA`
+unset, `bench_data_root` resolves nothing, no `~/projects/pounce-bench-data`
+(checked once).
+
+**The before-starting check fired.** `git fetch origin` brought in
+`origin/perf/feral-symbolic-after-init` at `c9182194` ("Give the IPM's first
+KKT factorization its own FERAL analysis (jkitchin/feral#224)", one commit on
+`c344c954`, 14 files, +752/−103), and it is open **draft PR #1046** in
+jkitchin/pounce (created 2026-10-22 16:04Z). Per §3 B1 ("If that branch or
+PR exists, do not duplicate it — record its state in the item log and skip
+B1"), no code was written, no `p-prev` built and no sweep taken in this
+iteration. Recorded from the PR and the issue thread, **not measured here**:
+
+- **What it does.** `analysis_count()` / `forget_analysis()` on
+  `SparseSymLinearSolverInterface` and `AugSystemSolver` (no-op defaults;
+  FERAL: `symbolic_call_count` / `invalidate_symbolic_cache`; block, Schur
+  and restoration composites forward; `LowRankAugSystemSolver` forwards to
+  the main solver only, so the gh#730 init bypass keeps its `W = 0`
+  analysis). `IpoptAlgorithm::optimize_inner` brackets
+  `set_initial_iterates` with `analysis_count()` and forgets only an
+  analysis the initializer *created* — which is exactly the semantics
+  question this plan left open (step 3's "re-use by default, re-analyse
+  after the invalidation"): a pooled backend or second `optimize` keeps its
+  reuse. Tests: `crates/pounce-algorithm/tests/feral_analysis_after_multiplier_init.rs`
+  (dim-220 fixture where MC64 provably picks different orderings for the init
+  and first-KKT matrices; mutation-checked both ways) and a `pounce-feral`
+  unit test. It **weakens** `issue_540_eigena2_superlinear_tail.rs`'s 16×
+  dual-residual margin assertion (said so in the PR body) — for the owner to
+  judge; this branch would not be allowed to (§4 "never weaken original
+  fixes").
+- **Its numbers (arm64, 14 cores, PR body).** qcqp1000-2c LSF 103.2 →
+  73.9 s, wall 106.1 → 76.3 s (it 163 → 182); NARX_CFy wall 150 → 112 s;
+  clnlbeam base solve 2465 → 514 it. Losses: qcqp1000-2nc wall +37% at equal
+  iterations (nnz(L) 1.48M → 2.06M); **qcqp1500-1c 206 → 586 it** (B3's
+  model); nql180 +21% wall; brainpc3 +1.1 s; dallasl 45 → 135 + 24 (a clean
+  solve now rescued). Net over 26 models: wall 1229 → 1196 s, factor
+  929 → 939 s. brainpc0/1 bit-identical (B2 untouched).
+- **Its sweep (both legs, vs `c344c954`, both arches).** Two exact lines
+  move; lbfgs identical. x86_64: `pooling_rt2stp` 492 q=3 → **111** q=1
+  (−3273.954992); `deb7` `SolveSucceeded`/114 `2nd=-` → `SolveSucceeded`/225
+  with `2nd=mu_strategy=adaptive@Error_In_Step_Computation/396,tot=621` —
+  by §4's C1 rule a **lost first attempt rescued by a retry** (114 → base
+  ErrorInStep 396, total 621), which the PR itself calls a real x86_64
+  regression. **That sweep predates the `mu=` column (C1, `423f8568`)**, so
+  its `pooling_rt2stp` 111 is *unverified for a promoted
+  `mu_strategy_fallback`* — the exact blind spot that mis-scored R2b's 109.
+  The PR reports pooling's base solve "stops failing", so it is probably a
+  first attempt, but whoever re-sweeps #1046 should read the `mu=` column
+  (or `statistics.mu_strategy_fallback`) before counting it toward the R2
+  family's target (pooling exact ≤ 300 on the first attempt) or F1's margin.
+- **The owner's direction since.** Issue comment 6346290866 (16:52Z): the
+  host-side forget is model-dependent with total factor time flat; "the
+  principled fix is a staleness-triggered re-analysis inside FERAL …
+  jkitchin/feral#227", after which pounce bumps FERAL, exposes the policy
+  option, and sweeps/benchmarks both arches. So B1's pounce-side lever as
+  written in §3 is superseded by an upstream change this branch cannot ship
+  (crates.io dependency, no git deps — §3 R2d "Where FERAL lives").
+
+**B2 / B3.** Also owner's work now: open PR **#1047**
+(`origin/fix/brainpc-restoration-path`, `4d2cde1a`, "Restoration: end the
+cycle on an unreleased feasible hand-back the outer cannot leave"), and
+comment 6350601458 records a further restoration item (the outer-progress
+callback is passed max-norm violation and plain `f` where the filter holds
+1-norm and the barrier objective). Both stay blocked here on the corpus
+regardless; nothing to do on this branch.
+
+**Not done, and why.** No implementation (would duplicate #1046); no
+`p-prev` / sweep / wall-clock / factor-count measurement (nothing on this
+branch changed — docs-only commit; measuring #1046's binary is the owner's
+A/B, and the one number this machine could add to it is the `mu=` read on
+its x86 pooling line, suggested above rather than taken, to stay inside
+"do not duplicate"). `cargo fmt --all -- --check` run (clean).
+
+**Next.** Per §2, **R4** (MLSL default `gamma`, its own
+`sweep-minima.sh`; `sweep-fixtures.sh` must diff empty) — independent of
+B1 and of FERAL.
