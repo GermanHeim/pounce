@@ -64,6 +64,18 @@ fn dallass_solves_without_restoration_once_the_abs_powers_are_merged() {
     let text = std::fs::read_to_string(&json).expect("read JSON report");
     let _ = std::fs::remove_file(&json);
     let report: serde_json::Value = serde_json::from_str(&text).expect("parse JSON report");
+    // gh#1042 C1: every number below is the *reported* solve's, and on a
+    // promoted `mu_strategy_fallback` that is the re-solve alone — the first
+    // attempt's verdict and cost appear nowhere else. R2b's 492 → 109 on
+    // `pooling_rt2stp` was exactly that (first attempt Acceptable/494), so
+    // the pin must establish there was only one attempt before it reads
+    // anything.
+    assert!(
+        report["statistics"]["mu_strategy_fallback"].is_null(),
+        "dallass's reported result is a mu_strategy_fallback re-solve, so the \
+         bounds below would describe the retry, not the first attempt: {}",
+        report["statistics"]["mu_strategy_fallback"]
+    );
     let obj = report["statistics"]["final_objective"]
         .as_f64()
         .expect("final_objective");

@@ -62,6 +62,7 @@ iterations after a now-*correct* inertia report.
 | X2 | lbfgs `dallass` arm64 Optimal/224 → ErrorInStep/308 | (*issue*); x86 fails on both versions | FERAL 0.21 trajectory | **not recoverable here**; the x86 lbfgs failure predates 0.13.0 (§5) | n/a |
 | X3 | lbfgs `pooling_rt2stp` arm64 −4391.83 → −3273.95 | (*issue*); x86 failing → solved | bistable nonconvex model | **no** — both are certified optima (§5) | n/a |
 | F1 | `issue_592` pin `< 500` sits 8 above x86's 492 | — | R2 | resolved by whichever of R2b–R2e lands; **do not raise the pin** | **correction (R2e iteration): margin is 6 on the base solve** (494, Acceptable) — the pin reads the JSON `iteration_count`, which is `mu_strategy_fallback`'s 109; R2b's log recorded margin 8 → **391** on x86 (pooling exact 109); the `< 500` pin is **untouched** — it guards gh#544's 812 régime, and R2b's own pin (`issue_1042_pooling_escalation_budget.rs`, ≤ 300) carries the tighter bound; tightening `issue_592` itself is left until R2b clears the vanderbei A/B |
+| **C1** | the measurement instrument (correction iteration, after R2e) | — | a promoted `mu_strategy_fallback` (pounce#138/#748) re-solve replaces `iteration_count`, `restoration_calls` and the status in the JSON report, and the sweep had no column for it, so a first attempt that got *worse* read as a speed-up (R2b's 492 → 109) | **yes** — report the fallback, re-audit every item with it | **instrument landed** (2026-10-22: `statistics.mu_strategy_fallback` in the JSON report — first attempt's status / iterations / restoration calls / objective, re-solve's strategy / status / iterations, `promoted` — and a `mu=` sweep column; re-audit at v0.12.0 / 0.13.0 / pre-R2b / tip: the only fallback line that moved anywhere is R2b's pooling exact; see log) |
 | **M1** | re-measurement pass after every landed R2x item | — | R2b/c/d/e each move the NLP arm's step for every exact-Hessian solve; R3 landed *before* them (dallass 28), so the original "R3 after R2" re-baseline is inverted | rule, not a code item: see §3 M1 and §4 "Sibling items" | standing (runs inside each R2x iteration) |
 
 ## 2. Ordering
@@ -106,6 +107,11 @@ to the rest of a family once one member recovers the target.
    R2 family closes by status with its target unmet (§6 R2e log).
    — **M1** runs inside each R2x iteration: re-measure the inventory on the
    new tip before the next sibling starts (§3 M1).
+   — **C1** (correction iteration, inserted after R2e, 2026-10-22): make
+   `mu_strategy_fallback` re-solves visible to the JSON report and the
+   sweep, re-audit R3, R2b and the M1 table with first-solve numbers, and
+   decide R2b on them. Runs before B1, because B1's re-baselines would
+   otherwise be taken with the same blind spot (§6 C1 log).
 5. **B1** symbolic-ordering reuse — after the R2 family, not between its
    members: it changes *which factorization* FERAL performs and through
    pivoting can move trajectories, which would confound the sibling
@@ -1503,6 +1509,21 @@ the same τ-collapse. Rules:
    the parent (R1, R2, R4) gets a one-line summary pointing at the member
    that did it.
 
+**First attempt, not only the reported result (C1).** Every before/after
+number an item records — reproduce step, acceptance, M1 table, sweep
+explanation — names the **first attempt** and any retry that replaced it,
+not only the final reported result. Concretely: read the sweep's `mu=` and
+`2nd=` columns (or the JSON's `statistics.mu_strategy_fallback` and
+`second_opinion`) for every fixture the item claims; a line whose final
+result improved while `mu=` or `2nd=` changed from `-` to a promotion is a
+**lost first attempt rescued by a retry**, not a recovery, and its
+before/after is reported as `first attempt status/it → status/it, total
+it`. A pin on an item's target asserts the first attempt (no promoted
+fallback, no second opinion) before it reads any count. The sweep diff is
+taken on all columns; when comparing against a sweep taken before a column
+existed, drop it first (`sed -E 's/ mu=[^ ]+ +/ /'`) so the real moves stay
+visible.
+
 **Per-iteration checklist.**
 1. `git status` clean, on `claude/pounce-regressions-recovery-tz8uh2`,
    `git pull --ff-only origin claude/pounce-regressions-recovery-tz8uh2`.
@@ -2823,3 +2844,129 @@ corpus), arm64 (not available), Python tests (no code change). The probe
 and both counterfactuals lived only in the scratch worktree, which was
 removed.
 
+### C1 — 2026-10-22 — instrument landed (R2b decision in the next commit)
+
+Measured on x86_64 (4 CPUs, AVX2+FMA). Four binaries, each carrying the C1
+report patch (below) so that all four columns are read the same way, each
+built in its own worktree with its own `CARGO_TARGET_DIR`:
+`v0.12.0` = `a31dab9c` (`pounce 0.12.0`; the patch applied with a
+hand-resolved 3-way merge, since v0.12.0's fallback driver has no
+`RetryOptionScope`), `0.13.0` = `0a299151`, `pre-R2b` = `85d08bc6` (contains
+R3), `tip` = `36fefb32` (contains R2b). `POUNCE_BENCH_DATA` unset,
+`bench_data_root` resolves nothing (checked once).
+
+**How a fallback was reported before C1.** `run_with_mu_strategy_fallback`
+(`pounce-algorithm/src/application.rs`) runs the first attempt; on
+`Solved_To_Acceptable_Level` (stock termination options) or
+`Maximum_Iterations_Exceeded` (unless the gh#857 decline applies) it flips
+`mu_strategy` and re-solves, promoting the re-solve only on
+`Solve_Succeeded`. On a promotion the statistics are the re-solve's
+(`iteration_count`, `restoration_calls`, residuals); on a loss the
+pounce#870 floor restores the first attempt's. Nothing recorded that the
+retry ran: no JSON field (the second-opinion ladder's `second_opinion`
+covers that ladder only), no sweep column, and only `RUST_LOG`-level
+tracing on a loss. The console shows two iteration tables, which is how R2e
+found it; nothing machine-readable did.
+
+**The instrument.**
+- `pounce_nlp::MuStrategyFallbackRecord` (`solve_statistics.rs`):
+  `base_status`, `base_iteration_count`, `base_restoration_calls`,
+  `base_objective`, `retry_mu_strategy`, `retry_status`,
+  `retry_iteration_count`, `promoted`, plus `total_iteration_count()`.
+  `SolveStatistics::mu_strategy_fallback: Option<…>` (`serde(default)`).
+- `IpoptApplication`: a `mu_strategy_fallback_record` cell, reset per solve
+  in `optimize_tnlp_dispatch` beside the gh#884 flags, filled by the
+  fallback driver before and after the re-solve, copied into every later
+  attempt's statistics (sticky, like `dual_divergence_signature`) and
+  written into the returned statistics on both the promote and the floor
+  path. No decision reads it.
+- Solve report: `statistics.mu_strategy_fallback`, omitted when no retry
+  ran (additive to `pounce.solve-report/v1`).
+- `scripts/sweep-fixtures.sh`: a `mu=` column between `2nd=` and `obj=`:
+  `-`; `<strategy>@<first status>/<first it>,tot=N` (promoted); or
+  `kept(<strategy>:<retry status>/<retry it>),tot=N` (lost). Documented in
+  the script header and in CLAUDE.md's sweep section (the line format
+  changed).
+
+**The patch is report-only (measured).** With the `mu=` column dropped
+(`sed -E 's/ mu=[^ ]+ +/ /'`), each patched binary's sweep is byte-identical
+to the unpatched one: v0.12.0 against `build/p-base`'s sweep (taken this
+iteration); 0.13.0 against R2's `p-prev` sweep (`463eeeae`, code-identical
+to `0a299151`); pre-R2b against R2c's `p-prev` sweep (`85d08bc6`); tip
+against R2c's `p-prev` with the one pooling line R2b's log records. The
+unpatched v0.12.0 binary reads `mu=-` on all 234 lines, including `csfi2`,
+which the patched one shows promoted — the blind spot, in one line.
+
+**Every line where a fallback ran** (234 fixture-legs per binary, both legs):
+
+| fixture (leg) | v0.12.0 | 0.13.0 | pre-R2b | tip |
+|---|---|---|---|---|
+| csfi2 (exact) | `adaptive@Acceptable/35,tot=56`, it 21 | same | same | same |
+| mu_fallback_point_floor (exact) | `kept(adaptive:Infeasible/31),tot=86`, it 31¹ | `kept(…/31),tot=86`, it 55 | same as 0.13.0 | same |
+| eigenb2 (lbfgs) | `kept(monotone:Acceptable/41),tot=88`, it 41 | `kept(…/42),tot=89`, it 47 | same as 0.13.0 | same |
+| mu_fallback_point_floor (lbfgs) | `kept(monotone:Acceptable/26),tot=46`, it 26¹ | `kept(…/26),tot=46`, it 20 | same as 0.13.0 | same |
+| **pooling_rt2stp (exact)** | `-` (162, one attempt) | `-` (492, one attempt) | `-` (492) | **`adaptive@Solved_To_Acceptable_Level/494,tot=603`**, it 109 |
+
+¹ v0.12.0 reports the losing retry's `it=` beside the first attempt's
+status (pre-gh#983-item-5: the floor did not yet restore
+`iteration_count`); the record's `base_iteration_count` (55 / 20) is the
+first attempt's. Not a regression, a reporting fix that shipped in 0.13.0.
+
+So there is exactly **one hidden-fallback line** introduced anywhere on the
+branch: R2b's exact `pooling_rt2stp`. `csfi2` exact is a promoted fallback
+on all four binaries with identical numbers — pre-existing, unmoved, and
+until now invisible; it is not a #1042 regression. The three `kept` lines
+were already scored on the first attempt (`it=` is the first attempt's on
+0.13.0 and later). No line combines a fallback with a second-opinion
+ladder, so no line's `2nd=` base count hides a fallback either.
+
+**Audit table** (sweep lines; first attempt / final; `resto` from the JSON):
+
+| fixture (leg) | v0.12.0 | 0.13.0 | pre-R2b (R3) | tip (R2b) |
+|---|---|---|---|---|
+| pooling_rt2stp (exact) | Optimal 162, one attempt | Optimal 492 (24 resto), one attempt | Optimal 492, one attempt | **first Acceptable 494 (−4336.99, 22 resto) → fallback Optimal 109 (3 resto); total 603** |
+| pooling_rt2stp (lbfgs) | ErrorInStep 716, one attempt | Optimal 82, one attempt | 82 | 82 |
+| dallass (exact) | Optimal 41, one attempt | Optimal 123, one attempt | **Optimal 28, one attempt** | 28 |
+| dallass (lbfgs) | ErrorInStep 213, one attempt | ErrorInStep 146, ladder `kept(1)` tot 292 | **Optimal 301, one attempt** | 301 |
+| deb7 (exact) | Optimal 143 | Optimal 114 | 114 | 114 |
+| deb7 (lbfgs) | ErrorInStep 1010 | RestorationFailed 1206, `kept(1)` tot 1738 | same | same |
+| scaled_feasible_a (exact / lbfgs) | nlp 22 / 19 | cvx-qp 200 / 200 | same | same |
+| scaled_feasible_b (exact / lbfgs) | cvx-qp 47 / 47 | cvx-qp 36 / 36 | same | same |
+| circle_parabola_t0p5 (lbfgs) | `feral_scaling=mc64@Infeasible/48`, 77, tot 125 | same | same | same |
+| scale_audit_retry_meyer3 (lbfgs) | 112, q 5 | same | same | same |
+
+No M1 row other than pooling exact carries a fallback on any binary.
+
+- **R3 stands as recorded.** `dallass` is a single attempt on both legs at
+  pre-R2b and tip (`mu=-`, `2nd=-`): exact 123 → 28, lbfgs ErrorInStep
+  146 (+ ladder, 292) → Optimal 301. R3's pin checked "no second opinion"
+  but not the fallback; it now checks both (below).
+- **R2b was mis-scored.** Its first attempt is *worse* than 0.13.0's —
+  Optimal 492 → Acceptable 494 at a non-optimal point (unscaled dual inf
+  5.3e6) — and the run's total is 603 iterations / 25 restoration calls
+  against 492 / 24. Decision below.
+- **The M1 rows of R2c/R2d/R2e's logs stand** (those iterations changed no
+  code, and their M1 rows are the pre-R2b / tip columns above). Their
+  *counterfactual* numbers are a different matter: R2e's were read off the
+  console attempt by attempt, but R2c's κ table and R2d's "every deficit →
+  `Singular`" result (pooling 162) were read off the JSON report before C1
+  and **may hide a fallback**. Neither lever landed, so nothing is built on
+  them; they are marked *unverified for fallback* here rather than re-run
+  (the probes lived in removed scratch worktrees).
+- **R1's numbers stand**: the convex arm has no μ fallback;
+  `scaled_feasible_*` lines are single attempts on every binary.
+
+**Tests (instrument).** New
+`crates/pounce-cli/tests/issue_1042_mu_fallback_is_reported.rs`: a promoted
+fallback (`csfi2` exact: record present, first attempt
+`Solved_To_Acceptable_Level`, `retry_iteration_count == iteration_count`,
+total = sum), a losing one (`mu_fallback_point_floor` exact: not promoted,
+`base_iteration_count == iteration_count`), and none under
+`mu_strategy_fallback=no`. Mutation checks: record never written — the
+first two fail; `promoted` hard-wired `false` — the first fails;
+`retry_iteration_count` read before the re-solve — the first fails.
+Restored. R3's pin (`issue_1042_dallass_abs_pow_merge.rs`) now asserts
+`statistics.mu_strategy_fallback` is absent before it reads any count;
+mutation check: pointed at `pooling_rt2stp.nl` on the R2b tip, every
+earlier assertion passes (Optimal, no second opinion) and the new one fails
+with the record (`494 … Solved_To_Acceptable_Level … promoted`). Restored.
