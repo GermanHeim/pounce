@@ -9,7 +9,7 @@ changes.
 
 ## [Unreleased]
 
-## [0.13.0] - 2026-10-21
+## [0.13.0] - 2026-10-22
 
 ### Added
 - **Square-system recovery: the last stage of the second-opinion ladder
