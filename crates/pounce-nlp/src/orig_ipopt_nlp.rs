@@ -1021,6 +1021,31 @@ impl OrigIpoptNlp {
     }
 
     pub fn relax_bounds(&mut self, bound_relax_factor: Number, constr_viol_tol: Number) {
+        self.relax_bounds_impl(bound_relax_factor, constr_viol_tol, true);
+    }
+
+    /// [`Self::relax_bounds`] with the inequality rows widened and the
+    /// variable box left as declared.
+    ///
+    /// For a solve whose point must satisfy the caller's own box -- the
+    /// gh#983 scale audit's re-solve, which otherwise lands on the widened
+    /// bound of every bound-active variable (`IpoptApplication::
+    /// run_scale_retry`). The row widening is kept so the solve is the base
+    /// attempt's model in everything but the box.
+    pub fn relax_bounds_keeping_box(
+        &mut self,
+        bound_relax_factor: Number,
+        constr_viol_tol: Number,
+    ) {
+        self.relax_bounds_impl(bound_relax_factor, constr_viol_tol, false);
+    }
+
+    fn relax_bounds_impl(
+        &mut self,
+        bound_relax_factor: Number,
+        constr_viol_tol: Number,
+        widen_box: bool,
+    ) {
         self.snapshot_declared_bounds();
         if bound_relax_factor <= 0.0 {
             return;
@@ -1065,14 +1090,56 @@ impl OrigIpoptNlp {
         // leaving bounds tighter than `bound_relax_factor` requires; that is
         // a programming error, so fail loudly to match `adjust_variable_bounds`
         // rather than no-op.
-        apply(
-            Rc::get_mut(&mut self.x_l).expect("relax_bounds: x_l is uniquely owned"),
-            -1.0,
-        );
-        apply(
-            Rc::get_mut(&mut self.x_u).expect("relax_bounds: x_u is uniquely owned"),
-            1.0,
-        );
+        if widen_box {
+            apply(
+                Rc::get_mut(&mut self.x_l).expect("relax_bounds: x_l is uniquely owned"),
+                -1.0,
+            );
+            apply(
+                Rc::get_mut(&mut self.x_u).expect("relax_bounds: x_u is uniquely owned"),
+                1.0,
+            );
+        } else {
+            // Keeping the box still widens a variable whose declared box is
+            // a single point (`x_L == x_U`, kept in the iterate under
+            // `fixed_variable_treatment=relax_bounds`). It has no interior
+            // for a barrier to live in, so no interior-point solve -- the
+            // base attempt's included -- can return it on its bound; leaving
+            // it zero-width made the re-solve lean on the safe-slack
+            // adjustment instead. Measured on a fixed `z = 0.5` beside three
+            // bound-active controls: un-widened, `z` came back `3.1e-13`
+            // below its value; the base attempt, widened, `1.2e-11`.
+            let cls = self.adapter.borrow().classification().clone();
+            let n_var = cls.x_not_fixed_map.len();
+            let mut lower = vec![Number::NEG_INFINITY; n_var];
+            let mut upper = vec![Number::INFINITY; n_var];
+            for (&v, &b) in cls.x_l_map.iter().zip(self.x_l.expanded_values().iter()) {
+                lower[v as usize] = b;
+            }
+            for (&v, &b) in cls.x_u_map.iter().zip(self.x_u.expanded_values().iter()) {
+                upper[v as usize] = b;
+            }
+            let point = |v: Index| lower[v as usize] == upper[v as usize];
+            let delta = |b: Number| (relax * b.abs().max(1.0)).min(cap);
+            {
+                let xl = Rc::get_mut(&mut self.x_l).expect("relax_bounds: x_l is uniquely owned");
+                let vals = xl.values_mut();
+                for (i, &v) in cls.x_l_map.iter().enumerate() {
+                    if point(v) {
+                        vals[i] -= delta(vals[i]);
+                    }
+                }
+            }
+            {
+                let xu = Rc::get_mut(&mut self.x_u).expect("relax_bounds: x_u is uniquely owned");
+                let vals = xu.values_mut();
+                for (i, &v) in cls.x_u_map.iter().enumerate() {
+                    if point(v) {
+                        vals[i] += delta(vals[i]);
+                    }
+                }
+            }
+        }
         apply_d(
             Rc::get_mut(&mut self.d_l).expect("relax_bounds: d_l is uniquely owned"),
             -1.0,

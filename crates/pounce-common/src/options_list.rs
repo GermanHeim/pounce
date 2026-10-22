@@ -41,6 +41,11 @@ impl OptionValue {
     }
 }
 
+/// One entry of an [`OptionsList`] as it stood, absence included; see
+/// [`OptionsList::snapshot_entry`].
+#[derive(Debug, Clone)]
+pub struct OptionEntrySnapshot(Option<OptionValue>);
+
 /// Mirrors `Ipopt::OptionsList`.
 #[derive(Debug, Default, Clone)]
 pub struct OptionsList {
@@ -244,6 +249,31 @@ impl OptionsList {
             allow_clobber,
             dont_print,
         )
+    }
+
+    /// The exact state of one entry -- its value and flags, or its absence --
+    /// for [`Self::restore_entry`] to put back. For a caller that overrides
+    /// an option for the duration of one solve and must leave the table as
+    /// it found it on every exit, unwinding included: "absent" is restored
+    /// as absent, so a registered default never comes back reading as
+    /// caller-set.
+    pub fn snapshot_entry(&self, tag: &str) -> OptionEntrySnapshot {
+        OptionEntrySnapshot(self.options.get(&Self::key(tag)).cloned())
+    }
+
+    /// Put back an entry exactly as [`Self::snapshot_entry`] found it,
+    /// bypassing `allow_clobber` (the snapshot is the entry's own earlier
+    /// state, not a new value).
+    pub fn restore_entry(&mut self, tag: &str, snap: OptionEntrySnapshot) {
+        let key = Self::key(tag);
+        match snap.0 {
+            Some(v) => {
+                self.options.insert(key, v);
+            }
+            None => {
+                self.options.remove(&key);
+            }
+        }
     }
 
     /// Mirrors `UnsetValue`. Returns true if the value was removed.
