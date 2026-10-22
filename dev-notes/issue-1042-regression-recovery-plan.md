@@ -3171,3 +3171,10 @@ its x86 pooling line, suggested above rather than taken, to stay inside
 **Next.** Per §2, **R4** (MLSL default `gamma`, its own
 `sweep-minima.sh`; `sweep-fixtures.sh` must diff empty) — independent of
 B1 and of FERAL.
+
+### Loop paused — 2026-10-22, at `e4d87a51`
+
+Paused for budget before R4 started; R4 made no changes. To resume, pick up
+§2 at **R4** (then R4b, R1d, R1e, R1b, R1c), following §4 including the C1
+first-attempt rule. The `p-base` (v0.12.0) binary and sweep outputs lived in
+the session scratchpad and are gone; rebuild them.
