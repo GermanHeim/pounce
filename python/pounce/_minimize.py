@@ -34,8 +34,9 @@ from __future__ import annotations
 
 import inspect
 import warnings
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any
 
 import numpy as np
 from scipy import sparse
@@ -102,9 +103,7 @@ class OptimizeResult(_ScipyOptimizeResult):
                 return {k: _safe(v) for k, v in value.items()}
             return value
 
-        safe = _ScipyOptimizeResult(
-            (k, _safe(v)) for k, v in self.items()
-        )
+        safe = _ScipyOptimizeResult((k, _safe(v)) for k, v in self.items())
         return _ScipyOptimizeResult.__repr__(safe)
 
 
@@ -577,7 +576,8 @@ def _block_from_dict(c: dict, n: int, x0=None) -> _ConstraintBlock:
         raise ValueError(f"unknown constraint type {kind!r}; use 'eq' or 'ineq'")
     fun = c["fun"]
     if not callable(fun):
-        raise ValueError("constraint 'fun' must be callable")
+        # ValueError, not TypeError: the public contract (test_minimize.py).
+        raise ValueError("constraint 'fun' must be callable")  # noqa: TRY004
     ca = tuple(c.get("args", ()))
     # Probe at the user's x0 when available, not the origin, so a constraint
     # undefined at 0 but defined at a feasible start doesn't fail at build
@@ -664,7 +664,8 @@ def _wrap_constraints(constraints, n: int, x0=None):
         elif isinstance(c, dict):
             blocks.append(_block_from_dict(c, n, x0))
         else:
-            raise ValueError(
+            # ValueError, not TypeError: the public contract (test_minimize.py).
+            raise ValueError(  # noqa: TRY004
                 f"each constraint must be a dict with 'type' and 'fun', a "
                 f"scipy.optimize.LinearConstraint, or a list mixing those — "
                 f"got {type(c).__name__}"
@@ -1017,7 +1018,9 @@ def _solve_via_convex(
     )
 
 
-def _solve_via_socp(ex, opts: dict, objective=None) -> OptimizeResult:
+def _solve_via_socp(
+    ex, opts: dict, objective=None, allow_nlp_fallback: bool = False
+) -> OptimizeResult | None:
     """Adapt a routed convex-QCQP solve (reformulated to a SOCP) back into an
     :class:`OptimizeResult`.
 
@@ -1046,6 +1049,21 @@ def _solve_via_socp(ex, opts: dict, objective=None) -> OptimizeResult:
         tol=opts.get("tol"),
         max_iter=opts.get("max_iter"),
     )
+    # gh #1041: the CLI's `auto` re-solves a conic `NumericalFailure` on the
+    # NLP path (a convex QCQP is also a valid NLP); `auto` here does the same.
+    # Only that status: infeasibility verdicts were verified, and an iteration
+    # limit is the budget the caller asked for. A forced `socp` keeps the
+    # conic verdict, as on the CLI.
+    if allow_nlp_fallback and res.status == "numerical_failure":
+        warnings.warn(
+            f"the conic (SOCP) solve returned no verified KKT point after "
+            f"{int(res.iters)} iterations; a convex QCQP is also a valid NLP, "
+            f"so it is being re-solved on the general NLP path. Pass "
+            f"solver_selection='socp' to see the conic result instead.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return None
     model_val = float(res.obj) + ex.obj_const
     # gh #880: ``optimal_inaccurate`` is a converged-to-acceptable solve, the
     # same convention the NLP arm uses (gh #119 / #123). See `QpResult.success`.
@@ -1319,20 +1337,20 @@ def minimize(
     # second router's probes cache hits instead of re-evaluating the objective.
     # Only these router copies are cached; the NLP fallback below still calls
     # the original `fun`/`jac`/… so the actual solve is unaffected.
-    route_kw = dict(
-        fun=_point_cache(route_fun),
-        jac=_point_cache(route_jac),
-        hess=_point_cache(_bind_args(hess)),
-        lb=lb,
-        ub=ub,
-        m=m,
-        g_combined=_point_cache(g_combined),
-        jac_combined=_point_cache(router_jac_combined),
-        cl=cl,
-        cu=cu,
-        x0=x0,
-        rtol=route_tol,
-    )
+    route_kw = {
+        "fun": _point_cache(route_fun),
+        "jac": _point_cache(route_jac),
+        "hess": _point_cache(_bind_args(hess)),
+        "lb": lb,
+        "ub": ub,
+        "m": m,
+        "g_combined": _point_cache(g_combined),
+        "jac_combined": _point_cache(router_jac_combined),
+        "cl": cl,
+        "cu": cu,
+        "x0": x0,
+        "rtol": route_tol,
+    }
     # Options the dedicated convex (LP/QP/SOCP) routers actually honor; the
     # routing key and tolerance are consumed here, not "ignored". Everything
     # else the user passed (e.g. `print_level`, `disp`, `acceptable_tol`) has
@@ -1415,7 +1433,11 @@ def minimize(
             socp = classify_and_extract_socp(**route_kw)
             if socp is not None:
                 _warn_convex_dropped_opts("convex SOCP")
-                return _solve_via_socp(socp, options, objective=route_fun)
+                routed = _solve_via_socp(
+                    socp, options, objective=route_fun, allow_nlp_fallback=True
+                )
+                if routed is not None:
+                    return routed
     elif selection == "socp":
         socp = classify_and_extract_socp(**route_kw)
         if socp is None:
