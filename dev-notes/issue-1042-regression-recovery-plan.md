@@ -49,7 +49,7 @@ iterations after a now-*correct* inertia report.
 | **R2** | `pooling_rt2stp` (exact, x86) | 162 → **492** it (arm64: 109 → 242 total, *issue*) | FERAL 0.21 trajectory; `2599c2be` removed the latch (904 → 492); the remaining cost is the `δ_x` ladder climbing to `max_hessian_perturbation` with `δ_c` on (*issue*, unmeasured) | **partial** — the "stop the ladder once inertia is guaranteed" follow-up the issue names; must be measured first | **not recoverable this way** (2026-10-22: hypothesis refuted — 0 of 146 `WrongInertia` factors with `δ_c > 0` had a PD (1,1) block; the climb answers a genuinely indefinite `W`, λ_min down to −1.2e19 vs v0.12.0's −2.2e9; trigger found at iteration 4, see log + §5). Alternate routes: **R2b–R2e** below |
 | **R2b** | `pooling_rt2stp` (exact, x86; sibling of R2) | 492 it; blanket counterfactual 492 → 109 with 19 collateral lines | one `augsys_improved` flag per matrix is shared by the inertia ladder's too-few-negatives branch and iterative refinement; at iteration 4 the former spends it on a 71-vs-72 count and refinement keeps a 6.4e16 step | **candidate** — one escalation budget per consumer per matrix; must avoid the counterfactual's collateral (lbfgs `circle_parabola_t0p5` 8.155 → 10.428, lbfgs `scale_audit_retry_meyer3` 112 → 152, 15 lines escalating to cap) | todo (`needs vanderbei before merge` at best) |
 | **R2c** | `pooling_rt2stp` (exact, x86; sibling of R2) | iteration-4 refinement stalls at ratio 1.6e-8 and takes the `S` exit with a dual part of 6.4e16 | `compute_residual_ratio` caps its normalizer at `1e6·‖rhs‖`, so the `S` test (ratio < `residual_ratio_singular` = 1e-5) is blind to a step many orders above the RHS | **candidate** — refuse `S` (take `s` → `perturb_for_singular`) when `‖res‖∞ > κ·‖rhs‖∞`; the narrowest of the family | todo (`needs vanderbei before merge` at best) |
-| **R2d** | `pooling_rt2stp` iteration 4 (sibling of R2) | FERAL 0.21 reports 71 negatives, 72 required; FERAL 0.20 reported 73 on v0.12.0's matrix | either an inertia-count defect in FERAL (crates.io dependency `feral = 0.21.0`, upstream jkitchin/feral — not vendored) or a genuinely ambiguous near-singular matrix | **measure first** — exact count vs both FERAL counts on the dumped matrix; fix upstream, or work around in `pounce-feral` (classify as noise → `Singular`, no escalation spent) | todo |
+| **R2d** | `pooling_rt2stp` iteration 4 (sibling of R2) | FERAL 0.21 reports 71 negatives, 72 required; FERAL 0.20 reported 73 on v0.12.0's matrix | either an inertia-count defect in FERAL (crates.io dependency `feral = 0.21.0`, upstream jkitchin/feral — not vendored) or a genuinely ambiguous near-singular matrix | **measure first** — exact count vs both FERAL counts on the dumped matrix; fix upstream, or work around in `pounce-feral` (classify as noise → `Singular`, no escalation spent) | **not recoverable here — not a count defect (measured)** (2026-10-22: the 0.13.0 iteration-4 matrix is singular to working precision — two scaled eigenvalues 1.6e-18 / 1.1e-15, next 7.7e-4 — and its exact count is 71, which FERAL 0.21, 0.20 and 0.18 all report on the dump; v0.12.0's iteration-4 matrix is a *different*, nonsingular one (min \|λ\| 2.4e-9, exact 73, all three FERALs 73); the noise rule is gated off by `min_piv` 5.95e-14 vs floor 3.33e-14; three pounce-feral workarounds measured, none admissible; see log). Next: **R2c** |
 | **R2e** | `pooling_rt2stp` iteration 4 (sibling of R2) | both versions accept a `δ_c`-free factor with min \|eig\| 2e-17 after the gh#592 walk-back | the walk-back accepts any factor FERAL calls `Success`; a numerically singular one is the source of the 6.4e16 step | **candidate** — refuse the withdrawal when the factor's `min_pivot_magnitude` is under the inertia trust floor; keeps `δ_c` instead of repairing the step downstream | todo (`needs vanderbei before merge` at best) |
 | **R3** | `dallass` (exact, x86) | 41 → **123** it (arm64 41 → 65, *issue*) | FERAL 0.21 path lands on `x = 0` of `|x|²·|x|^0.85` terms 12 times instead of 2; each is a non-finite Hessian → restoration entry; `5fc8c797` only stops the third from ending the solve | **partial** — (A) the Hessian is an evaluator artefact (`0·∞` from the product rule; the true second derivative of `|x|^2.85` at 0 is 0), fixable in `pounce-nl`; (B) R2 may move it; re-baseline after R2 | **done** (2026-10-22, option A: `.nl` reader merges `|e|^p·|e|^q`; exact 123 → **28** it, 12 → **0** restoration calls; lbfgs ErrorInStep/146 → SolveSucceeded/301; see log) |
 | **R4** | minima `circle_parabola_t0p5` mlsl | found 2 of 2 → **1** | #993 `91b6dcda`: `MLSL_GAMMA` 2 → 0.5; at 0.5 the extra launches re-find the first minimum and the stagnation counter (`patience 8`) stops the search | **partial** — no single gamma wins at seed 0 (table in R4); needs a 10-seed measurement; the structural stagnation rule is now its own item, **R4b** | todo |
@@ -77,7 +77,11 @@ to the rest of a family once one member recovers the target.
 1. **R2d** FERAL 71-vs-72 at pooling iteration 4 — a *measurement* first
    (dump one matrix, three counts), no pounce code unless the workaround
    route is taken; its answer tells R2b/R2c whether the count they are
-   working around is a defect or rounding.
+   working around is a defect or rounding. **Closed 2026-10-22: not a
+   count defect** — the matrix is singular to working precision (nullity
+   2), so for R2b/R2c the 71 is rounding, and the escalation the
+   too-few-negatives branch spends on it is spent on a matrix no pivot
+   rung can repair (§6 R2d log).
 2. **R2c** refuse refinement's `S` exit on a step that dwarfs the RHS — one
    comparison in one branch of `pd_full_space_solver.rs`; narrowest of the
    R2 family.
@@ -741,6 +745,19 @@ next, and R2d is `not a defect (measured)`); or the fix needs FERAL's
 sign-fallback band rule weakened (that rule exists to agree with
 MUMPS/SSIDS on `FBRAIN3LS_0839` — it is FERAL's own correctness contract,
 not ours to move).
+
+**Correction (R2d iteration, 2026-10-22).** Three facts above are wrong
+and the item log has the measured values: (1) v0.12.0 builds against
+**FERAL 0.18.0** (its `Cargo.lock`; 0.19 and 0.20 came in between, the
+0.20 → 0.21 bump is `97bc0f15`), so "FERAL 0.20 on v0.12.0's matrix" is
+0.18 on a matrix 0.13.0 never factors; (2) the pooling KKT is
+**150**-dimensional (`n_x + n_s = 78`, 72 constraint rows), not 46, so the
+trust floor is `150·ε = 3.33e-14`; (3) the "73 on v0.12.0" and "71 on
+0.13.0" are counts of **different matrices** — the two runs factor a
+bit-identical KKT only twice (the first two factors), and diverge at the
+first back-solve. Hypothesis (b) is refuted; (a) holds for the matrix
+but its consequence ("widen the noise rule") does not survive
+measurement. Verdict: case 3, `not a count defect (measured)`.
 
 ### R2c — refuse refinement's `S` exit when the step dwarfs the right-hand side
 
@@ -1630,6 +1647,35 @@ raise it. Docs-only iterations (skips) still run `cargo fmt --check`.
   refinement, per matrix), or refuse the `S` exit when the step's dual part
   is many orders above the right-hand side's. Both are trajectory changes
   across the NLP arm; they need the full sweep and the vanderbei A/B.
+- **R2d `pooling_rt2stp` iteration-4 count 71 of 72.** Not a FERAL count
+  defect and not recoverable in `pounce-feral`. The matrix FERAL 0.21
+  factors there (δ_x = δ_c = 0) has exactly two eigenvalues at working
+  precision (unscaled: faer +2.2e-17 / −3.8e-16, LAPACK −1.6e-15 /
+  +1.9e-15 — the two solvers disagree on their signs; in FERAL's
+  in-run scaling 1.6e-18 / 1.1e-15 against a next eigenvalue of 7.7e-4),
+  so 70, 71 and 72 negatives are all honest readings of it and the
+  remedy is `δ_c`, not a pivot rung. FERAL 0.21, 0.20 and 0.18 all report
+  71 on the dump at default settings and 70–72 across pivot thresholds,
+  scalings and orderings; v0.12.0's iteration-4 matrix is a different,
+  nonsingular one (min |λ| 2.4e-9; exact 73; all three versions 73). The
+  noise rule (`sub_floor_count_is_noise` would say "noise": deficit and
+  `n_threshold_fail_accepts = 1`) is never consulted because the in-run
+  `min_piv` 5.95e-14 is 1.8× the `150·ε = 3.33e-14` floor; replaying the
+  in-run ordering and scaling on the dump, FERAL 0.20/0.18 put that pivot
+  at 6.0e-15 (under the floor → `Singular`, no escalation). Three
+  workarounds measured on `p-prev` + probe and rejected (log): pinning the
+  floor (6e-14 → `SolvedToAcceptableLevel`/191 at −3580.0, not an optimum;
+  1e-13 → 140; 1e-12 → 495: chaotic, and the `n·ε` floor *is* gh#592's
+  fix); a floor relative to `max_piv` (pooling 471, `deb7` exact
+  114 → 606, lbfgs `dallass` solved → `ErrorInStep`); reporting every
+  deficit `Singular` regardless of the floor (pooling **162**, −4391.826,
+  3 restoration calls — but lbfgs `dallass` `SolveSucceeded`/301 →
+  `ErrorInStepComputation`/269). No upstream issue is warranted. Data and
+  the analysis program: `dev-notes/issue-1042-r2d/`. What it means for
+  the siblings: R2b's narrowing condition ("the inertia-branch escalation
+  was spent on a count the next factor refuted") is met at this exact
+  factor — the refactor after the escalation came back 70 and was routed
+  `Singular` by the noise rule.
 - **Anything that requires the benchmark corpus** (B1's benefit, B2, B3) is
   blocked on this machine: `POUNCE_BENCH_DATA` is unset and no
   `~/projects/pounce-bench-data` exists. The code half of B1 is still in
@@ -2021,3 +2067,137 @@ in memory and never reaches the `.nl` parser this changes).
 **Effect on other items.** None of R4 / B1 depend on R3. F1 (the
 `issue_592` margin) is untouched: `pooling_rt2stp` has no `abs`, and its
 sweep line did not move.
+
+### R2d — 2026-10-22 — not recoverable here: not a count defect (measured)
+
+Measured on x86_64 (4 CPUs, AVX2+FMA). `p-prev` = release `pounce` rebuilt
+from the tip `d3476a97` in a separate worktree with its own
+`CARGO_TARGET_DIR` (no cached binary reused). The probe builds (below) are
+`d3476a97` and `v0.12.0` = `a31dab9c` with a temporary env-gated dump in
+`FeralSolverInterface::factor`, each in its own worktree and target dir;
+neither is committed. `POUNCE_BENCH_DATA` unset, `bench_data_root`
+resolves nothing (checked once).
+
+**Reproduced (before anything else).** `p-prev`, both legs, the M1
+fixtures — identical to R3's after-table, so the baseline holds:
+
+| fixture (leg) | engine | status | it | q | resto calls / it | objective |
+|---|---|---|---|---|---|---|
+| pooling_rt2stp (exact) | nlp | SolveSucceeded | **492** | 3 | 24 / 106 | −3273.95499 |
+| pooling_rt2stp (lbfgs) | nlp | SolveSucceeded | 82 | 0 | 0 | −3273.954992 |
+| dallass (exact) | nlp | SolveSucceeded | 28 | 0 | 0 | −32393.225736 |
+| dallass (lbfgs) | nlp | SolveSucceeded | 301 | 1 | 1 / 3 | −32393.225738 |
+| deb7 (exact) | nlp | SolveSucceeded | 114 | 0 | 1 / 2 | 97.55993795 |
+| deb7 (lbfgs) | nlp | RestorationFailed | 1206 | 0 | 4 / 343 | 99.629 |
+| scaled_feasible_a (exact / lbfgs) | cvx-qp | SolveSucceeded | 200 / 200 | 0 | 0 | 0 |
+| circle_parabola_t0p5 (lbfgs) | nlp | SolveSucceeded | 77 | 4 | 0 | 8.155059653 |
+| scale_audit_retry_meyer3 (lbfgs) | nlp | SolveSucceeded | 112 | 5 | 0 | 3.8908e9 |
+
+F1 margin: 500 − 492 = 8 (unchanged).
+
+**The iteration-4 factor.** The probe (`POUNCE_R2D_DUMP=<dir>`) writes
+every factored KKT as Matrix Market plus FERAL's symbolic permutation and
+the scaling vector of the factor, and logs inertia, `min_piv`, `max_piv`,
+`n_tiny`, `n_threshold_fail_accepts`, pivot threshold and quality level;
+with `RUST_LOG=pounce::linsol=debug POUNCE_DBG_PERT=1` the `pounce-feral`
+verdicts and `[PERT] iter=` lines interleave. The run is unperturbed by it
+(492). The iteration-4 ladder is factors 10–15 of the run:
+
+| factor | δ | FERAL 0.21 inertia (+, −, 0) | `min_piv` | pounce-feral verdict |
+|---|---|---|---|---|
+| 10 | δ_x = δ_c = 0 | (79, **71**, 0) | **5.95e-14** | `WrongInertia` ("inertia mismatch": `min_piv` ≥ floor 3.33e-14, so the noise rule is not consulted) → too-few branch escalates (pivtol 1e-6 → 3.16e-5, the `q`) |
+| 11 | same matrix, refactored | (80, 70, 0) | 6.5e-15 | `Singular` (noise rule: deficit, flagged) → `δ_c` on |
+| 12–14 | `δ_c` on, `δ_x` 0 / 1e-4 / 1e-2 | (77, 73, 0) ×3 | 1.8e-3 | `WrongInertia` (surplus, clean factor — gh#1003) |
+| 15 | walk-back: `δ_x` 1e-4, `δ_c` 0 | (78, 72, 0) | 4.0e-14 | `Success` — R2's 6.4e16 step |
+
+On `v0.12.0` the iteration-4 ladder's first factor (its factor 14, also at
+`δ = 0`) reads (77, **73**, 0) with `min_piv` 1.9e-3 — a clean surplus.
+
+**Three counts, both matrices** (`dev-notes/issue-1042-r2d/`: the two
+dumps, the in-run permutation and scaling, and the analysis program — a
+standalone crate, `cargo run --release --features dense -- <mtx> [perm]
+[pivtol] [scal]`; edit its `feral = "=0.21.0"` to 0.20.0 / 0.18.0 for the
+other versions). Exact inertia from dense symmetric eigendecomposition
+(faer 0.24, cross-checked with LAPACK through numpy):
+
+| | 0.13.0 iteration-4 matrix | v0.12.0 iteration-4 matrix |
+|---|---|---|
+| order / ‖K‖∞ | 150 / 5.30e7 | 150 / 5.36e7 |
+| exact inertia (faer; LAPACK) | (79, **71**, 0); (79, 71, 0) | (77, **73**, 0); (77, 73, 0) |
+| smallest \|λ\|, unscaled | faer **+2.2e-17, −3.8e-16**; LAPACK −1.6e-15, +1.9e-15 (signs disagree); next 1.9e-9 | 2.4e-9, −3.8e-9 |
+| smallest \|λ\| of the in-run scaled matrix `DKD` | **1.6e-18, 1.1e-15**, next **7.7e-4** | — |
+| # \|λ\| < 150·ε·‖K‖∞ (1.8e-6) / < 1e-10·‖K‖∞ | 16 / 24 | 16 / 24 |
+| FERAL 0.21 / 0.20 / 0.18, fresh analysis, default (Auto, pivtol 1e-8) | 71 / 71 / 71 (min piv 3.0e-16) | 73 / 73 / 73 (min piv 7.8e-7) |
+| same, pivtol 1e-6, 1e-2, 0.1 · 0.5 | 0.21: 71, 71, 71 · **72**; 0.20 and 0.18: 71 throughout | 73 throughout, all versions |
+| same, Identity scaling (any pivtol) | (78, 71, **1**) all three versions | 73 |
+| same, InfNorm (pivtol ≤ 0.1 · 0.5) | 71 · 0.21 (79, 70, **1**), 0.20 and 0.18 71 | 73 |
+| **in-run ordering + scaling replayed**, pivtol 1e-6 | 0.21 (79, **71**, 0), `min_piv` **5.95e-14** — the in-run factor, exactly; 0.20 and 0.18 (80, **70**, 0), `min_piv` 6.0e-15 | — |
+| in-run replay, smallest pivots | 0.21: 5.95e-14, 1.06e-11, then 8.5e-6; 0.20/0.18: 6.0e-15, 3.2e-14, then 8.5e-6 | — |
+
+Readings:
+- **Hypothesis (b) is refuted.** FERAL 0.21's 71 is the exact count of
+  the matrix it was given; 0.20 and 0.18 agree at every setting but one.
+  The "73 on v0.12.0" is a different matrix: the two runs factor a
+  bit-identical KKT only for their first two factors (the dumps are
+  byte-equal), the first back-solve differs at rounding level (FERAL
+  0.18 vs 0.21), and the third factor already differs in 36 of 555
+  entries (max relative 1.1e-10). v0.12.0 also built against **0.18.0**,
+  not 0.20.
+- **(a) holds for the matrix:** it has a numerical null space of
+  dimension exactly 2 (two scaled eigenvalues at 1.6e-18 / 1.1e-15, then a
+  11-order gap), so 70, 71, 72 are all rounding — even the two dense
+  eigensolvers disagree on the signs. 72 is reached only if both null
+  directions round negative. Such a matrix is `Singular`'s case (`δ_c`),
+  and any quality escalation spent on it is wasted: no pivot rung changes
+  the rank.
+- **The guard that stopped the noise rule** is `min_piv < floor`:
+  `sub_floor_count_is_noise` would have returned `true` twice over
+  (deficit; `n_threshold_fail_accepts = 1`), but `min_piv` 5.95e-14 is
+  1.8× the `150·ε` floor. The LDLᵀ pivot is ~4 orders above the null
+  eigenvalue it carries, and 0.21 places it 10× higher than 0.20/0.18 do
+  on the same ordering and scaling (6.0e-15, which *is* under the floor).
+  Relative to the factor's own `max_piv` 2.7e4 both tiny pivots are at
+  ε (2.2e-18, 4.0e-16). That is a pivot-magnitude difference in a
+  rank-2-deficient factor — not a count error and not something FERAL's
+  contract promises to keep fixed — so no upstream issue is filed.
+
+**Workarounds in `pounce-feral`, measured (probe build, env-gated, not
+committed)** — the plan allows one only if it is justified:
+
+| variant | pooling exact | pooling lbfgs | dallass exact / lbfgs | deb7 exact / lbfgs |
+|---|---|---|---|---|
+| `p-prev` | 492, q 3, 24 resto | 82 | 28 / 301 solved | 114 / RestorationFailed 1206 |
+| `feral_inertia_pivot_floor=6e-14` (just above this pivot) | **SolvedToAcceptableLevel 191, −3580.0075** (not an optimum), 9 resto | 82 | — | — |
+| `feral_inertia_pivot_floor=1e-13` | 140, −3273.955, 4 resto | 82 | — | — |
+| `feral_inertia_pivot_floor=1e-12` (the pre-gh#592 value) | 495, 19 resto | 82 | — | — |
+| floor `150·ε·max(1, max_piv)` (scale-relative) | 471, −4391.826, 19 resto | 82 | 28 / **ErrorInStep 269** | **606** / 1206 |
+| every deficit → `Singular`, floor ignored | **162**, −4391.826, 3 resto, q 1 | 82 | 28 / **ErrorInStep 269** | 114 / 1206 |
+
+None is admissible. A fixed floor is chaotic in its value (a pin just
+above this pivot, 6e-14, loses the verdict; 1e-12 is gh#592's own rejected value,
+and widening it is the "weaken the fix" stop of §4). The scale-relative
+floor does not help pooling and costs `deb7` 5×. The deficit rule — the
+noise rule's own doc comment already argues "δ_c is the right remedy for
+a deficit whether or not the count is noise" — recovers pooling to
+v0.12.0's 162, but loses the lbfgs `dallass` solve that R3 won. It is a
+measurement of where the lever is, and it says the same as R2's
+counterfactual: the cheap lever is *not spending the escalation* on this
+factor, which is R2b's consumer-side shape (its narrowing condition — the
+refactor after the inertia-branch escalation came back `Singular` — is
+met here, factor 11), or repairing the kept step afterwards (R2c).
+
+**Verdict.** Case 3 of the item: the matrix is genuinely ambiguous, the
+count is not a FERAL defect, and the noise rule's silence is the
+consequence of a pivot-magnitude gate the measurement gives no principled
+way to move. No code changed. R2c is next per §2; R2b inherits the
+deficit-rule numbers above as an extra collateral guard (lbfgs `dallass`
+must stay `SolveSucceeded`/301).
+
+**Tests / sweep.** Docs-only commit (the plan, plus
+`dev-notes/issue-1042-r2d/`: two 150×150 dumps, the in-run permutation and
+scaling, and the standalone analysis crate, which is not a workspace
+member). `cargo fmt --all -- --check` clean. No regression test, mutation
+check, clippy run or fixture sweep: nothing compiled into pounce changed,
+so nothing can move, and M1 is not triggered (no landed R2x code). Not
+run: `benchmarks/vanderbei` (no corpus), arm64 (not available), Python
+tests (no code change).
