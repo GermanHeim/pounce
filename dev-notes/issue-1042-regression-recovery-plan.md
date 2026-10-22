@@ -41,7 +41,7 @@ iterations after a now-*correct* inertia report.
 
 | id | fixture / benchmark (leg) | v0.12.0 → 0.13.0 | suspected cause | recoverable? | Status |
 |---|---|---|---|---|---|
-| **R1** | `scaled_feasible_a` (exact and lbfgs) | nlp 22 / 19 it → cvx-qp **200 / 200** it, right answer | #1002 `f6a4e4c2`: HSDE endgame certifies the gh#293 equilibrated retry, whose loop never meets `pres < tol` (plateau 5.0e-6 → 5.7e-7) while `mu` runs to 1e-121; `Optimal` is stamped only by the post-loop `true_kkt_error` upgrade | **yes** — a stall-gated in-loop certificate, or a primal-residual floor that reads the stalled `pres` as the regularization floor it is | todo |
+| **R1** | `scaled_feasible_a` (exact and lbfgs) | nlp 22 / 19 it → cvx-qp **200 / 200** it, right answer | #1002 `f6a4e4c2`: HSDE endgame certifies the gh#293 equilibrated retry, whose loop never meets `pres < tol` (plateau 5.0e-6 → 5.7e-7) while `mu` runs to 1e-121; `Optimal` is stamped only by the post-loop `true_kkt_error` upgrade | **yes** — a stall-gated in-loop certificate, or a primal-residual floor that reads the stalled `pres` as the regularization floor it is | **not recoverable this way** (2026-10-22: hypothesis refuted — `m_eq = 0`, the plateau is a rounding floor, and the iterate is not optimal until it 165; see log + §5) |
 | **R2** | `pooling_rt2stp` (exact, x86) | 162 → **492** it (arm64: 109 → 242 total, *issue*) | FERAL 0.21 trajectory; `2599c2be` removed the latch (904 → 492); the remaining cost is the `δ_x` ladder climbing to `max_hessian_perturbation` with `δ_c` on (*issue*, unmeasured) | **partial** — the "stop the ladder once inertia is guaranteed" follow-up the issue names; must be measured first | todo |
 | **R3** | `dallass` (exact, x86) | 41 → **123** it (arm64 41 → 65, *issue*) | FERAL 0.21 path lands on `x = 0` of `|x|²·|x|^0.85` terms 12 times instead of 2; each is a non-finite Hessian → restoration entry; `5fc8c797` only stops the third from ending the solve | **partial** — (A) the Hessian is an evaluator artefact (`0·∞` from the product rule; the true second derivative of `|x|^2.85` at 0 is 0), fixable in `pounce-nl`; (B) R2 may move it; re-baseline after R2 | todo |
 | **R4** | minima `circle_parabola_t0p5` mlsl | found 2 of 2 → **1** | #993 `91b6dcda`: `MLSL_GAMMA` 2 → 0.5; at 0.5 the extra launches re-find the first minimum and the stagnation counter (`patience 8`) stops the search | **partial** — no single gamma wins at seed 0 (table in R4); needs a 10-seed measurement or a structural stagnation rule; non-blocking | todo |
@@ -130,6 +130,13 @@ to `Optimal`. The 5e-6 plateau is the static regularization floor
 `δ·‖ŷ‖` on the equality block in the equilibrated metric (the commit message
 of `f6a4e4c2` records that lowering the equality-block floor `delta_c` was
 tried and dropped because it cost QFORPLAN 33 → 139).
+
+**Correction (R1 iteration, 2026-10-22).** The last sentence above is wrong:
+`scaled_feasible_a` has no equality rows (`m_eq = 0`), every bit of `pres` is
+the inequality block, and `5.0e-6` is the rounding floor of `Gx + s − hτ` at
+`‖x̂‖ = 5e9` (≈ 4 ulp, as `ipm.rs`'s own gh#689 comment says). Through the
+plateau the iterate is not optimal either (`true_kkt_error` ≥ 23 until it
+150). The hypothesis below is refuted; see the R1 item log and §5.
 
 **Hypothesis.** The loop lacks a stop for an iterate that is optimal in the
 caller's coordinates but whose *homogeneous, equilibrated* primal residual is
@@ -620,6 +627,35 @@ raise it. Docs-only iterations (skips) still run `cargo fmt --check`.
   FERAL-trajectory, no mechanism named by anyone, and `cresc132` was already
   in the report's "genuine misses" list. Out of scope unless B1/B2 work
   happens to move them; record if it does.
+- **R1 `scaled_feasible_a` cvx-qp 200 / 200 it (both legs).** Not
+  recoverable with the planned stall-gated certificate or `cap_p` floor: the
+  instrumented loop (log below) shows the model has **no equality rows**
+  (`m_eq = 0`), the `pres = 5.0e-6` plateau is the rounding floor of
+  inequality rows at `‖x̂‖ = 5e9` (`ε·5e9 = 1.1e-6`; `cap_p = 7.1e-5`, which
+  `pres` already satisfies), and through the plateau the un-homogenized point
+  is **not optimal** (`true_kkt_error` 2.6e5 at it 20, 9.8e3 at it 120, 23 at
+  it 125). The earliest any in-loop certificate could stop is it 165, after a
+  blow-up (`inf_pr` 4.8e9 at it 140) and a 15-iteration recovery — 200 → ~166
+  at best, and dependent on that blow-up. Suggested follow-up issue: **"HSDE:
+  μ collapses ~8×/iteration while true complementarity crawls linearly once
+  τ ≈ 1e-10 (`scaled_feasible_a`)"** — numbers: retry it 20 → 120 `mu`
+  5.0e-19 → 3.2e-117 with `alpha = 1` every step while `true_comp` only goes
+  2.6e5 → 9.8e3 and `dres` falls by a constant 5.0e-7/iteration; the first
+  (unequilibrated) HSDE solve also ends at the 200 cap with
+  `true_kkt_error 0.149` (τ creeping linearly 1.6e-9 → 7.6e-8, `true_comp`
+  ∝ 1/τ), so the model costs 400 HSDE iterations in all; `max_iter=400`
+  converges at 230. Candidate shapes (both trajectory changes across the
+  whole convex arm, so both need `benchmarks/qp`, absent here): a centering
+  safeguard that keeps the `σμ` target from falling below the
+  *true*-slack complementarity when the internal `s` has decoupled from
+  `h − Gx̂` (the gh#689 decoupling), or an HSDE cold start sized to the
+  data the way the direct driver's cold seed is (gh#689: Mehrotra
+  recentering of the seed in the `run_ipm` starting-iterate builder,
+  `crates/pounce-convex/src/ipm.rs` ~4485, which took the direct solve of
+  this model 175 → 27 iterations). The `ipm.rs` doc comment on the direct
+  driver's scale-relative arm (~4303) already names this plateau as `≈ 4 ulp`
+  of a `5e9` cancellation — the plan's "regularization floor" reading was
+  wrong.
 - **Anything that requires the benchmark corpus** (B1's benefit, B2, B3) is
   blocked on this machine: `POUNCE_BENCH_DATA` is unset and no
   `~/projects/pounce-bench-data` exists. The code half of B1 is still in
@@ -643,3 +679,79 @@ tests not run, and the commit SHA.
 | deb7 (lbfgs) | nlp ErrorInStepComputation 1010 it | nlp RestorationFailed 1206 it (ladder kept, tot 1738) |
 | scaled_feasible_a (exact / lbfgs) | nlp SolveSucceeded 22 / 19 it, obj 1.1e-8 / 2.8e-7 | cvx-qp SolveSucceeded 200 / 200 it, obj 0, kkt 5e-19 |
 | circle_parabola_t0p5 mlsl seed 0 | found 2 in 11 solves (gamma 2) | found 1 in 9 solves (gamma 0.5), status converged |
+
+### R1 — 2026-10-22 — not recoverable this way (hypothesis refuted)
+
+Measured on x86_64 (4 CPUs, AVX2+FMA) with `p-prev` = release `pounce` built
+from `75e410d2` in a separate worktree with its own `CARGO_TARGET_DIR`.
+
+**Reproduced (before any change).**
+
+| run (`p-prev`) | engine | status | it | objective | final kkt |
+|---|---|---|---|---|---|
+| exact (default) | cvx-qp | SolveSucceeded | 200 | 0.0 | 5.0e-19 |
+| lbfgs (`hessian_approximation=limited-memory`) | cvx-qp | SolveSucceeded | 200 | 0.0 | 5.0e-19 |
+| `bound_relax_factor=0` (and `+ solver_selection=qp-ipm`) | cvx-qp | SolveSucceeded | 200 | 0.0 | 5.0e-19 |
+| `max_iter=400` | cvx-qp | SolveSucceeded | 230 | 0.0 | 0.0 |
+| `qp_equilibrate=no` / `qp_hsde=no` | nlp | SolveSucceeded | 22 | 1.1e-8 | 9.0e-9 |
+| `scaled_feasible_b` default | cvx-qp | SolveSucceeded | 36 | 0.0 | — |
+
+The `iterations[]` trace matches the plan (inf_pr 3.9e-5 at it 13, 5.000e-6
+from it 20 to ~125, alpha 1.0 throughout, blow-up to 4.8e9 around 130–150,
+recovery by 153, then 5.7e-7 ↔ 2.8e-6 to the cap).
+
+**Instrumented (temporary `eprintln!` in `hsde.rs`, reverted; not
+committed).** Per iteration: `pres` split into `ρ_y`/`ρ_z`, `dres`, `gap`,
+`comp_max`, `true_comp`, the stop flags, `base_reg`/`reg_eff`/`δ_c`/`δ_w`,
+and `true_kkt_error(prob, cone, x, y, z, τ)`. Both HSDE solves of the call
+were traced (the first, unequilibrated one also runs the full 200).
+
+| retry it | pres | dres | gap | comp_max | true_comp | `true_kkt_error` | mu | τ |
+|---|---|---|---|---|---|---|---|---|
+| 13 | 3.9e-5 | 2.9e-2 | 7.0e8 | 8.8e7 | 8.8e7 | 8.8e7 | 4.2e-13 | 1.0e-10 |
+| 20 | 5.0e-6 | 5.4e-5 | 6.6e2 | 1.0e2 | 2.6e5 | 2.6e5 | 5.0e-19 | 9.7e-11 |
+| 60 | 5.0e-6 | 3.2e-5 | 1.7e-2 | 8.3e-37 | 1.6e5 | 1.6e5 | 7.9e-57 | 9.8e-11 |
+| 120 | 5.0e-6 | 2.0e-6 | 1.5e-2 | 3.5e-97 | 9.8e3 | 9.8e3 | 3.2e-117 | 9.8e-11 |
+| 125 | 5.0e-6 | 4.6e-9 | 5.1e-4 | 7.2e-101 | 2.3e1 | 2.3e1 | 4.6e-121 | 9.8e-11 |
+| 140 | 4.8e9 | 1.2e-7 | 5.6e-2 | 5.6e-2 | 8.3 | 8.3 | 5.0e-23 | 9.8e-11 |
+| 160 | 5.7e-7 | 1.7e-8 | 5.8e-4 | 1.5e-4 | 0 | 1.5e-4 | 7.9e-25 | 9.8e-11 |
+| 165 | 1.1e-6 | 1.3e-10 | 1.3e-4 | 8.6e-9 | 0 | **8.6e-9** (first < tol) | 3.5e-29 | 9.8e-11 |
+| 199 | 8.5e-6 | 7.8e-15 | 3.2e-5 | 9.1e-21 | 0 | 9.1e-15 | 8.5e-42 | 9.8e-11 |
+
+- `m_eq = 0`, `m_ineq = 10`, `n = 4`: `ρ_y` is empty, so there is no
+  equality-block `δ·‖ŷ‖` floor; `δ_c` sits at 1e-10, `δ_w` at 1e-10,
+  `base_reg = reg_eff = 1e-14`, zero inertia retries, on every iteration.
+- `cap_p = 7.1e-5` (`64·ε·scale_p`, `scale_p ≈ 5e9`): `pres = 5e-6` already
+  satisfies it. What blocks a stop through it 20–125 is `comp_ok`
+  (`true_comp` 2.6e5 → 23 against `tol_true_comp = 1e-6`) — the point is
+  genuinely not optimal, with internal `s·z` at 1e-37…1e-101 while the true
+  row slack times `ẑ` is 1e5. `true_kkt_error` tracks `true_comp`.
+- After the blow-up the loop recovers and converges in ~15 iterations
+  (151 → 165); from 165 on `comp_ok` holds and `true_kkt_error < tol`, and
+  the stop is blocked only by `pres < tol` (unreachable, ~4 ulp) and by
+  `gap_rel` (the relative arm has no gap excuse).
+- First, unequilibrated HSDE solve: τ creeps linearly 1.6e-9 → 7.6e-8 over
+  it 19–199, `true_comp` falls ∝ 1/τ (7.2 → 0.149), `mu` ~1e-37; ends
+  `IterationLimit` at `true_kkt_error 0.149`, so the gh#293 retry runs.
+
+**Verdict.** Both planned shapes are refuted by the measurement: (1) a
+stall-gated in-loop `true_kkt_error` certificate cannot fire before it 165,
+because the plateau iterate is not optimal; it would buy 200 → ~166 at best,
+only by virtue of the chaotic blow-up-and-recovery, and against `ipm.rs`'s
+reasoning for judging only after the loop; (2) widening `cap_p` changes
+nothing, since `pres ≤ cap_p` already holds. The acceptance target (≤ 60 on
+both legs) is out of reach for either. The real cost is the 20–125 crawl —
+`mu` dividing by ~8 per full step while the true complementarity falls
+linearly — which is an HSDE centering / cold-start problem whose fix would
+move trajectories across the whole convex arm and needs `benchmarks/qp`
+(not on this machine). Follow-up issue and numbers in §5. Not touched, per
+the plan: `equilibrated_retry_budget`, the gh#535 decline rule, the gh#414 /
+gh#984 guards. The "3596 iterations" comments in `main.rs` were not
+re-measured and are left as they are.
+
+**Tests / sweep.** Docs-only commit: no code changed, so no regression test,
+no mutation check, no fixture sweep (nothing can move) and no `cargo test`;
+`cargo fmt --all -- --check` run (clean). Not run: `benchmarks/qp` (no
+corpus: `POUNCE_BENCH_DATA` unset, `bench_data_root` finds none), Python
+tests (no code change).
+
