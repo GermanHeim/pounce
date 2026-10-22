@@ -43,7 +43,7 @@ iterations after a now-*correct* inertia report.
 |---|---|---|---|---|---|
 | **R1** | `scaled_feasible_a` (exact and lbfgs) | nlp 22 / 19 it → cvx-qp **200 / 200** it, right answer | #1002 `f6a4e4c2`: HSDE endgame certifies the gh#293 equilibrated retry, whose loop never meets `pres < tol` (plateau 5.0e-6 → 5.7e-7) while `mu` runs to 1e-121; `Optimal` is stamped only by the post-loop `true_kkt_error` upgrade | **yes** — a stall-gated in-loop certificate, or a primal-residual floor that reads the stalled `pres` as the regularization floor it is | **not recoverable this way** (2026-10-22: hypothesis refuted — `m_eq = 0`, the plateau is a rounding floor, and the iterate is not optimal until it 165; see log + §5) |
 | **R2** | `pooling_rt2stp` (exact, x86) | 162 → **492** it (arm64: 109 → 242 total, *issue*) | FERAL 0.21 trajectory; `2599c2be` removed the latch (904 → 492); the remaining cost is the `δ_x` ladder climbing to `max_hessian_perturbation` with `δ_c` on (*issue*, unmeasured) | **partial** — the "stop the ladder once inertia is guaranteed" follow-up the issue names; must be measured first | **not recoverable this way** (2026-10-22: hypothesis refuted — 0 of 146 `WrongInertia` factors with `δ_c > 0` had a PD (1,1) block; the climb answers a genuinely indefinite `W`, λ_min down to −1.2e19 vs v0.12.0's −2.2e9; trigger found at iteration 4, see log + §5) |
-| **R3** | `dallass` (exact, x86) | 41 → **123** it (arm64 41 → 65, *issue*) | FERAL 0.21 path lands on `x = 0` of `|x|²·|x|^0.85` terms 12 times instead of 2; each is a non-finite Hessian → restoration entry; `5fc8c797` only stops the third from ending the solve | **partial** — (A) the Hessian is an evaluator artefact (`0·∞` from the product rule; the true second derivative of `|x|^2.85` at 0 is 0), fixable in `pounce-nl`; (B) R2 may move it; re-baseline after R2 | todo |
+| **R3** | `dallass` (exact, x86) | 41 → **123** it (arm64 41 → 65, *issue*) | FERAL 0.21 path lands on `x = 0` of `|x|²·|x|^0.85` terms 12 times instead of 2; each is a non-finite Hessian → restoration entry; `5fc8c797` only stops the third from ending the solve | **partial** — (A) the Hessian is an evaluator artefact (`0·∞` from the product rule; the true second derivative of `|x|^2.85` at 0 is 0), fixable in `pounce-nl`; (B) R2 may move it; re-baseline after R2 | **done** (2026-10-22, option A: `.nl` reader merges `|e|^p·|e|^q`; exact 123 → **28** it, 12 → **0** restoration calls; lbfgs ErrorInStep/146 → SolveSucceeded/301; see log) |
 | **R4** | minima `circle_parabola_t0p5` mlsl | found 2 of 2 → **1** | #993 `91b6dcda`: `MLSL_GAMMA` 2 → 0.5; at 0.5 the extra launches re-find the first minimum and the stagnation counter (`patience 8`) stops the search | **partial** — no single gamma wins at seed 0 (table in R4); needs a 10-seed measurement or a structural stagnation rule; non-blocking | todo |
 | **B1** | benchmark `qcqp1000-2c` (mittelmann) | 99 it / 28 s → 163 it / 112 s (*comment*) | pounce reuses the symbolic ordering FERAL chose for the least-squares multiplier-init matrix (W = 0, D = I) for every later KKT; `invalidate_symbolic_cache()` after the init factor halves factor time (*comment*) | **yes** for the code change; **measurement blocked** here (no benchmark corpus on this machine); a branch `perf/feral-symbolic-after-init` is said to be in progress — check `origin` first | todo |
 | B2 | benchmark `brainpc0/1` (vanderbei) | 58 it / 1.1 s → 1073 + 52 it / 75 s; 185 + 24 → 2117 + 24 (*comment*) | after a now-correct inertia at one iterate, pounce's restoration takes 811 of 1073 iterations (*comment*) | **unknown** — investigate only after B1 lands (B1 changes the trajectory) and only with the corpus | blocked |
@@ -946,3 +946,152 @@ engine split nlp 127, cvx-qp 92, cvx-qcqp 14, square-lm 1) only as the
 baseline for the counterfactual above; there is no new binary to diff
 against. Not run: `benchmarks/vanderbei` (no corpus: `POUNCE_BENCH_DATA`
 unset), Python tests (no code change), arm64 (not available).
+
+### R3 — 2026-10-22 — done (option A)
+
+Measured on x86_64 (4 CPUs, AVX2+FMA). `p-prev` = release `pounce` rebuilt
+from the tip `015a8fe4` in a separate worktree with its own
+`CARGO_TARGET_DIR` (the cached binary was not reused).
+
+**Reproduced (before any change).** R2 changed no code, so this is the
+baseline, and it reproduces exactly:
+
+| run (`p-prev`) | engine | status | it | objective | resto calls / it | q |
+|---|---|---|---|---|---|---|
+| exact | nlp | SolveSucceeded | 123 | −32393.225736 | 12 / 53 | 19 |
+| lbfgs | nlp | ErrorInStepComputation | 146 (2nd opinion `mu_strategy=adaptive`, tot 292) | −32388.508 | 2 / 8 | 4 |
+
+A temporary probe (an `eprintln!` at every `invoke_restoration_debugged`
+and at the step-failure entry that sets `resto_entry_nonfinite_w`; reverted)
+classifies the entries: on the exact leg **11 of 12** restoration entries
+are non-finite-`W` entries (iterations 4, 19, 29, 36, 42, 47, 58, 77, 83,
+99, 111); the 12th (iteration 106) is an ordinary line-search entry. The
+lbfgs leg has no non-finite-`W` entry (it never evaluates a Hessian); its
+two calls are at 136 and 140 and the base run fails at 146.
+
+`dallass.nl` is the only fixture in `crates/pounce-cli/tests/fixtures` that
+uses `abs` (`o15`) at all: 72 occurrences, every one directly under a
+`pow` (`o5`), written as `o2 (o2 k (o5 (o15 vK) n2)) (o5 (o15 vK) n0.85)`
+— i.e. `(k·|x|^2)·|x|^0.85`, so the two powers are **not** siblings: the
+first sits one `Mul` level down beside the coefficient. A peephole that
+matches only `Mul(Pow(Abs v, a), Pow(Abs v, b))` would not fire on this
+model at all.
+
+**Implementation (option A).** `merge_abs_pow_product` in
+`crates/pounce-nl/src/nl_reader.rs`, called from the `o2` arm of
+`parse_opcode`: when a factor `|e|^p` of the left operand meets a factor
+`|e|^q` of the right one — inspecting each operand and at most one `Mul`
+level inside it, which is what `(k·|x|^2)·|x|^0.85` needs — the pair becomes
+`|e|^(p+q)` and the other factors are kept, left-associated. Guards, each
+because without it the rewrite would change a *value*, not only a
+derivative: the base must be `abs(·)` (for a bare `e < 0`, `e^0.5·e^0.5` is
+NaN but `e^1` is not); both exponents must be finite literals `> 0` (`|0|^-1·|0|^2`
+is NaN, `|0|^1` is 0); `p + q` finite; the operands must be the same
+expression (`same_operand`: same `Var`, same `Cse` by pointer, bit-identical
+`Const`, or the same unary/binary operator over identical operands; anything
+else declines). With no match the node is the `Mul(a, b)` it always was, so a
+model without the pattern gets an identical tree. The rewrite sits on the
+`.nl` path only; in-memory `Expr` builders (Python, `from_expressions`) are
+untouched. No other code changed; the `5fc8c797` exemption is intact.
+
+**Value / derivative preservation (measured, temporary probe in
+`pounce-nl/tests/`, deleted).** `dallass.nl` vs an unmerged copy
+(`tests/data/dallass_kink_unmerged.nl`, below) through `NlTnlp` at 200
+perturbed points, 21 of them with some flows exactly 0: objective max
+relative difference 9.4e-16; gradient 3.5e-15 relative at `x ≠ 0` and
+bit-identical at `x = 0` (the unmerged tape's gradient already read 0 there);
+Hessian 3.2e-15 relative at every point where the unmerged one is finite, with
+an identical sparsity structure; the unmerged Hessian is non-finite at all 21
+zero-flow points, the merged one at none. So the only non-rounding change is
+`NaN → 0` in the Hessian at the kink.
+
+**After.**
+
+| run | engine | status | it | objective | resto calls / it | q |
+|---|---|---|---|---|---|---|
+| `p-base` v0.12.0 exact (baseline table) | nlp | SolveSucceeded | 41 | −32393.22574 | 2 / 14 | 6 |
+| `p-prev` exact | nlp | SolveSucceeded | 123 | −32393.225736 | 12 / 53 | 19 |
+| **new exact** | nlp | SolveSucceeded | **28** | −32393.225736 | **0** | 0 |
+| `p-base` lbfgs | nlp | ErrorInStepComputation | 213 | — | — | 7 |
+| `p-prev` lbfgs | nlp | ErrorInStepComputation | 146 (tot 292) | −32388.508 | 2 / 8 | 4 |
+| **new lbfgs** | nlp | **SolveSucceeded** | 301 (no 2nd opinion) | −32393.225738 | 1 / 3 | 1 |
+
+Exact: 29 Hessian evaluations (iterations + 1); the probe build shows no
+restoration entry of any kind. The trajectory is identical to `p-prev`'s
+through iteration 3 and departs at iteration 4, `p-prev`'s first
+non-finite-`W` entry. Acceptance (`≤ 60` it, `≤ 3` restoration calls, the
+optimum) met with margin, and below v0.12.0's 41.
+
+Lbfgs: never evaluates a Hessian, so the merge reaches it only through
+rounding-level differences in `f` and `∇f` (≤ 3.5e-15 relative, above). The
+iteration tables agree through iteration 1 and first differ at iteration 2
+(`inf_pr` 3.1e-13 vs 9.3e-7 after the same full step, objective in the 8th
+digit) — rounding amplified by the step solve on that iterate — after which
+the run solves instead of failing. Not an acceptance criterion; "must not get
+worse" holds (failing → solved, 292 → 301 total iterations).
+
+**Fixture sweep** (`scripts/sweep-fixtures.sh`, 234 fixture-legs, both legs,
+`p-prev` vs new), the full diff:
+
+```
+19c19
+< exact  dallass  nlp  SolveSucceeded          it=123  q=19  2nd=-                obj=-32393.22574
+---
+> exact  dallass  nlp  SolveSucceeded          it=28   q=0   2nd=-                obj=-32393.22574
+136c136
+< lbfgs  dallass  nlp  ErrorInStepComputation  it=146  q=4   2nd=kept(1),tot=292  obj=-32388.50847
+---
+> lbfgs  dallass  nlp  SolveSucceeded          it=301  q=1   2nd=-                obj=-32393.22574
+```
+
+- exact `dallass`: the 11 non-finite-`W` restoration entries are gone (the
+  fix's purpose); `q` 19 → 0 because those entries' escalations went with them.
+- lbfgs `dallass`: rounding-level change in `f`/`∇f` from the merged form
+  (above), trajectory departs at iteration 2; failing → solved at the optimum.
+- Every other line is unchanged, as it must be: `dallass.nl` is the only
+  fixture that contains `abs` (`o15`) at all, so no other tree can match.
+  Engine split unchanged both sides: nlp 127, cvx-qp 92, cvx-qcqp 14,
+  square-lm 1. No status loss, no engine move.
+
+**Tests.** New: three `pounce-nl` unit tests in `nl_reader.rs`
+(`abs_pow_product_is_merged_and_its_derivatives_are_finite_at_the_kink` —
+tree shape, `f`/`∇f`/`∇²f` against `3·|x|^2.85` at eight points incl.
+negative ones and `0`, exactly `(0, 0, 0)` at the kink, Hessian vs a central
+difference of the gradient at `±1e-3`;
+`abs_pow_near_misses_build_the_unmerged_tree` — different operands,
+negative and zero powers, bare base, variable exponent all build the exact
+`Mul(a, b)` tree; `abs_pow_merge_keeps_the_other_factors` — a pair one `Mul`
+level down on either side, an integer merged power, values unchanged), and
+`crates/pounce-cli/tests/issue_1042_dallass_abs_pow_merge.rs` (default exact
+run: solved, optimum, no second opinion, `≤ 60` it, `≤ 3` restoration calls).
+
+`nonfinite_hessian_restoration_strike.rs` no longer exercised the
+exemption on `dallass.nl` (no kink left), so per the plan it gets a model that
+still reaches a non-finite Hessian: `tests/data/dallass_kink_unmerged.nl`,
+`dallass.nl` with each `|x|^0.85` operand written `x + 0` (36 sites), which
+evaluates identically but declines the merge. It reproduces `p-prev`'s run
+bit for bit (123 it, 12 calls / 53 it, `q` 19, objective
+−32393.225736201894). It is in `tests/data/`, not `tests/fixtures/`, so the
+sweep does not double-count it. A `sqrt(x)`-at-0 model was not needed.
+
+Mutation checks: (1) `o2` back to a plain `Mul` — the first and third unit
+tests fail on the tree shape, and with the shape assertion removed the first
+fails numerically (`x=0: 0 0 NaN`, i.e. Hessian NaN); the R3 CLI pin fails
+(`dallass took 123 iterations`); (2) the `5fc8c797` exemption reverted
+(`if true || !entry_nonfinite_w`) — the strike test fails (`dallass did not
+solve; … counted as a gh#274 strike`) on the unmerged copy, while the R3 pin
+still passes (the merged model never enters that branch). Both restored.
+
+Run: `cargo fmt --all -- --check` (clean); `cargo clippy --workspace
+--exclude pounce-hsl --all-targets -- -D clippy::correctness -D
+clippy::suspicious` (clean; one pre-existing unused-import warning in
+`pounce-restoration`, untouched); `cargo test -p pounce-nl -p pounce-cli
+--no-fail-fast` (170 test binaries, 1160 passed, 0 failed, 1 ignored); the sweep above. Not run: `dallasl` /
+`dallasm` and `benchmarks/vanderbei` (no corpus on this machine:
+`POUNCE_BENCH_DATA` unset); arm64 (not available — the issue's arm64
+41 → 65 is not re-measured); Python tests (the Python frontend builds `Expr`
+in memory and never reaches the `.nl` parser this changes).
+
+**Effect on other items.** None of R4 / B1 depend on R3. F1 (the
+`issue_592` margin) is untouched: `pooling_rt2stp` has no `abs`, and its
+sweep line did not move.
