@@ -48,7 +48,7 @@ iterations after a now-*correct* inertia report.
 | **R1e** | `scaled_feasible_a` (sibling of R1) | retry it 165 → 200 is certifiable (`true_kkt 8.6e-9`) but the loop waits on `pres < tol`, unreachable at 4 ulp of `5e9` | stopping test has no exit for an iterate whose only unmet term is pinned at its rounding floor | **partial** — ≤ 17% of this model's count; R1 declined it as insufficient alone; kept as a sibling because it composes with R1b/c and may have corpus-wide value | todo (lowest priority in the family) |
 | **R2** | `pooling_rt2stp` (exact, x86) | 162 → **492** it (arm64: 109 → 242 total, *issue*) | FERAL 0.21 trajectory; `2599c2be` removed the latch (904 → 492); the remaining cost is the `δ_x` ladder climbing to `max_hessian_perturbation` with `δ_c` on (*issue*, unmeasured) | **partial** — the "stop the ladder once inertia is guaranteed" follow-up the issue names; must be measured first | **not recoverable this way** (2026-10-22: hypothesis refuted — 0 of 146 `WrongInertia` factors with `δ_c > 0` had a PD (1,1) block; the climb answers a genuinely indefinite `W`, λ_min down to −1.2e19 vs v0.12.0's −2.2e9; trigger found at iteration 4, see log + §5). Alternate routes: **R2b–R2e** below |
 | **R2b** | `pooling_rt2stp` (exact, x86; sibling of R2) | 492 it; blanket counterfactual 492 → 109 with 19 collateral lines | one `augsys_improved` flag per matrix is shared by the inertia ladder's too-few-negatives branch and iterative refinement; at iteration 4 the former spends it on a 71-vs-72 count and refinement keeps a 6.4e16 step | **candidate** — one escalation budget per consumer per matrix; must avoid the counterfactual's collateral (lbfgs `circle_parabola_t0p5` 8.155 → 10.428, lbfgs `scale_audit_retry_meyer3` 112 → 152, 15 lines escalating to cap) | todo (`needs vanderbei before merge` at best) |
-| **R2c** | `pooling_rt2stp` (exact, x86; sibling of R2) | iteration-4 refinement stalls at ratio 1.6e-8 and takes the `S` exit with a dual part of 6.4e16 | `compute_residual_ratio` caps its normalizer at `1e6·‖rhs‖`, so the `S` test (ratio < `residual_ratio_singular` = 1e-5) is blind to a step many orders above the RHS | **candidate** — refuse `S` (take `s` → `perturb_for_singular`) when `‖res‖∞ > κ·‖rhs‖∞`; the narrowest of the family | todo (`needs vanderbei before merge` at best) |
+| **R2c** | `pooling_rt2stp` (exact, x86; sibling of R2) | iteration-4 refinement stalls at ratio 1.6e-8 and takes the `S` exit with a dual part of 6.4e16 | `compute_residual_ratio` caps its normalizer at `1e6·‖rhs‖`, so the `S` test (ratio < `residual_ratio_singular` = 1e-5) is blind to a step many orders above the RHS | **candidate** — refuse `S` (take `s` → `perturb_for_singular`) when `‖res‖∞ > κ·‖rhs‖∞`; the narrowest of the family | **not recoverable this way (measured)** (2026-10-22: a step dwarfing the RHS is the *ordinary* `S` exit, not the tail — 135 of the corpus's 188 `S` exits are above `κ = 1e6`, 90 above `1e12`, and the pooling iteration-4 exit (2.2e14) ranks 62nd; keeping the rule under the item's 10% stop needs `κ ≥ 4.7e20`. Counterfactual at `κ = 1e6` / `1e12`: pooling's base solve is lost (`ErrorInStep` 795 / 173, rescued by the `mu_strategy=adaptive` rung at 140), exact `circle_parabola_t1p5` Infeasible → MaxIter 3000, and the `s` path never reinstates `δ_c` (six uncertified `Singular`s climb `δ_x` to 8.7 at `δ_c = 0`); see log). Next: **R2b** |
 | **R2d** | `pooling_rt2stp` iteration 4 (sibling of R2) | FERAL 0.21 reports 71 negatives, 72 required; FERAL 0.20 reported 73 on v0.12.0's matrix | either an inertia-count defect in FERAL (crates.io dependency `feral = 0.21.0`, upstream jkitchin/feral — not vendored) or a genuinely ambiguous near-singular matrix | **measure first** — exact count vs both FERAL counts on the dumped matrix; fix upstream, or work around in `pounce-feral` (classify as noise → `Singular`, no escalation spent) | **not recoverable here — not a count defect (measured)** (2026-10-22: the 0.13.0 iteration-4 matrix is singular to working precision — two scaled eigenvalues 1.6e-18 / 1.1e-15, next 7.7e-4 — and its exact count is 71, which FERAL 0.21, 0.20 and 0.18 all report on the dump; v0.12.0's iteration-4 matrix is a *different*, nonsingular one (min \|λ\| 2.4e-9, exact 73, all three FERALs 73); the noise rule is gated off by `min_piv` 5.95e-14 vs floor 3.33e-14; three pounce-feral workarounds measured, none admissible; see log). Next: **R2c** |
 | **R2e** | `pooling_rt2stp` iteration 4 (sibling of R2) | both versions accept a `δ_c`-free factor with min \|eig\| 2e-17 after the gh#592 walk-back | the walk-back accepts any factor FERAL calls `Success`; a numerically singular one is the source of the 6.4e16 step | **candidate** — refuse the withdrawal when the factor's `min_pivot_magnitude` is under the inertia trust floor; keeps `δ_c` instead of repairing the step downstream | todo (`needs vanderbei before merge` at best) |
 | **R3** | `dallass` (exact, x86) | 41 → **123** it (arm64 41 → 65, *issue*) | FERAL 0.21 path lands on `x = 0` of `|x|²·|x|^0.85` terms 12 times instead of 2; each is a non-finite Hessian → restoration entry; `5fc8c797` only stops the third from ending the solve | **partial** — (A) the Hessian is an evaluator artefact (`0·∞` from the product rule; the true second derivative of `|x|^2.85` at 0 is 0), fixable in `pounce-nl`; (B) R2 may move it; re-baseline after R2 | **done** (2026-10-22, option A: `.nl` reader merges `|e|^p·|e|^q`; exact 123 → **28** it, 12 → **0** restoration calls; lbfgs ErrorInStep/146 → SolveSucceeded/301; see log) |
@@ -84,7 +84,11 @@ to the rest of a family once one member recovers the target.
    rung can repair (§6 R2d log).
 2. **R2c** refuse refinement's `S` exit on a step that dwarfs the RHS — one
    comparison in one branch of `pd_full_space_solver.rs`; narrowest of the
-   R2 family.
+   R2 family. **Closed 2026-10-22: not recoverable this way** — a step
+   6–37 orders above the RHS is what most `S` exits in the corpus look
+   like (135 of 188 above `1e6`), so the rule is a blanket change; and on
+   pooling the `s` path it routes to climbs `δ_x` with `δ_c` withdrawn
+   instead of reinstating `δ_c`, which is R2e's lever (§6 R2c log).
 3. **R2b** separate escalation budgets for the inertia branch and
    refinement — the shape the R2 log named first; wider than R2c (the
    counterfactual's 19-line collateral is the thing to avoid).
@@ -1676,6 +1680,38 @@ raise it. Docs-only iterations (skips) still run `cargo fmt --check`.
   was spent on a count the next factor refuted") is met at this exact
   factor — the refactor after the escalation came back 70 and was routed
   `Singular` by the noise rule.
+- **R2c refuse refinement's `S` exit when `‖res‖∞ > κ·‖rhs‖∞`.** Not
+  recoverable as a narrow rule: the measure-first histogram (log) puts
+  the pooling iteration-4 exit (`‖res‖/‖rhs‖` = 2.2e14) 62nd of the
+  corpus's 188 `S` exits; 135 sit above `κ = 1e6` (the normalizer's own
+  `max_cond`), 90 above `1e12`, and the item's "> 10% of `S` exits" stop
+  is cleared only at `κ ≥ 4.7e20`, six orders above the target. The
+  `S` exit's capped ratio is blind to step size *by design* on every
+  restoration-heavy model in the corpus, not on pooling alone. The
+  env-gated counterfactual at `κ = 1e6` moves 15 sweep lines (at `1e12`,
+  11) — pooling's base solve fails (`ErrorInStepComputation` 795; 173 at
+  `1e12`) and is promoted from the `mu_strategy=adaptive` rung at 140; exact
+  `circle_parabola_t1p5` `InfeasibleProblemDetected`/603 →
+  `MaximumIterationsExceeded`/3000; lbfgs `scale_audit_retry_meyer3`
+  `SolveSucceeded`/112 → `SolvedToAcceptableLevel`/286 and lbfgs
+  `circle_parabola_t0p5` 8.155 → 10.428 (two of R2's three counterfactual
+  guards, at `1e6`). The mechanism behind the pooling loss: the `s` path
+  re-enters the ladder, `δ_c` goes on for three `WrongInertia(73)` rungs,
+  is withdrawn again by the gh#592 walk-back, and six `δ_c`-free factors
+  that the gh#540 noise rule reports as *uncertified* `Singular` (70–71
+  negatives, sub-floor pivots) climb `δ_x` 2.7e-4 → 8.7 — gh#981
+  reinstates `δ_c` only on a *certified* `Singular`, so it never comes
+  back. That is the plan's own stop ("the `s` path overflows `δ_c` on
+  pooling instead of reinstating it — then this is R2e's problem").
+  Suggested follow-up issue: **"PD solver: refinement's `S` exit keeps a
+  step 1e6–1e37 × the RHS on most restoration-heavy solves; the capped
+  residual ratio cannot tell it from a good one"** — numbers: 135 of 188
+  corpus `S` exits above `1e6·‖rhs‖`; pooling iteration 4 at 2.2e14; the
+  blanket refusal loses a base solve and a status (15 lines). One
+  by-product worth the owner's look: lbfgs `square_flowsheet_resto`'s
+  hidden cost falls 6008 → 51 total iterations at `κ = 1e12` (same
+  `square-lm` verdict; its base solve ends `RestorationFailed`/22 instead
+  of running to the 3000 cap).
 - **Anything that requires the benchmark corpus** (B1's benefit, B2, B3) is
   blocked on this machine: `POUNCE_BENCH_DATA` is unset and no
   `~/projects/pounce-bench-data` exists. The code half of B1 is still in
@@ -2201,3 +2237,199 @@ check, clippy run or fixture sweep: nothing compiled into pounce changed,
 so nothing can move, and M1 is not triggered (no landed R2x code). Not
 run: `benchmarks/vanderbei` (no corpus), arm64 (not available), Python
 tests (no code change).
+
+### R2c — 2026-10-22 — not recoverable this way (measured)
+
+Measured on x86_64 (4 CPUs, AVX2+FMA). `p-prev` = release `pounce` rebuilt
+from the tip `9a9723f9` in a separate worktree with its own
+`CARGO_TARGET_DIR`. The probe build is the same tip with a temporary,
+env-gated `eprintln!` at the `quit_refinement` decision in
+`PdFullSpaceSolver::solve` (`POUNCE_R2C_PROBE`: exit letter, iteration,
+`‖rhs‖∞`, `‖res‖∞`, `‖resid‖∞`, ratio) and, for the counterfactual, the
+item's rule behind `POUNCE_R2C_KAPPA=<κ>` (refuse `S` when `‖res‖∞ >
+κ·‖rhs‖∞`, take `s`, info letter `b`); neither is committed. With neither
+variable set the probe build's sweep diffs **empty** against `p-prev`.
+`POUNCE_BENCH_DATA` unset, `bench_data_root` resolves nothing (checked
+once).
+
+**Reproduced (before anything else).** `p-prev`, the M1 fixtures, both
+legs — identical to the R2d table, so the baseline holds:
+
+| fixture (leg) | engine | status | it | q | resto calls / it | objective |
+|---|---|---|---|---|---|---|
+| pooling_rt2stp (exact) | nlp | SolveSucceeded | **492** | 3 | 24 / 106 | −3273.95499 |
+| pooling_rt2stp (lbfgs) | nlp | SolveSucceeded | 82 | 0 | 0 | −3273.954992 |
+| dallass (exact) | nlp | SolveSucceeded | 28 | 0 | 0 | −32393.22574 |
+| dallass (lbfgs) | nlp | SolveSucceeded | 301 | 1 | 1 / 3 | −32393.22574 |
+| deb7 (exact) | nlp | SolveSucceeded | 114 | 0 | 1 / 2 | 97.55993795 |
+| deb7 (lbfgs) | nlp | RestorationFailed | 1206 (kept, tot 1738) | 0 | 4 / 343 | 99.62936037 |
+| scaled_feasible_a (exact / lbfgs) | cvx-qp | SolveSucceeded | 200 / 200 | 0 | 0 | 0 |
+| scaled_feasible_b (exact / lbfgs) | cvx-qp | SolveSucceeded | 36 / 36 | 0 | 0 | 0 |
+| circle_parabola_t0p5 (lbfgs) | nlp | SolveSucceeded | 77 (`feral_scaling=mc64`, tot 125) | 4 | 0 | 8.155059653 |
+| scale_audit_retry_meyer3 (lbfgs) | nlp | SolveSucceeded | 112 | 5 | 0 | 3890764353 |
+
+F1 margin: 500 − 492 = 8 (unchanged). The iteration-4 exit reproduces as
+the R2 log describes: `exit=S iter=4 ‖rhs‖ 2.908e2 ‖res‖ 6.380e16
+‖resid‖ 4.634 ratio 1.593e-8`, i.e. `‖res‖/‖rhs‖` = **2.19e14**.
+
+**Measure first: every refinement exit in the corpus** (234 fixture-legs,
+both legs, second-opinion rungs and restoration sub-solves included —
+they share the code path). 1024 exits: 480 `s`, **188 `S`** (on 20
+fixture-legs, 115 of them on legs that end `SolveSucceeded`), 178 `q`, 178
+second stalls on the same matrix (`pretend_singular_last_time`, no
+letter). `‖res‖/‖rhs‖` at the 188 `S` exits, by decade:
+
+| decade | ≤1e-1 | 1e0–1e4 | 1e5 | 1e6–1e9 | 1e10–1e13 | 1e14–1e17 | 1e18–1e21 | ≥ 1e22 |
+|---|---|---|---|---|---|---|---|---|
+| `S` exits | 24 | 24 | 5 | 33 | 38 | 27 | 25 | 12 |
+
+| κ | `S` exits the rule would refuse | share | fixture-legs |
+|---|---|---|---|
+| 1e6 (`max_cond`) | 135 | 72% | 17 |
+| 1e8 | 104 | 55% | 14 |
+| 1e12 | 90 | 48% | 13 |
+| 1e14 | 64 | 34% | — |
+| 2.19e14 (just under pooling it 4) | 62 | 33% | — |
+| 4.7e20 (the 90th percentile) | 19 | 10% | — |
+
+`S` exits per fixture-leg: lbfgs `square_flowsheet_resto` 56, lbfgs
+`issue880_sigma_uncertified` 17, exact `pooling_rt2stp` 16, lbfgs
+`scale_audit_retry_meyer3` 15, exact `circle_parabola_t1p5` 13, lbfgs
+`infeasible_square_scaled_1em4` 13, lbfgs `degenerate_start_infeasible`
+10, lbfgs `eigena2` 8, exact `infeasible_square_scaled_1em4` 8, exact
+`issue_508_infeasible_gap_1em4` 6, lbfgs `cresc4` 5, exact
+`issue_508_infeasible_gap_1em2` 4, lbfgs `issue981_water_main` 4, lbfgs
+`circle_parabola_t1p5` 3, lbfgs `issue_508_infeasible_gap_1em2` 3, exact /
+lbfgs `circle_parabola_t0p5` 2 / 2, exact `square_flowsheet_resto`, lbfgs
+`eigmaxa`, lbfgs `issue_508_infeasible_gap_1em4` 1 each. Pooling alone has
+14 `S` exits above `1e12` besides iteration 4's.
+
+So the hypothesis' premise — "such exits are rare", the pooling exit "far
+in the tail" — is false. A step 1e6–1e37 times the RHS is what an `S`
+exit *usually* looks like on the corpus's restoration-heavy and
+infeasible models: once `‖res‖ > 1e6·‖rhs‖` the capped ratio no longer
+reads step size at all, on every model, not only at pooling iteration 4.
+The pooling exit ranks 62nd of 188. The item's stop — "the rule fires on
+more than ~10% of the baseline corpus's `S` exits" — holds at every κ
+that could reach the target exit; κ would have to be ≥ 4.7e20.
+
+**Counterfactual (env-gated probe, not committed).** The rule as specified,
+at the two candidate κ:
+
+| run | pooling exact | it-4 exit | pooling lbfgs |
+|---|---|---|---|
+| `p-prev` | SolveSucceeded 492, q 3, 24 resto, −3273.95499 | `S` | 82 |
+| κ = 1e6 | **base `ErrorInStepComputation`/795**, promoted by `mu_strategy=adaptive` 140, tot 935, −3273.954989 | `b` | 82 |
+| κ = 1e12 | **base `ErrorInStepComputation`/173**, promoted by `mu_strategy=adaptive` 140, tot 313 | `b` | 82 |
+| κ = 1e14 | SolveSucceeded 232, q 4, 16 resto, −3273.954992 | `b` | — |
+| κ = 3e14 (does **not** fire at it 4) | SolveSucceeded 109, q 4, 3 resto, −4391.826 | `S` | — |
+
+The last two rows show the pooling count is chaotic in κ and is not
+governed by the iteration-4 decision: the best result comes from a κ that
+leaves iteration 4 alone and refuses only later, larger exits.
+
+What the `s` path does at iteration 4 (`POUNCE_DBG_PERT=1
+RUST_LOG=debug`, κ = 1e6): the pretend-singular re-solve re-enters the
+ladder, `δ_c` goes back on for three rungs (`WrongInertia`, 73 negatives,
+`min_piv` 1.8e-3, `δ_x` 0 / 3.3e-5 / 2.7e-4), the gh#592 walk-back
+withdraws it again, and six `δ_c`-free factors — each 70–71 negatives with
+a sub-floor pivot, reported **uncertified** `Singular` by the gh#540 noise
+rule — climb `δ_x` 2.7e-4 → **8.7** (×8 per rung). gh#981 reinstates `δ_c`
+only on a *certified* `Singular`, so `δ_c` stays 0; iteration 5's step is
+taken at `δ_x = 8.7`, and the run goes on to blow up anyway (`lg(rg)` 3.2 at
+iteration 6, restoration at 13). The plan's stop — "the `s` path overflows
+`δ_c` on pooling instead of reinstating it (then this is R2e's problem)" —
+holds in the form "never reinstates it".
+
+Full sweep, `p-prev` vs counterfactual. κ = 1e6, 15 lines:
+
+```
+< exact circle_parabola_t1p5 nlp InfeasibleProblemDetected it=603 q=0 2nd=kept(3),tot=4190 obj=10
+> exact circle_parabola_t1p5 nlp MaximumIterationsExceeded it=3000 q=12 2nd=kept(1),tot=6000 obj=10.556119
+< exact infeasible_square_scaled_1em4 nlp InfeasibleProblemDetected it=17 q=3 2nd=kept(4),tot=74 obj=0.1250000024
+> exact infeasible_square_scaled_1em4 nlp InfeasibleProblemDetected it=14 q=1 2nd=kept(4),tot=65 obj=0.1250000024
+< exact issue_508_infeasible_gap_1em2 nlp InfeasibleProblemDetected it=114 q=0 2nd=kept(3),tot=290 obj=25
+> exact issue_508_infeasible_gap_1em2 nlp InfeasibleProblemDetected it=640 q=0 2nd=kept(3),tot=1652 obj=25
+< exact issue_508_infeasible_gap_1em4 nlp InfeasibleProblemDetected it=441 q=0 2nd=kept(3),tot=982 obj=25
+> exact issue_508_infeasible_gap_1em4 nlp InfeasibleProblemDetected it=384 q=0 2nd=kept(3),tot=1136 obj=25
+< exact pooling_rt2stp nlp SolveSucceeded it=492 q=3 2nd=- obj=-3273.95499
+> exact pooling_rt2stp nlp SolveSucceeded it=140 q=3 2nd=mu_strategy=adaptive@Error_In_Step_Computation/795,tot=935 obj=-3273.954989
+< exact square_flowsheet_resto nlp SolveSucceeded it=95 q=4 2nd=- obj=0
+> exact square_flowsheet_resto nlp SolveSucceeded it=57 q=1 2nd=- obj=0
+< lbfgs circle_parabola_t0p5 nlp SolveSucceeded it=77 q=4 2nd=feral_scaling=mc64@Infeasible_Problem_Detected/48,tot=125 obj=8.155059653
+> lbfgs circle_parabola_t0p5 nlp SolveSucceeded it=106 q=9 2nd=feral_scaling=mc64@Infeasible_Problem_Detected/48,tot=154 obj=10.42794559
+< lbfgs circle_parabola_t1p5 nlp InfeasibleProblemDetected it=66 q=10 2nd=kept(4),tot=272 obj=1.018446456
+> lbfgs circle_parabola_t1p5 nlp InfeasibleProblemDetected it=66 q=10 2nd=kept(4),tot=330 obj=1.018446456
+< lbfgs eigena2 nlp ErrorInStepComputation it=239 q=3 2nd=kept(1),tot=478 obj=82.50000002
+> lbfgs eigena2 nlp ErrorInStepComputation it=236 q=5 2nd=kept(1),tot=472 obj=82.5
+< lbfgs infeasible_square_scaled_1em4 nlp InfeasibleProblemDetected it=24 q=1 2nd=kept(4),tot=114 obj=0.1250000027
+> lbfgs infeasible_square_scaled_1em4 nlp InfeasibleProblemDetected it=19 q=1 2nd=kept(4),tot=95 obj=0.1679925196
+< lbfgs issue880_sigma_uncertified nlp SolveSucceeded it=67 q=8 2nd=- obj=-2.205e+12
+> lbfgs issue880_sigma_uncertified nlp SolveSucceeded it=32 q=3 2nd=- obj=-2.205e+12
+< lbfgs issue_508_infeasible_gap_1em2 nlp InfeasibleProblemDetected it=65 q=5 2nd=kept(4),tot=284 obj=25
+> lbfgs issue_508_infeasible_gap_1em2 nlp InfeasibleProblemDetected it=65 q=5 2nd=kept(4),tot=302 obj=25
+< lbfgs issue_508_infeasible_gap_1em4 nlp InfeasibleProblemDetected it=79 q=1 2nd=kept(4),tot=346 obj=25
+> lbfgs issue_508_infeasible_gap_1em4 nlp InfeasibleProblemDetected it=79 q=1 2nd=kept(4),tot=362 obj=25
+< lbfgs scale_audit_retry_meyer3 nlp SolveSucceeded it=112 q=5 2nd=- obj=3890764353
+> lbfgs scale_audit_retry_meyer3 nlp SolvedToAcceptableLevel it=286 q=12 2nd=- obj=3890764351
+< lbfgs square_flowsheet_resto square-lm SolveSucceeded it=8 q=0 2nd=square_system_lm@Maximum_Iterations_Exceeded/3000,tot=6008 obj=0
+> lbfgs square_flowsheet_resto square-lm SolveSucceeded it=8 q=0 2nd=square_system_lm@Restoration_Failed/22,tot=3039 obj=0
+```
+
+κ = 1e12, 11 lines: the same exact `circle_parabola_t1p5` (→ MaxIter
+3000), exact `infeasible_square_scaled_1em4`, both exact and both lbfgs
+`issue_508_*`, lbfgs `circle_parabola_t1p5` and lbfgs
+`infeasible_square_scaled_1em4` lines as above, byte for byte; plus
+
+```
+> exact pooling_rt2stp nlp SolveSucceeded it=140 q=3 2nd=mu_strategy=adaptive@Error_In_Step_Computation/173,tot=313 obj=-3273.954989
+> lbfgs eigena2 nlp ErrorInStepComputation it=159 q=4 2nd=kept(1),tot=318 obj=82.5
+> lbfgs square_flowsheet_resto square-lm SolveSucceeded it=8 q=0 2nd=square_system_lm@Restoration_Failed/22,tot=51 obj=0
+```
+
+(lbfgs `circle_parabola_t0p5`, lbfgs `scale_audit_retry_meyer3`, lbfgs
+`issue880_sigma_uncertified` and exact `square_flowsheet_resto` do not move
+at `1e12`.) Every moved line is a fixture-leg with `S` exits above κ in
+the histogram, so each move is the rule firing, not noise. Read against
+the item's acceptance and stops: pooling's base solve is **lost** at both
+κ (the reported 140 is a second-opinion rung's); exact
+`circle_parabola_t1p5` loses its `InfeasibleProblemDetected` verdict at
+both (more than one status loss at `1e6`, with lbfgs `meyer3`
+`SolveSucceeded` → `SolvedToAcceptableLevel`); at `1e6` two of R2's three
+counterfactual guards break (lbfgs `circle_parabola_t0p5` 8.155 → 10.428,
+lbfgs `meyer3` 112 → 286 at `q = 12`) and exact `circle_parabola_t1p5`
+runs `q` to the cap of 12. No `nlp → square-lm` move; engine split
+unchanged (nlp 127, cvx-qp 92, cvx-qcqp 14, square-lm 1); `dallass`,
+`deb7` and `scaled_feasible_*` lines do not move at either κ. The two
+lines that improve — exact `square_flowsheet_resto` 95 → 57 and lbfgs
+`issue880_sigma_uncertified` 67 → 32 at `1e6`; lbfgs
+`square_flowsheet_resto` tot 6008 → 51 at `1e12` — are recorded in §5 for
+the owner and do not change the verdict.
+
+**Verdict.** Refuted at the measure-first step and confirmed by the
+counterfactual: three of the item's stops hold (fires on 33–72% of `S`
+exits at any κ that reaches the target; more than one status loss; the
+`s` path does not reinstate `δ_c`). No code changed; the follow-up issue
+(title + numbers) is in §5. R2b is next per §2.
+
+**What it means for the siblings.** (1) R2b: the refinement-side
+escalation it would grant fires at the same 188 `S` / 480 `s` stalls
+measured here, so its measure-first count of "matrices where the inertia
+branch spent the flag and refinement later stalled" can be read off the
+same probe (`exit=S`/`s` whose matrix carried an inertia-branch `q`); the
+pooling iteration-4 stall is one of them. (2) R2e: the trace above is
+direct evidence for its premise — at iteration 4 every `δ_c`-free factor
+after the walk-back is sub-floor (`min_piv` 9.4e-16 … 3.0e-14 against
+`150·ε = 3.33e-14`), and the only thing that keeps `δ_c` off is that the
+gh#540 noise rule reports them *uncertified*. (3) lbfgs `dallass`
+`SolveSucceeded`/301 (R2d's added guard) is unmoved by this rule at
+either κ.
+
+**Tests / sweep.** Docs-only commit: no code changed, so no regression
+test, no mutation check, no clippy run, no `cargo test`, and M1 is not
+triggered (no landed R2x code; the M1 fixtures were re-measured above as
+the reproduce step). `cargo fmt --all -- --check` clean.
+`scripts/sweep-fixtures.sh` was run four times (234 fixture-legs each,
+both legs): `p-prev`, the probe build with no variable set (diff empty),
+and κ = 1e6 / 1e12 (diffs above). Not run: `benchmarks/vanderbei` (no
+corpus), arm64 (not available), Python tests (no code change).
