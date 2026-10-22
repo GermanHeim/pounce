@@ -41,10 +41,19 @@ iterations after a now-*correct* inertia report.
 
 | id | fixture / benchmark (leg) | v0.12.0 → 0.13.0 | suspected cause | recoverable? | Status |
 |---|---|---|---|---|---|
-| **R1** | `scaled_feasible_a` (exact and lbfgs) | nlp 22 / 19 it → cvx-qp **200 / 200** it, right answer | #1002 `f6a4e4c2`: HSDE endgame certifies the gh#293 equilibrated retry, whose loop never meets `pres < tol` (plateau 5.0e-6 → 5.7e-7) while `mu` runs to 1e-121; `Optimal` is stamped only by the post-loop `true_kkt_error` upgrade | **yes** — a stall-gated in-loop certificate, or a primal-residual floor that reads the stalled `pres` as the regularization floor it is | **not recoverable this way** (2026-10-22: hypothesis refuted — `m_eq = 0`, the plateau is a rounding floor, and the iterate is not optimal until it 165; see log + §5) |
-| **R2** | `pooling_rt2stp` (exact, x86) | 162 → **492** it (arm64: 109 → 242 total, *issue*) | FERAL 0.21 trajectory; `2599c2be` removed the latch (904 → 492); the remaining cost is the `δ_x` ladder climbing to `max_hessian_perturbation` with `δ_c` on (*issue*, unmeasured) | **partial** — the "stop the ladder once inertia is guaranteed" follow-up the issue names; must be measured first | **not recoverable this way** (2026-10-22: hypothesis refuted — 0 of 146 `WrongInertia` factors with `δ_c > 0` had a PD (1,1) block; the climb answers a genuinely indefinite `W`, λ_min down to −1.2e19 vs v0.12.0's −2.2e9; trigger found at iteration 4, see log + §5) |
+| **R1** | `scaled_feasible_a` (exact and lbfgs) | nlp 22 / 19 it → cvx-qp **200 / 200** it, right answer | #1002 `f6a4e4c2`: HSDE endgame certifies the gh#293 equilibrated retry, whose loop never meets `pres < tol` (plateau 5.0e-6 → 5.7e-7) while `mu` runs to 1e-121; `Optimal` is stamped only by the post-loop `true_kkt_error` upgrade | **yes** — a stall-gated in-loop certificate, or a primal-residual floor that reads the stalled `pres` as the regularization floor it is | **not recoverable this way** (2026-10-22: hypothesis refuted — `m_eq = 0`, the plateau is a rounding floor, and the iterate is not optimal until it 165; see log + §5). Alternate routes: **R1b–R1e** below |
+| **R1b** | `scaled_feasible_a` (sibling of R1) | retry it 20 → 120: `mu` 5.0e-19 → 3.2e-117 while `true_comp` 2.6e5 → 9.8e3 | HSDE centering: the `σμ` target is driven on an internal `s` that has decoupled from `h − Gx̂`, so `mu` collapses ~8×/iteration while the true complementarity crawls linearly | **candidate** — floor `σμ` at the true-slack complementarity (in homogenized units); convex-arm-wide trajectory change | todo (`needs benchmarks/qp before merge` at best) |
+| **R1c** | `scaled_feasible_a` (sibling of R1) | both HSDE solves run at `τ ≈ 1e-10` to represent `‖x̂‖ = 5e9` from the unit self-dual start | cold start not sized to the data; the direct driver's gh#689 Mehrotra recentering took the same model 175 → 27 | **candidate** — seed the embedding from the recentered cold seed at `τ = 1`; the largest blast radius of the R1 family | todo (`needs benchmarks/qp before merge` at best) |
+| **R1d** | `scaled_feasible_a` (sibling of R1) | first, unequilibrated HSDE solve burns 200 it to `true_kkt 0.149` before the gh#293 retry: 400 HSDE it for a reported 200 | no early-failure detection: `τ` creeps linearly 1.6e-9 → 7.6e-8 over it 19–199 with `mu ~1e-37` | **candidate** — hand the retry the budget early; independent value (halves the work) even if R1b/c land, reported count unchanged | todo (`needs benchmarks/qp before merge` at best) |
+| **R1e** | `scaled_feasible_a` (sibling of R1) | retry it 165 → 200 is certifiable (`true_kkt 8.6e-9`) but the loop waits on `pres < tol`, unreachable at 4 ulp of `5e9` | stopping test has no exit for an iterate whose only unmet term is pinned at its rounding floor | **partial** — ≤ 17% of this model's count; R1 declined it as insufficient alone; kept as a sibling because it composes with R1b/c and may have corpus-wide value | todo (lowest priority in the family) |
+| **R2** | `pooling_rt2stp` (exact, x86) | 162 → **492** it (arm64: 109 → 242 total, *issue*) | FERAL 0.21 trajectory; `2599c2be` removed the latch (904 → 492); the remaining cost is the `δ_x` ladder climbing to `max_hessian_perturbation` with `δ_c` on (*issue*, unmeasured) | **partial** — the "stop the ladder once inertia is guaranteed" follow-up the issue names; must be measured first | **not recoverable this way** (2026-10-22: hypothesis refuted — 0 of 146 `WrongInertia` factors with `δ_c > 0` had a PD (1,1) block; the climb answers a genuinely indefinite `W`, λ_min down to −1.2e19 vs v0.12.0's −2.2e9; trigger found at iteration 4, see log + §5). Alternate routes: **R2b–R2e** below |
+| **R2b** | `pooling_rt2stp` (exact, x86; sibling of R2) | 492 it; blanket counterfactual 492 → 109 with 19 collateral lines | one `augsys_improved` flag per matrix is shared by the inertia ladder's too-few-negatives branch and iterative refinement; at iteration 4 the former spends it on a 71-vs-72 count and refinement keeps a 6.4e16 step | **candidate** — one escalation budget per consumer per matrix; must avoid the counterfactual's collateral (lbfgs `circle_parabola_t0p5` 8.155 → 10.428, lbfgs `scale_audit_retry_meyer3` 112 → 152, 15 lines escalating to cap) | todo (`needs vanderbei before merge` at best) |
+| **R2c** | `pooling_rt2stp` (exact, x86; sibling of R2) | iteration-4 refinement stalls at ratio 1.6e-8 and takes the `S` exit with a dual part of 6.4e16 | `compute_residual_ratio` caps its normalizer at `1e6·‖rhs‖`, so the `S` test (ratio < `residual_ratio_singular` = 1e-5) is blind to a step many orders above the RHS | **candidate** — refuse `S` (take `s` → `perturb_for_singular`) when `‖res‖∞ > κ·‖rhs‖∞`; the narrowest of the family | todo (`needs vanderbei before merge` at best) |
+| **R2d** | `pooling_rt2stp` iteration 4 (sibling of R2) | FERAL 0.21 reports 71 negatives, 72 required; FERAL 0.20 reported 73 on v0.12.0's matrix | either an inertia-count defect in FERAL (crates.io dependency `feral = 0.21.0`, upstream jkitchin/feral — not vendored) or a genuinely ambiguous near-singular matrix | **measure first** — exact count vs both FERAL counts on the dumped matrix; fix upstream, or work around in `pounce-feral` (classify as noise → `Singular`, no escalation spent) | todo |
+| **R2e** | `pooling_rt2stp` iteration 4 (sibling of R2) | both versions accept a `δ_c`-free factor with min \|eig\| 2e-17 after the gh#592 walk-back | the walk-back accepts any factor FERAL calls `Success`; a numerically singular one is the source of the 6.4e16 step | **candidate** — refuse the withdrawal when the factor's `min_pivot_magnitude` is under the inertia trust floor; keeps `δ_c` instead of repairing the step downstream | todo (`needs vanderbei before merge` at best) |
 | **R3** | `dallass` (exact, x86) | 41 → **123** it (arm64 41 → 65, *issue*) | FERAL 0.21 path lands on `x = 0` of `|x|²·|x|^0.85` terms 12 times instead of 2; each is a non-finite Hessian → restoration entry; `5fc8c797` only stops the third from ending the solve | **partial** — (A) the Hessian is an evaluator artefact (`0·∞` from the product rule; the true second derivative of `|x|^2.85` at 0 is 0), fixable in `pounce-nl`; (B) R2 may move it; re-baseline after R2 | **done** (2026-10-22, option A: `.nl` reader merges `|e|^p·|e|^q`; exact 123 → **28** it, 12 → **0** restoration calls; lbfgs ErrorInStep/146 → SolveSucceeded/301; see log) |
-| **R4** | minima `circle_parabola_t0p5` mlsl | found 2 of 2 → **1** | #993 `91b6dcda`: `MLSL_GAMMA` 2 → 0.5; at 0.5 the extra launches re-find the first minimum and the stagnation counter (`patience 8`) stops the search | **partial** — no single gamma wins at seed 0 (table in R4); needs a 10-seed measurement or a structural stagnation rule; non-blocking | todo |
+| **R4** | minima `circle_parabola_t0p5` mlsl | found 2 of 2 → **1** | #993 `91b6dcda`: `MLSL_GAMMA` 2 → 0.5; at 0.5 the extra launches re-find the first minimum and the stagnation counter (`patience 8`) stops the search | **partial** — no single gamma wins at seed 0 (table in R4); needs a 10-seed measurement; the structural stagnation rule is now its own item, **R4b** | todo |
+| **R4b** | minima `circle_parabola_t0p5` mlsl (sibling of R4) | at gamma 0.5 the search ends `converged` after 9 solves: 8 consecutive launches re-find minimum 1 and trip `patience 8` with 21 of 30 solves unused | the stagnation counter treats an MLSL launch that converges to an archived minimum as a failed independent draw; it is basin information | **candidate** — grow that minimum's exclusion radius and do not count the re-find as a full strike; gamma stays 0.5 | todo |
 | **B1** | benchmark `qcqp1000-2c` (mittelmann) | 99 it / 28 s → 163 it / 112 s (*comment*) | pounce reuses the symbolic ordering FERAL chose for the least-squares multiplier-init matrix (W = 0, D = I) for every later KKT; `invalidate_symbolic_cache()` after the init factor halves factor time (*comment*) | **yes** for the code change; **measurement blocked** here (no benchmark corpus on this machine); a branch `perf/feral-symbolic-after-init` is said to be in progress — check `origin` first | todo |
 | B2 | benchmark `brainpc0/1` (vanderbei) | 58 it / 1.1 s → 1073 + 52 it / 75 s; 185 + 24 → 2117 + 24 (*comment*) | after a now-correct inertia at one iterate, pounce's restoration takes 811 of 1073 iterations (*comment*) | **unknown** — investigate only after B1 lands (B1 changes the trajectory) and only with the corpus | blocked |
 | B3 | benchmark `qcqp1500-1c` | Optimal → `Maximum_CpuTime_Exceeded` at 300 s (*issue*) | presumably B1 (same family); **unverified** | follows B1 | blocked |
@@ -52,33 +61,78 @@ iterations after a now-*correct* inertia report.
 | X1 | exact `deb7` arm64 Optimal/147 → Acceptable/180 | (*issue*) | FERAL 0.21 NEON trajectory | **not recoverable here** (x86 improves 143 → 114) (§5) | n/a |
 | X2 | lbfgs `dallass` arm64 Optimal/224 → ErrorInStep/308 | (*issue*); x86 fails on both versions | FERAL 0.21 trajectory | **not recoverable here**; the x86 lbfgs failure predates 0.13.0 (§5) | n/a |
 | X3 | lbfgs `pooling_rt2stp` arm64 −4391.83 → −3273.95 | (*issue*); x86 failing → solved | bistable nonconvex model | **no** — both are certified optima (§5) | n/a |
-| F1 | `issue_592` pin `< 500` sits 8 above x86's 492 | — | R2 | resolved by R2; **do not raise the pin** | open — R2 did not land; pin untouched, margin still 8 (follow-up in §5) |
+| F1 | `issue_592` pin `< 500` sits 8 above x86's 492 | — | R2 | resolved by whichever of R2b–R2e lands; **do not raise the pin** | open — R2 did not land; pin untouched, margin still 8 (follow-up in §5) |
+| **M1** | re-measurement pass after every landed R2x item | — | R2b/c/d/e each move the NLP arm's step for every exact-Hessian solve; R3 landed *before* them (dallass 28), so the original "R3 after R2" re-baseline is inverted | rule, not a code item: see §3 M1 and §4 "Sibling items" | standing (runs inside each R2x iteration) |
 
 ## 2. Ordering
 
-1. **R1** `scaled_feasible_a` — self-contained in `pounce-convex`, mechanism
-   established, cheapest to validate (convex-arm sweep lines + `benchmarks/qp`
-   if the corpus exists), interacts with nothing else.
-2. **R2** `pooling_rt2stp` ladder — the central NLP-arm item; it moves the
-   `δ_x` ladder for every exact-Hessian solve, so **R3 is re-baselined after
-   it** (dallass's 12 restoration entries may or may not survive).
-3. **R3** `dallass` — only after R2's numbers are in; option (A) is a
-   `pounce-nl` change independent of R2, option (B) is "R2 already fixed it".
-4. **B1** symbolic-ordering reuse — independent of R1–R3 (it changes *which
-   factorization* FERAL performs, not the IPM's decisions, but through
-   pivoting it can move trajectories, so it still needs the full sweep). Code
-   change is implementable and unit-testable without the corpus; the
-   benchmark claim can only be *verified* with it.
-5. **R4** MLSL gamma — independent, has its own sweep (`sweep-minima.sh`),
-   lowest certainty; do it last among the recoverable items.
-6. **B2 / B3** — only if `POUNCE_BENCH_DATA` resolves to a corpus
-   (`. scripts/bench_data_root.sh && bench_data_root`); otherwise record as
-   blocked and stop.
+Original order (first pass, 2026-10-22): R1 → R2 → R3 → B1 → R4 → B2/B3. R1
+and R2 were refuted as planned (docs-only commits `463eeeae`, `015a8fe4`); R3
+landed (`250857b0`, dallass 123 → 28). The second pass below replaces the
+refuted items with the alternate routes their measurements suggested (§3,
+"Second-pass items"), ordered cheapest and least risky first. The two
+sibling families share one defect each; §4 "Sibling items" says what happens
+to the rest of a family once one member recovers the target.
 
-Items that interact: R2 → R3 (re-baseline), B1 → B2/B3 (re-baseline). R1 and
-R4 touch neither arm the others touch, but every item still diffs the full
-fixture sweep against the **branch tip before the item** (`p-prev`), so that
-each commit's own blast radius is accounted for separately.
+1. **R2d** FERAL 71-vs-72 at pooling iteration 4 — a *measurement* first
+   (dump one matrix, three counts), no pounce code unless the workaround
+   route is taken; its answer tells R2b/R2c whether the count they are
+   working around is a defect or rounding.
+2. **R2c** refuse refinement's `S` exit on a step that dwarfs the RHS — one
+   comparison in one branch of `pd_full_space_solver.rs`; narrowest of the
+   R2 family.
+3. **R2b** separate escalation budgets for the inertia branch and
+   refinement — the shape the R2 log named first; wider than R2c (the
+   counterfactual's 19-line collateral is the thing to avoid).
+4. **R2e** walk-back refuses a numerically singular `δ_c`-free factor —
+   upstream of both R2b and R2c in the iteration-4 chain, but touches
+   gh#592/gh#981 territory, so last in the family.
+   — **M1** runs inside each R2x iteration: re-measure the inventory on the
+   new tip before the next sibling starts (§3 M1).
+5. **B1** symbolic-ordering reuse — after the R2 family, not between its
+   members: it changes *which factorization* FERAL performs and through
+   pivoting can move trajectories, which would confound the sibling
+   re-baselines. Code change implementable and unit-testable without the
+   corpus; the benchmark claim can only be *verified* with it.
+6. **R4** MLSL gamma — independent, own sweep (`sweep-minima.sh`); its
+   10-seed table is also R4b's measure-first step, so R4 runs first.
+7. **R4b** structural MLSL-aware stagnation rule — sibling of R4; drop or
+   keep per §4 once R4's decision is in.
+8. **R1d** cut the first, unequilibrated HSDE solve short — convex arm, but
+   by construction it only touches solves that end `IterationLimit`
+   anyway; reported counts unchanged, so the fixture sweep must diff
+   **empty**. Independent value even if R1b/c land.
+9. **R1e** the post-165 tail — stopping-test exit for a certifiable iterate
+   whose only unmet term is pinned at its rounding floor; lowest value in
+   the family (≤ 17% of this model's count), kept because it composes with
+   R1b/c.
+10. **R1b** HSDE centering safeguard — convex-arm-wide trajectory change;
+    the measure-first step says on how many corpus lines it would bite.
+11. **R1c** data-sized HSDE cold start — the largest blast radius on the
+    branch (every HSDE solve starts elsewhere); last of the R1 family, and
+    dropped if R1b already meets R1's ≤ 60.
+12. **B2 / B3** — only if `POUNCE_BENCH_DATA` resolves to a corpus
+    (`. scripts/bench_data_root.sh && bench_data_root`); otherwise record as
+    blocked and stop.
+
+Items 8–11 cannot be marked `done` on this machine: each changes the convex
+arm's trajectory and `benchmarks/qp` is not available (`POUNCE_BENCH_DATA`
+unset, no `~/projects/pounce-bench-data`). They may be implemented, tested
+and swept, and are then logged `swept — needs benchmarks/qp before merge`
+(§4). Items 2–4 (and 1 if it changes `pounce-feral`) change the NLP arm's
+step for every exact-Hessian solve and are likewise logged `swept — needs
+vanderbei before merge`; B1 the same with `mittelmann` added. R4/R4b and
+R2d-as-measurement are the only second-pass items that can reach `done`
+here.
+
+Items that interact: R2b/c/d/e (one defect, four levers — §4 sibling
+rule), R1b/c/d/e (one defect, four levers), R4 ↔ R4b, R2x → R3 (R3 is
+already in; an R2x item that moves `dallass` off 28 is a reportable line,
+not a re-baseline), B1 → B2/B3 (re-baseline). The R1 family touches
+neither arm the R2 family touches, R4/R4b touch only `pounce-minima`, but
+every item still diffs the full fixture sweep against the **branch tip
+before the item** (`p-prev`), so that each commit's own blast radius is
+accounted for separately.
 
 ## 3. Work items
 
@@ -136,7 +190,9 @@ tried and dropped because it cost QFORPLAN 33 → 139).
 the inequality block, and `5.0e-6` is the rounding floor of `Gx + s − hτ` at
 `‖x̂‖ = 5e9` (≈ 4 ulp, as `ipm.rs`'s own gh#689 comment says). Through the
 plateau the iterate is not optimal either (`true_kkt_error` ≥ 23 until it
-150). The hypothesis below is refuted; see the R1 item log and §5.
+150). The hypothesis below is refuted; see the R1 item log and §5. The
+alternate routes that measurement suggested are items **R1b–R1e** under
+"Second-pass items" below.
 
 **Hypothesis.** The loop lacks a stop for an iterate that is optimal in the
 caller's coordinates but whose *homogeneous, equilibrated* primal residual is
@@ -322,7 +378,8 @@ indefinite by 1e13–1e19 after iteration 5, which v0.12.0 never is. The
 trigger is an iteration-4 step from a `δ_c`-free, numerically singular
 factor that iterative refinement accepts because the matrix's single
 quality escalation was already spent by the ladder's too-few-negatives
-branch. Follow-up in §5.
+branch. Follow-up in §5; the four levers that chain names are items
+**R2b–R2e** under "Second-pass items" below.
 
 ### R3 — `dallass` exact: the `|x|²·|x|^0.85` kink
 
@@ -542,13 +599,879 @@ the corpus; if it is absent, record "blocked: no benchmark corpus on this
 machine" and stop. B3 is presumed to follow B1 (same family); verify, do not
 assume.
 
+### Second-pass items (added 2026-10-22 after R1/R2 were refuted)
+
+Every number below is from the R1 and R2 item logs (§6) unless marked
+otherwise; nothing new was measured when these items were written. Each item
+restates where it sits in its family and what the §4 sibling rule does to it
+once another member lands. The common preamble of §3 (build `p-prev`, keep
+`p-base`, sweep both legs) applies unchanged.
+
+The iteration-4 chain on `pooling_rt2stp` exact, which all of R2b–R2e act
+on, in order:
+
+1. the ladder's first factor reports **71 negatives, 72 required** (FERAL
+   0.20 on v0.12.0's matrix: 73) → `pd_full_space_solver.rs` ~1687
+   too-few-negatives branch → `escalate_aug_quality` succeeds
+   (`augsys_improved = true`, info `q`) **(R2d, R2b)**;
+2. `Singular`, then `WrongInertia(73)` ×3 with `δ_c` on → the gh#592
+   walk-back withdraws `δ_c` → `Success` at `δ_x = 1e-4`, `δ_c = 0`, min
+   |eig| 2.0e-17 **(R2e)**;
+3. the solve's dual part is 6.4e16; refinement ratios 9.1e-6, 2.2e-8,
+   1.2e-8, 1.6e-8 → stall; `augsys_improved` already set → `pretend_singular`
+   → ratio 1.6e-8 < `residual_ratio_singular` 1e-5 → **`S` exit, step kept**
+   **(R2b, R2c)**;
+4. λ_min(W+Σ_x) at iteration 5 is −4.1e13 (v0.12.0, whose refinement
+   escalated and refactored to a 3.0e6 dual part: −7.4e2), and the rest of
+   the run answers an indefinite `W` with high `δ_x`, 24 restoration calls
+   and 492 iterations.
+
+Blanket counterfactual (R2 log): letting refinement escalate regardless of
+the flag gives 492 → **109** (−4391.826, 3 restoration calls) but moves 19
+sweep lines: escalations to the cap (q = 12 / 24) on 15, lbfgs
+`circle_parabola_t0p5` 8.155 → 10.428 with a different second-opinion rung,
+lbfgs `scale_audit_retry_meyer3` 112 → 152. Those three facts are the
+must-not-regress guards for every R2x item.
+
+### R2d — FERAL 0.21 reports 71 of 72 negatives at `pooling_rt2stp` iteration 4
+
+**Goal.** Decide, with numbers, whether the 71-vs-72 count that starts the
+chain is an inertia-count defect in FERAL 0.21 or a legitimately ambiguous
+count on a near-singular matrix — and route the fix accordingly: upstream
+if a defect, a `pounce-feral` classification change if ambiguity, or
+nothing here (R2b/R2c absorb it) if neither is clean.
+
+**Where FERAL lives.** Not vendored. `Cargo.toml` pins the crates.io
+release (`feral = "0.21.0"`; the comment at ~line 93 says why a git rev is
+rejected: `scripts/check-release-consistency.sh` refuses git dependencies
+for the crates.io publish). Source: `~/.cargo/registry/src/index.crates.io-*/feral-0.21.0/`
+(0.18.0 is also in the registry; 0.20.0, the version v0.12.0 built against,
+is reachable through the `p-base` worktree's lockfile). Upstream:
+`https://github.com/jkitchin/feral` (the issue's benchmark comment was moved
+from jkitchin/feral#224). A FERAL fix therefore cannot ship from this branch
+alone — it needs a FERAL release and a version bump, which is itself a
+trajectory change (the 0.20 → 0.21 bump is what gh#1042 is about).
+
+**Files / symbols.**
+- FERAL: `src/numeric/solver.rs` ~2546–2600 (`num_negative_eigenvalues`,
+  `inertia()`, `min_diagonal`, `min_pivot_magnitude`, `max_pivot_magnitude`);
+  `src/dense/factor.rs` ~555–600 — the **band-pivot sign fallback**
+  (2026-05-17): a pivot in `(zero_tol, null_pivot_tol]` is counted *by sign*,
+  not as zero, with `needs_refinement = true` (the rationale cites
+  `FBRAIN3LS_0839`, a trailing pivot of +2.47e-16 that MUMPS/SSIDS count
+  positive); the 2×2 pivot classification (`pivot_inertia`, `zero_tol_2x2`,
+  the `fallback_2x2_*` / `scalar_2x2_delay_*` counters ~135–165);
+  `src/inertia.rs`. FERAL's own `dev/research/f01-rankdef-underreporting.md`
+  and `near-singularity-signal.md` are referenced from those comments.
+- pounce: `crates/pounce-feral/src/lib.rs` ~1337–1420 — the status decision:
+  `inertia()` → `(neg, zero)`; `zero > 0` → `Singular` (certified); count
+  mismatch → gh#540/gh#1003 noise rule **only if** `min_piv <
+  inertia_trust_floor` (`n·ε` unless `feral_inertia_pivot_floor` pins it;
+  for the 46-row pooling KKT ≈ 1.0e-14) and `sub_floor_count_is_noise(got,
+  expected, flagged, below, below_100x)` → `Singular`, else `WrongInertia`;
+  then the `singular_pivot_floor` (default **1e-20**, ~712) near-singularity
+  flag. Tests ~2102 `check_neg_evals_mismatch_returns_wrong_inertia`, ~2370
+  `well_conditioned_inertia_mismatch_still_reports_wrong_inertia`, ~2358
+  `sub_floor_count_is_noise_branches`.
+- The R2 probe (dense eigenvalues of the assembled KKT in
+  `StdAugSystemSolver::solve`) is the measurement tool; it is not committed,
+  re-create it from the R2 log's description.
+
+**Hypotheses (exclusive).** (a) The unperturbed iteration-4 matrix has at
+least one eigenvalue within `κ·ε·‖K‖` of zero, so 71/72/73 are all within
+the count's honest uncertainty; FERAL is not wrong, pounce's noise rule
+should have classified the count as untrustworthy (→ `Singular`, which does
+**not** spend the escalation) and did not, because `min_piv ≥ floor` or
+`sub_floor_count_is_noise` returned false. (b) The exact count is 72, the
+smallest |λ| is far above rounding, and FERAL 0.21's count is wrong by one —
+a sign-fallback band pivot or a 2×2 classification; a FERAL defect.
+
+**Reproduce.** `p-prev` exact 492 it. `RUST_LOG=pounce::linsol=debug` (or
+the CLI's log-level flag — check how the sink enables tracing) and capture
+the iteration-4 `"inertia mismatch"` line: `got_neg`, `expected`, `min_piv`,
+`floor`. Confirm it is the first factor of the iteration-4 ladder (`δ_x`,
+`δ_c` both from the previous system's state) and that the info string
+carries `q`.
+
+**Measure first (the whole item, if (a)).** Dump that matrix (triplets +
+`δ`s) from the probe, then record: exact inertia by dense symmetric
+eigendecomposition (faer, as in R2); the number of eigenvalues with
+`|λ| < 46·ε·‖K‖∞` and with `|λ| < 1e-10·‖K‖∞`; FERAL 0.21's count on the
+dump at its default pivot threshold and at 0.1 / 0.5, Identity and
+InfNorm scaling; FERAL 0.20's count on the same dump (`p-base` worktree);
+`min_pivot_magnitude` / `max_pivot_magnitude` from both; `last_factor_stats`
+(`n_tiny`, `n_threshold_fail_accepts`). Three numbers go in the log: exact
+count, 0.21 count, 0.20 count, plus the smallest |λ| relative to `‖K‖`.
+
+**Steps.**
+1. If (a): the fix is in `pounce-feral`'s classification. Find which guard
+   stopped the noise rule (`min_piv` above `n·ε`? `below`/`below_100x`
+   shape?) and whether widening it is justified by the eigenvalue evidence.
+   The alternative at the consumer — do not spend the escalation on a
+   too-few count whose factor has a sub-floor pivot — is R2b's territory;
+   if that is the cleaner change, fold R2d into R2b and record it.
+   Mutation-check any rule change with the gh#540 eigena2 dumps and the
+   gh#1003 tests, which pin the opposite verdicts.
+2. If (b): file upstream (jkitchin/feral) with the dumped matrix in a format
+   FERAL's `io` module reads, the three counts, and the pivot sequence; in
+   this file record the issue number and that the pounce-side mitigation is
+   R2b (or R2c, whichever lands). Do not patch the registry copy and do not
+   add a git dependency.
+3. If neither — the matrix is ambiguous *and* the noise rule is correctly
+   silent — record "not a count defect" and move to R2c.
+
+**Acceptance.** The question answered with the three counts and the
+smallest-|λ| number in the item log. If route (a) changes code:
+`pooling_rt2stp` exact ≤ 300 it, restoration calls < 24, objective one of
+−3273.955 / −4391.826, and R2's `issue_592` margin restored.
+
+**Validation (only if code changes).** `cargo test -p pounce-feral -p
+pounce-algorithm -p pounce-cli`; full fixture sweep both legs vs `p-prev`,
+every moved line explained, with the three counterfactual guards above
+checked by name; status `swept — needs vanderbei before merge` (the gh#540 /
+gh#1003 models `eigena2`, `eigenb2`, `steenbr*` are the ones a
+classification change has historically moved).
+
+**Must not regress.** gh#540 (`eigena2` 64/58/62-for-55 is noise) and
+gh#1003 (a surplus negative on a clean factor stays `WrongInertia`) unit
+tests; `issue981_cstr_dup_row`; `the_walkback_is_inert_on_this_fixture_since_gh693`.
+
+**Stop.** Two iterations; or the measurement lands in case 3 (then R2c is
+next, and R2d is `not a defect (measured)`); or the fix needs FERAL's
+sign-fallback band rule weakened (that rule exists to agree with
+MUMPS/SSIDS on `FBRAIN3LS_0839` — it is FERAL's own correctness contract,
+not ours to move).
+
+### R2c — refuse refinement's `S` exit when the step dwarfs the right-hand side
+
+**Goal.** At iteration 4 the stalled refinement must not keep a step whose
+dual part is 6.4e16 by declaring it "not singular"; the `s` path
+(`pretend_singular` → `perturb_for_singular` → `δ_c` back on) should take it,
+without touching the escalation flag at all.
+
+**Files / symbols.**
+- `crates/pounce-algorithm/src/kkt/pd_full_space_solver.rs` ~886–915: the
+  `quit_refinement` block. After a stall with `augsys_improved` set,
+  `pretend_singular = true`; then `if residual_ratio < residual_ratio_singular
+  { pretend_singular = false; "S" } else { "s" }`. `residual_ratio_singular`
+  defaults to **1e-5** (~141). `pretend_singular` is consumed by the next
+  `solve_once` (~830) as a `Singular` status.
+- Same file ~1918–1933, `compute_residual_ratio`: `nrm_resid / (min(nrm_res,
+  max_cond·nrm_rhs) + nrm_rhs)` with `max_cond = 1e6` — Ipopt's
+  `ComputeResidualRatio`. The `min` **caps the normalizer**: once `‖res‖∞ >
+  1e6·‖rhs‖∞` the ratio no longer grows with the step, so a residual that
+  is tiny relative to a 6.4e16 step reads as a tiny ratio. That is the
+  blind spot this item closes.
+- `crates/pounce-common/src/pd_perturbation.rs` `perturb_for_singular`
+  (~306) / `perturb_for_singular_with` (~327, gh#981): what the `s` path
+  reaches; confirm it *reinstates* `δ_c` after a walk-back rather than
+  overflowing.
+- Guards: `issue_592_delta_c_walkback.rs`, `issue_250_dual_guard_never_worse.rs`,
+  `issue857_*`, `issue_884_biactive_dual_divergence.rs`, `issue981_cstr_dup_row`,
+  `pounce-wasm` pooling shim.
+
+**Hypothesis.** A refined step with `‖res‖∞ > κ·‖rhs‖∞` for κ at or above
+the normalizer's own `max_cond` is outside the regime the `S` test was
+designed for; keeping it on the strength of a capped ratio is what let one
+step blow `W` up by 1e13. Refusing `S` there (taking `s` instead) repairs
+exactly the iteration-4 decision and nothing else, if the measure-first step
+shows such exits are rare.
+
+**Reproduce.** `p-prev` exact 492 it; the R2 probe's iteration-4 refinement
+trace (ratios 9.1e-6 → 1.6e-8, then `S`).
+
+**Measure first.** Temporary counter at every `S` and `s` exit across the
+full sweep corpus (both legs, `p-prev` build + probe): per exit record
+`nrm_rhs`, `nrm_res`, `nrm_resid`, `nrm_res / nrm_rhs`, the iteration, and
+whether that fixture-leg ends solved. Histogram `nrm_res / nrm_rhs` at `S`
+exits. The item is worth implementing only if the pooling iteration-4 exit
+sits far in the tail (≥ 1e6, expected ~1e12) **and** the number of other
+`S` exits above the chosen κ is small (tens, not hundreds) — otherwise the
+rule is a blanket change in disguise, and the counterfactual already shows
+what that costs. Record how many `S` exits the baseline corpus has in all.
+
+**Steps.**
+1. Add a field (constant first; promote to an option only if the
+   measurement wants tuning) `refine_step_rhs_ratio_max`, default from the
+   measurement (candidates: `1e6` = `max_cond`, or one decade above the
+   largest healthy exit seen).
+2. In the `pretend_singular` branch: `S` only if `residual_ratio <
+   residual_ratio_singular` **and** `nrm_res <= refine_step_rhs_ratio_max ·
+   nrm_rhs`; otherwise `s`. Append a distinct info letter (e.g. `S!` → pick
+   one character; `b` for "big step") so the iteration table shows the new
+   exit. Do not touch the escalation flag, `residual_ratio_singular`, or
+   `compute_residual_ratio`.
+3. Unit test in `pounce-algorithm` with a fake `AugSystemSolver` whose
+   solution is `1e12 ×` the RHS with a residual that passes the ratio test:
+   the solver must report `pretend_singular` (status `Singular` on the next
+   call) instead of `Success`. Mutation: with the new condition removed it
+   reports `Success`.
+4. CLI pin: `pooling_rt2stp` exact `SolveSucceeded`, objective one of the
+   two optima, `iteration_count` ≤ a bound set from the measurement (leave
+   `issue_592`'s `< 500` alone; tighten only per §4).
+
+**Acceptance.** `pooling_rt2stp` exact (x86): `SolveSucceeded`, one of
+−3273.955 / −4391.826, `iteration_count ≤ 300` (counterfactual 109; report
+the number), restoration calls < 24, no new `max_hessian_perturbation`
+overflow. The three counterfactual guards hold: lbfgs `circle_parabola_t0p5`
+it 77 / q 4 / obj 8.155059653 / second-opinion rung `feral_scaling=mc64`,
+lbfgs `scale_audit_retry_meyer3` it 112 / q 5, and no line's `q` rising to
+12 or 24 that was not there before.
+
+**Validation.** Full fixture sweep both legs `p-prev` vs new, and the
+regressed fixtures vs `p-base`; every moved line explained; any status
+loss, any objective change outside a known bistable pair, any `nlp →
+square-lm`, is a stop. `cargo test -p pounce-common -p pounce-algorithm -p
+pounce-cli -p pounce-wasm`. `python/tests/test_mehrotra_feasible_gh986.py`
+if the extension builds. M1 re-measurement. Status at best `swept — needs
+vanderbei before merge` (0.13.0 release: 707 of 733; `steenbr*`, `eigen*`,
+`dallas*` are the sensitive models).
+
+**Must not regress.** `an_overflowed_ladder_does_not_poison_the_next_system`;
+gh#592 walk-back tests and `the_walkback_is_inert_on_this_fixture_since_gh693`
+(`< 300` with the walk-back off); `issue981_cstr_dup_row`; `issue_250`;
+`issue857_*` escalation accounting; `deb7` exact `SolveSucceeded` (114).
+
+**Stop.** The rule fires on more than ~10% of the baseline corpus's `S`
+exits; more than one status loss in the sweep; the `s` path overflows
+`δ_c` on pooling instead of reinstating it (then this is R2e's problem);
+two iterations.
+
+### R2b — one quality-escalation budget per consumer per matrix
+
+**Goal.** Refinement keeps its one escalation on a matrix even when the
+inertia ladder's too-few-negatives branch has already spent one, so the
+iteration-4 refinement refactors (as v0.12.0's did, 6.4e16 → 3.0e6) — and
+the counterfactual's collateral does not come with it.
+
+**Files / symbols.**
+- `pd_full_space_solver.rs`: `augsys_improved` (~69–71, "Mirrors
+  `augsys_improved_`"), `escalate_aug_quality` (~169, the single
+  `increase_quality()` call site; bumps `quality_escalations`), the resets
+  (~592 `solve`, ~794 cache miss / `consider_new_system`), the two consumers
+  (~1690 inertia branch, ~894 refinement). Ipopt's
+  `IpPDFullSpaceSolver.cpp` shares one `augsys_improved_` between the same
+  two sites — this item departs from upstream on purpose, so say so in the
+  doc comment.
+- `crates/pounce-feral/src/lib.rs` ~1677 `increase_quality`: rung ladder
+  (scaling Identity → InfNorm, then `pivot_threshold^0.75`), gated by
+  `feral_increase_quality` (gh#850: "a *lateral* move in trajectory terms");
+  `feral_increase_quality_retry`. A second escalation on one matrix is a
+  **second rung**, which is where the counterfactual's `q → 12/24` lines
+  come from.
+- gh#857 accounting (`quality_escalations`, "escalations never step back
+  down", `issue857_*` on `deb7` / `circle_parabola_t0p5`),
+  `issue_983_scale_audit_retry_budget`.
+
+**Hypothesis.** The counterfactual let refinement escalate *without bound*
+per matrix (every stall → another rung), and that, not the per-consumer
+split, is what ran 15 lines to the cap. One escalation per consumer per
+matrix — two flags, `augsys_improved_inertia` and `augsys_improved_refine`,
+each set once — gives the iteration-4 refinement its single rung and no
+line more than two rungs on one matrix. If the measure-first step shows the
+collateral lines took exactly one refinement escalation each (i.e. the
+split alone reproduces them), the item must narrow further: allow the
+refinement escalation only when the inertia-branch escalation was spent on
+a count the next factor refuted (came back `Singular` or at the expected
+count), or only when `δ_c = 0` on the matrix.
+
+**Reproduce.** `p-prev` exact 492; iteration-4 info string shows `q` from
+the inertia branch and `S` from refinement.
+
+**Measure first.** Re-run the counterfactual (env-gated probe, as in R2) with
+a per-matrix counter of *refinement* escalations, over the 19 moved lines:
+how many matrices escalated once vs more than once from refinement, and on
+the three named collateral lines specifically. Also, on the baseline, count
+matrices where the inertia branch spent the flag and refinement later
+stalled (the population this item changes) — on the whole corpus, both legs.
+
+**Steps.**
+1. Split the flag; `escalate_aug_quality` takes which consumer is asking;
+   the `q` info string and `quality_escalations` tally are unchanged in
+   meaning (count every successful escalation).
+2. The refinement branch's `if !self.augsys_improved` becomes `if
+   !self.augsys_improved_refine`; the inertia branch's likewise. Both reset
+   where the old flag resets.
+3. If the measurement demanded the narrowing, implement that condition and
+   name the population it was measured on in the doc comment.
+4. Unit test with a fake aug solver: inertia branch escalates, refinement
+   stall still gets one escalation, a second refinement stall does **not**
+   (mutation: the old single flag fails the first assertion, an unbounded
+   rule fails the second). CLI pin as in R2c.
+
+**Acceptance.** As R2c's (pooling ≤ 300, resto < 24, an optimum), plus: of
+the counterfactual's 19 lines, at most the `pooling_rt2stp` line and lines
+that *improve* in `it=` without changing `q` to the cap may move; lbfgs
+`circle_parabola_t0p5` and lbfgs `scale_audit_retry_meyer3` unchanged.
+
+**Validation.** As R2c (sweep both legs, crate tests, Python test if it
+builds, M1), plus `issue857_*` and `issue_983_scale_audit_retry_budget`
+named explicitly. Status at best `swept — needs vanderbei before merge`.
+
+**Must not regress.** Everything in R2c's list; gh#850's
+`feral_increase_quality=no` contract (the sweep line `cresc4` lbfgs carries
+that second-opinion rung — it must still appear and still fail the same
+way).
+
+**Stop.** More than three of the counterfactual's 19 lines move the same
+way they did under the counterfactual; any `q` running to 12/24 that was
+not there before; two iterations.
+
+### R2e — the gh#592 walk-back refuses a numerically singular `δ_c`-free factor
+
+**Goal.** Keep `δ_c` at iteration 4 instead of accepting a factor with
+min |eig| 2.0e-17, so the 6.4e16 step is never produced and neither R2b
+nor R2c has anything to repair.
+
+**Files / symbols.**
+- `crates/pounce-common/src/pd_perturbation.rs` `maybe_withdraw_delta_c`
+  (~631, gh#592 walk-back), `perturb_for_singular_with` (~327, gh#981
+  reinstatement with the `certified` argument), the gh#592 and gh#981 unit
+  tests; `dev-notes/issue-592-restart-non-idempotence.md`,
+  `dev-notes/issue-981-delta-c-walkback.md`.
+- `crates/pounce-feral/src/lib.rs`: `min_pivot_magnitude` (FERAL
+  `solver.rs` ~2583), `singular_pivot_floor` default **1e-20** (~712 —
+  effectively off), `inertia_trust_floor` = `n·ε` (~200),
+  `singularity_certified` (~1721). `crates/pounce-linalg`
+  `SparseSymLinearSolverInterface` / `AugSystemSolver` for where a
+  `min_pivot_magnitude()` accessor (default `None`) belongs.
+- `pd_full_space_solver.rs` ~1640–1680, where a `Success` is accepted; the
+  handler knows whether the system it just factored is the one whose `δ_c`
+  the walk-back withdrew.
+
+**Hypothesis.** Both versions accept the withdrawn-`δ_c` factor because
+FERAL says `Success` (72 negatives, correct) — the count is right and the
+matrix is still singular to working precision. v0.12.0 survives it only by
+luck downstream. A factor whose `min_pivot_magnitude` is below the inertia
+trust floor (`n·ε ≈ 1e-14` here; the eigenvalue is 2e-17, the LDLᵀ pivot
+may be larger — **measure**) should be treated as `Singular`-certified,
+which sends the handler to `perturb_for_singular_with(certified = true)`
+and reinstates `δ_c` (gh#981's path), with no change to refinement or
+escalation.
+
+**Reproduce.** `p-prev` exact 492; the R2 probe's iteration-4 line
+(`Success` at `δ_x = 1e-4`, `δ_c = 0`, min |eig| 2.0e-17).
+
+**Measure first.** Expose `min_pivot_magnitude` through a tracing line in
+`pounce-feral` (or the probe) and, over the full sweep corpus both legs,
+record for every **accepted** factor that follows a walk-back: `min_piv`,
+`max_piv`, `n·ε`, and whether the fixture-leg ends solved. Histogram. The
+item is refuted if the pooling iteration-4 pivot is **not** below the
+floor (then the eigenvalue is small but the factor does not know it, and
+the lever is R2c's); it is a blanket change if many healthy walk-backs sit
+below the floor (then `the_walkback_is_inert_on_this_fixture_since_gh693`
+and the gh#592 fixtures will tell you quickly).
+
+**Steps.**
+1. `min_pivot_magnitude()` on the aug-solver trait, `None` by default,
+   implemented for the FERAL backend.
+2. In `pd_full_space_solver.rs`, on `Success` for a system whose `δ_c` the
+   walk-back just withdrew: if `min_piv < inertia_trust_floor`, treat as
+   `Singular` with `singularity_certified` true → `perturb_for_singular_with`
+   reinstates `δ_c`. Info letter (e.g. `W`) so the table shows it. Do not
+   touch `maybe_withdraw_delta_c`'s decision to *try* the withdrawal — the
+   change is to what counts as the withdrawal succeeding.
+3. Unit test with a fake backend reporting `Success` and a sub-floor min
+   pivot after a walk-back → `δ_c` reinstated; mutation: without the check
+   `δ_c` stays 0. CLI pin as in R2c.
+
+**Acceptance.** As R2c's (pooling ≤ 300, resto < 24, an optimum). In
+addition the gh#592 fixtures (`issue_592_delta_c_walkback.rs`,
+`issue981_cstr_dup_row`) keep their counts: the walk-back must still
+withdraw `δ_c` wherever it does today unless the factor is sub-floor.
+
+**Validation.** As R2c. Status at best `swept — needs vanderbei before
+merge`; `steenbr*` and `dallas*` are where `δ_c` reinstatement has
+historically moved counts.
+
+**Must not regress.** `the_walkback_is_inert_on_this_fixture_since_gh693`;
+every gh#592 walk-back test; gh#981's reinstatement test; `issue_250`;
+`deb7` exact `SolveSucceeded`.
+
+**Stop.** The pooling pivot is above the floor (refuted — record); the rule
+fires on more than a handful of healthy walk-backs in the corpus; the fix
+needs the gh#592 walk-back disabled on a fixture it is inert on today (the
+206 → 812 history in CLAUDE.md is the one thing this family must not
+reopen); two iterations.
+
+### M1 — re-measure the inventory after every landed R2x item
+
+Not a code item; a rule that runs inside each R2b/c/d/e iteration (and B1's)
+before the next sibling starts, because R3 landed **before** the R2 family
+and the original "R3 is re-baselined after R2" order is inverted.
+
+**After each landed R2x item**, on the new tip, record in the item log and
+in the inventory Status cells:
+
+| fixture (leg) | what to record | why |
+|---|---|---|
+| `pooling_rt2stp` exact + lbfgs | status, it, q, objective (which optimum), restoration calls | the target; the lbfgs line is the collateral check (82 it, −3273.954992 today) |
+| `dallass` exact + lbfgs | status, it, restoration calls | R3's 28 / 301 is the baseline **now**; an R2x item that moves `dallass` is a reportable line (it has no kink left, so any move is pure trajectory) |
+| `deb7` exact + lbfgs | status, it | 114 `SolveSucceeded` / `RestorationFailed` 1206 — the guard the plan names for every NLP-arm item |
+| `scaled_feasible_a` both | engine, it | must **not** move (convex arm); if it does, the item leaked into routing |
+| lbfgs `circle_parabola_t0p5`, lbfgs `scale_audit_retry_meyer3` | it, q, 2nd, objective | the counterfactual's collateral lines |
+| F1 margin | 500 − pooling exact it | `issue_592` pin; tighten only per §4 |
+
+**Ordering consequences.** The first R2x item's `p-prev` is the tip that
+contains R3 (`250857b0` or later). B1 waits for the R2 family to finish
+(it changes pivoting → trajectories → would confound the sibling
+re-baselines). R4/R4b are unaffected by any of this but their
+`sweep-fixtures.sh` diff must still be empty wherever they land. R1b–R1e
+touch only the convex arm and can be interleaved anywhere after B1 without
+affecting M1's table (their own re-baseline table is in §4's sibling rule).
+
+### R1d — cut the first, unequilibrated HSDE solve short
+
+**Goal.** `scaled_feasible_a` stops costing 400 HSDE iterations for a
+reported 200: the first solve, which ends `IterationLimit` at `true_kkt
+0.149` anyway, is recognised as hopeless early and the gh#293 equilibrated
+retry gets the budget. Verdict, engine and the *reported* count are
+unchanged by construction; wall time roughly halves on this model. This is
+the one R1 route with independent value whatever R1b/c do, because the
+detector applies to any HSDE solve that would run to the cap and lose.
+
+**Files / symbols.**
+- `crates/pounce-convex/src/hsde.rs`: `status = QpStatus::IterationLimit`
+  (~617) and the main loop (~631); `rel_candidate` / `restore_candidate`
+  (~307, ~1039, ~1576); the post-loop `true_kkt_error` upgrade (~1620–1640);
+  the gh#989 proximal-stall guard (~774–795, `PROX_STALL_ITERS`) as the
+  precedent for an in-loop stall detector; the trace (`QpIterate`).
+- `crates/pounce-convex/src/ipm.rs` ~601–690: `retry_on =
+  NumericalFailure | IterationLimit | OptimalInaccurate`; the retry is
+  accepted only when genuine (gh#712); `equilibrated_retry_budget` (~807):
+  full `max_iter` when `P ≠ 0`, capped on a pure LP. `hsde_scalars::tracked`
+  for measuring both solves' counts.
+- Tests: `issue_689_direct_driver_scaled_feasible.rs`, `issue984_stopping_units.rs`,
+  `issue_1000_*`, `issue414_*`, `illconditioned_huge_scale.rs`.
+
+**Measured (R1 log).** First solve: τ 1.6e-9 → 7.6e-8 **linearly** over
+it 19–199, `mu` ~1e-37, `true_comp` ∝ 1/τ (7.2 → 0.149), ends
+`IterationLimit` at `true_kkt_error 0.149`. Retry: 200 more, `Optimal` by
+the post-loop certificate. `max_iter = 400` converges at 230.
+
+**Hypothesis.** A solve in which τ has collapsed (≪ 1) and is growing only
+linearly while `mu` is already far below anything the stopping test can
+use is not going to certify within the budget; a conservative pattern
+detector — e.g. over a window of `k = 20` iterations, τ < 1e-6, `mu <
+tol²`, and `true_kkt_error` falling by less than 2× — returns
+`IterationLimit` at the window's end instead of at the cap, and the
+existing retry logic does the rest. It changes nothing on a solve that
+converges, and on a solve that would have ended `IterationLimit` it only
+changes *when*.
+
+**Reproduce.** `p-prev` exact: engine `cvx-qp`, 200 it reported; with
+`hsde_scalars::tracked` (or a temporary counter) confirm 200 + 200 HSDE
+iterations in the call.
+
+**Measure first.** Per-iteration τ, `mu`, `true_kkt_error`, α on **every**
+HSDE solve of the sweep corpus (92 `cvx-qp` + 14 `cvx-qcqp` lines, both
+legs — same binary, so one leg suffices — and the retries, which the sweep
+does not see): for each solve, its final status and the first iteration at
+which the candidate pattern holds. The detector is admissible only if it
+fires on **no** solve that ends `Optimal` (genuine) and fires on
+`scaled_feasible_a`'s first solve well before 200 (target ≤ 60). Report the
+table: solves examined, solves that end `IterationLimit`, solves the
+detector would cut, iteration saved.
+
+**Steps.**
+1. Implement the detector in the main loop as a status reason distinct
+   from the cap (e.g. `IterationLimit` with a trace/stat flag `early_exit`),
+   so JSON and the sweep can tell them apart if the reason is ever
+   surfaced; `retry_on` needs no change.
+2. `pounce-convex` test on `scaled_feasible_a`'s data through the public
+   solve: the first solve returns before iteration 80, the overall answer is
+   still `Optimal` with `|f| ≤ 1e-3` and `true_kkt < tol`. Mutation: with
+   the detector disabled, the first solve runs 200.
+3. If the sweep's retries show any *accepted* retry whose first solve the
+   detector would have cut earlier, record it — that is the win beyond
+   this fixture.
+
+**Acceptance.** `scaled_feasible_a`: total HSDE iterations across both
+solves 400 → ≤ 260; reported engine / status / objective / `iteration_count`
+unchanged (200, until R1b/c change it); wall time down; `scaled_feasible_b`
+36 unchanged; the detector fires on zero solves that end `Optimal` in the
+corpus.
+
+**Validation.** `scripts/sweep-fixtures.sh` both legs must diff **empty**
+(the sweep reads the reported count, which is the retry's) — a moved
+convex line means the detector fired on a returned solve and is a stop.
+`cargo test -p pounce-convex -p pounce-cli`; `python/tests/test_qp*.py` if
+the extension builds. `benchmarks/qp` status + total iterations + wall A/B
+(0.13.0: 137 optimal, total 2998) — **not available here**, so status at
+best `swept — needs benchmarks/qp before merge`.
+
+**Must not regress.** The gh#293 retry acceptance rule and its LP budget;
+gh#414 / gh#984 guards; gh#1000 I.D/I.8 pins; gh#689 `ITER_BUDGET`; the
+gh#989 proximal-stall guard's own test (do not merge the two detectors).
+
+**Stop.** The detector fires on any corpus solve that ends `Optimal`; it
+cannot fire on `scaled_feasible_a` before ~150 without doing so; two
+iterations.
+
+### R1e — the post-165 tail: a certifiable iterate waiting on an unreachable `pres`
+
+**Goal.** From retry iteration 165 `comp_ok` holds and `true_kkt_error`
+is 8.6e-9 (< tol), yet the loop runs to the cap because `pres < tol` is
+unreachable (`pres` is 4 ulp of a `5e9` cancellation) and the relative arm's
+`gap_rel` is unmet. Stop there with the certificate.
+
+**Files / symbols.** `hsde.rs` ~898–1000: `abs_ok`, `rel_in_floor`
+(needs `pres ≤ cap_p` — already true, `cap_p = 7.1e-5`), `comp_ok`,
+`converged`, `REL_FLOOR_KAPPA`, `rel_candidate`; the post-loop certificate
+(~1620–1640) and `ipm.rs`'s comment that it "deliberately runs *after* the
+loop … breaking early on the certificate would hand back a less-polished
+iterate". `issue984_stopping_units.rs`, `issue_1000_*` (I.D/I.8), gh#846.
+
+**Measured (R1 log).** it 165: `pres` 1.1e-6, `dres` 1.3e-10, `gap` 1.3e-4,
+`true_kkt` 8.6e-9; it 199: `pres` 8.5e-6, `dres` 7.8e-15, `gap` 3.2e-5,
+`true_kkt` 9.1e-15. So the tail **does** polish — six orders in the
+certificate — which is the honest counter-argument. R1 declined this
+shape as insufficient alone (200 → ~166 at best).
+
+**Hypothesis.** When `true_kkt_error(x/τ, y/τ, z/τ) < tol` **and** the only
+unmet stopping term is `pres`, **and** `pres` has not decreased over `k`
+iterations while sitting below `κ·ε·scale_p` (its rounding floor), the
+loop is waiting on a term it provably cannot meet; stopping is not
+"handing back a less-polished iterate" in any sense the stopping test can
+express. Expected gain here: ≤ 35 iterations (17%). The item earns its
+place only if the measure-first step shows the pattern on other corpus
+lines.
+
+**Reproduce.** `p-prev` retry trace, it 165–199 as above.
+
+**Measure first.** On every convex sweep solve: at the final iteration,
+which stopping terms were unmet, and for how many consecutive iterations
+`pres` had been pinned (no decrease, below `κ·ε·scale_p`) while
+`true_kkt < tol`. Count the solves where that pattern holds for ≥ 10
+iterations. Zero or one → record and drop (R1b/c subsume the model's
+count); several → implement.
+
+**Steps.** Add the exit after `converged` is computed, gated exactly as
+the hypothesis says (all three conditions, `k ≥ 10`); emit a distinct trace
+flag; test on `scaled_feasible_a` data that the retry stops ≤ 180 with the
+same verdict, mutation-checked; keep the post-loop upgrade as is.
+
+**Acceptance.** `scaled_feasible_a` retry ≤ 180 it (alone) with the same
+verdict and `|f| ≤ 1e-3`; no convex line in the sweep loses a status or
+rises in count. Composition with R1b/c is recorded, not assumed.
+
+**Validation.** Sweep both legs (only convex lines that *fall* may move);
+`cargo test -p pounce-convex -p pounce-cli`; Python `test_qp*` if it
+builds; `benchmarks/qp` — status at best `swept — needs benchmarks/qp
+before merge`.
+
+**Must not regress.** The gh#1000 stopping-test corrections (this adds an
+exit, it must not loosen any term), gh#984's "every stash satisfies
+`comp_ok`", gh#846, gh#414.
+
+**Stop.** The measure-first count is ≤ 1 corpus solve; any convex line's
+objective changes beyond `tol`; two iterations.
+
+### R1b — HSDE centering safeguard: the `σμ` target must not fall below the true-slack complementarity
+
+**Goal.** The retry's it 20 → 125 crawl — `mu` dividing by ~8 every full
+step (5.0e-19 → 3.2e-117) while the true complementarity falls linearly
+(2.6e5 → 9.8e3) — is replaced by a trajectory that keeps the barrier at the
+scale the un-homogenized point actually needs; `scaled_feasible_a` certifies
+in ≤ 60 (R1's target) on both legs.
+
+**Files / symbols.**
+- `hsde.rs` ~1284–1292: `mu_aff`, `sigma = (mu_aff / mu)³`, `sigma_mu`; the
+  gh#218 centering ladder (~145–175, `CENTERING_*`, **step-length**
+  triggered — it never fires here because α = 1 throughout); ~931
+  `row_slack[i] = h[i] − (Gx)[i]/τ`; ~233 `true_slack_complementarity`
+  and ~991 `true_comp` (orthant only); `tol_true_comp`; `correctors.rs`
+  (Gondzio, orthant only).
+- `dev-notes/issue-689-direct-driver-cold-start.md` (the *direct* driver's
+  slack decoupling and how it was re-coupled); `ipm.rs` ~4303 (the
+  "≈ 4 ulp" comment on this model).
+- Tests: `issue984_stopping_units.rs`, `issue_1000_*`,
+  `issue414_cost_normalized_false_optimal.rs`, `illconditioned_huge_scale.rs`,
+  `issue_689_*`, the gh#218 centering test, `declared_optimum_sentinel.rs`.
+
+**Hypothesis.** The internal complementarity `s·z` is driven to 1e-37 …
+1e-101 on a slack `s` that has decoupled from the model's `h − Gx̂` (the
+gh#689 decoupling, now on the HSDE side), so Mehrotra's σ sees a nearly
+centered, nearly converged iterate and asks for almost no centering while
+the true gap is 1e5. Units: internal `mu` is in homogenized units (`s =
+τŝ`, `z = τẑ`), so the comparable true quantity is `τ²·true_comp/(degree+1)`
+— at it 20 that is ≈ 2.6e5·(9.7e-11)² ≈ 2.4e-15 against `mu` 5.0e-19, four
+orders apart, and ~1e-100 apart by it 120. A floor `σμ ≥ θ·τ²·true_comp/
+(degree+1)` (θ to be measured; start 0.1) keeps the target from running
+away from the true point. Alternative, if the floor does not bite: re-couple
+`s` to the true slack (`s ← τ·(h − Gx̂)` projected into the cone) when the
+two disagree by more than a factor κ — the HSDE analogue of the gh#689 fix.
+Prefer the floor (one expression in the σ computation, orthant-only like
+`true_comp`); measure the re-coupling only if the floor is inert.
+
+**Reproduce.** `p-prev` exact and lbfgs: `cvx-qp` 200 / 200; the R1 log's
+retry table.
+
+**Measure first.** Per iteration on the retry: `mu`, `τ²·true_comp/(deg+1)`,
+their ratio, σ, α. Then the same on every convex solve in the sweep corpus
+(one leg): the **maximum** ratio each solve reaches and at which iteration.
+The floor is admissible as a narrow change only if healthy solves keep
+the ratio within ~1e2 (so a θ of 0.1 never fires on them); report the
+distribution. If healthy solves routinely exceed it, the floor is a
+convex-arm-wide retune and the item is "re-coupling or nothing".
+
+**Steps.**
+1. Implement the floor behind a constant (`CENTERING_TRUE_COMP_FLOOR`), with
+   the units derivation in the doc comment and the measured θ; emit a trace
+   flag when it binds.
+2. `pounce-convex` test on `scaled_feasible_a` data: ≤ 60 iterations on the
+   returned solve, `Optimal`, genuine; mutation: floor removed → 200.
+3. If the floor is inert on the retry (ratio never exceeds θ⁻¹ because
+   `true_comp` itself is what the stopping test is failing on), switch to
+   the re-coupling shape and repeat the measurement — do not do both in one
+   iteration.
+
+**Acceptance.** `scaled_feasible_a`: `cvx-qp`, `SolveSucceeded`, `|f| ≤
+1e-3`, `iteration_count ≤ 60` on both legs (200 → target; report the
+number and whether the first solve now certifies, which also retires the
+retry on this model). `scaled_feasible_b` ≤ 36. The floor binds on no
+convex sweep solve that ends `Optimal` today, or on the ones it binds on
+the count does not rise.
+
+**Validation.** Full sweep both legs `p-prev` vs new: convex lines may move
+only downward in count; any rise > 10%, any status or engine change, any
+objective change beyond `tol` is a stop; recount the engine split. `cargo
+test -p pounce-convex -p pounce-cli`; Python `test_qp*` if it builds.
+`benchmarks/qp` total iterations + statuses (137 optimal / 2998 at #1002) —
+**not available here**: status at best `swept — needs benchmarks/qp before
+merge`. QFORPLAN (33 it at `f6a4e4c2`) is the equality-heavy model the
+commit message of #1002 names as sensitive; it is in that corpus.
+
+**Must not regress.** gh#218's centering ladder and test; gh#984's stash
+rule; gh#414 `optimum_is_genuine` / `verify_or_repair_optimum`; gh#1000
+I.D/I.8; gh#689 `ITER_BUDGET`; gh#846; `cvx-qcqp` lines (14) must not move
+at all — `true_comp` is orthant-only and so is the floor.
+
+**Stop.** The floor binds on > 10% of healthy corpus solves; the retry's
+ratio never exceeds θ⁻¹ and re-coupling does not reach ≤ 100 either;
+two iterations.
+
+### R1c — data-sized HSDE cold start
+
+**Goal.** Start the embedding at the data's scale so τ does not have to
+collapse to ~1e-10 to represent `‖x̂‖ = 5e9`, removing the regime in which
+every homogenized quantity is 1e-20 of its true size and the R1b crawl
+occurs; `scaled_feasible_a` ≤ 60 on both legs, ideally on the **first**
+solve so the retry never runs.
+
+**Files / symbols.**
+- `hsde.rs` ~533–540: the self-dual start `x = y = 0`, `s = z = e` (cone
+  identity), `τ = κ = 1`.
+- `ipm.rs` ~4485–4610: the `run_ipm` starting-iterate builder — cold seed
+  (`x = 0`, identity duals) through the same Mehrotra recentering as a
+  warm seed (gh#689: "what sizes the cold start to the problem's own data";
+  the direct solve of this model 175 → 27). The orthant positivity shift and
+  SOC λ_min lift are there.
+- `issue_689_direct_cold_start_scale.rs`,
+  `issue_689_direct_driver_scaled_feasible.rs` (`ITER_BUDGET = 60`, direct
+  route), `issue_689_*`; the gh#293 comment in `solve_qp_ipm_core` on why
+  HSDE "must not get" Ruiz (a warning about composing preconditioning on
+  this arm, relevant here).
+
+**Hypothesis.** The unit start is scale-free by design (Clarabel/ECOS use
+it for that reason) but on data with `‖x̂‖ ~ 5e9` it forces τ to carry the
+scale; seeding `(x, y, s, z)` from the recentered cold seed at `τ = κ = 1`
+starts at the right scale and the embedding's dynamics are unchanged
+(interior `(s, z, τ, κ)` is all the theory needs). Infeasibility and
+unboundedness certificates still arise from τ → 0 / κ → 0; what moves is
+how many iterations each solve takes to get anywhere — i.e. **every** HSDE
+trajectory.
+
+**Reproduce.** `p-prev` both legs 200 / 200; the R1 log's note that the
+plateau is at `‖x̂‖ = 5e9` in the equilibrated retry too (so equilibration
+does not remove the scale).
+
+**Measure first.** (1) On every convex sweep solve, τ at the first
+stopping-test pass and at exit: how many solves ever run at τ < 1e-6 (only
+those can move materially; the rest move by rounding). (2) In a probe
+build, apply the seed to `scaled_feasible_a` only (both solves) and record
+counts; if the first solve certifies, the item retires the retry on this
+model — a gain R1b/R1d cannot give. (3) The gh#293 LP-budget reasoning
+("every accepted LP retry converged by iteration 78") is a trajectory
+statistic that will move; note it.
+
+**Steps.**
+1. Implement the seed behind an option (`qp_hsde_start = identity |
+   recentered`), **default `identity`** until the corpus A/B — this is the
+   only way the code can merge from a machine without `benchmarks/qp`; the
+   default flip is a separate, corpus-gated commit. Reuse the `run_ipm`
+   recentering, do not reimplement it.
+2. `pounce-convex` test: `scaled_feasible_a` with `recentered` ≤ 60 both
+   solves, `Optimal`, genuine; identity path unchanged (its existing pins).
+3. Sweep with the option forced on (temporarily, via the options file or
+   an env var the sweep honours) to measure the default flip's blast radius
+   now, even though the flip itself waits.
+
+**Acceptance.** With `recentered`: `scaled_feasible_a` `cvx-qp`,
+`SolveSucceeded`, `|f| ≤ 1e-3`, ≤ 60 on both legs; `scaled_feasible_b` ≤
+36; every `issue_689_*` / `issue_1000_*` / `issue984_*` / `issue414_*` /
+`illconditioned_huge_scale` test passes under both settings (run the
+convex test suite twice, once per default, via the option).
+
+**Validation.** Sweep both legs at the default (must diff **empty** — the
+default did not move) and with the option forced (every convex line is a
+candidate; each explained; any status/engine/objective change is a stop;
+the 14 `cvx-qcqp` lines included — the SOC lift is part of the seed).
+`cargo test -p pounce-convex -p pounce-cli`; Python `test_qp*` if it
+builds. Status: the opt-in commit can be `done`; the default flip is
+`swept — needs benchmarks/qp before merge` and is listed as such in the
+inventory.
+
+**Must not regress.** Everything in R1b's list; infeasibility /
+unboundedness certification tests in `pounce-convex` (the seed must not
+delay a certificate: pin the iteration at which the corpus's infeasible
+models certify, before and after).
+
+**Stop.** Any certificate test flips or certifies > 2× later; the forced
+sweep moves a convex status; R1b has already met ≤ 60 on both legs **and**
+the first solve does not certify with the seed (no independent value);
+two iterations.
+
+### R4b — a structural, MLSL-aware stagnation rule (separate from R4's gamma grid)
+
+**Goal.** `circle_parabola_t0p5` under `--minima mlsl --seed 0 --n-minima 6
+--max-solves 30 --patience 8` finds both minima at the current default
+`gamma 0.5`, by making the stagnation rule understand what an MLSL launch
+that re-finds an archived minimum means — without moving gamma and without
+losing the #993 gains on camel / wavy / wavy_1e12.
+
+**Files / symbols.** `crates/pounce-minima/src/search.rs`: `reject` (~599:
+`stagnant += 1; if stagnant >= patience → Stop::Converged`), `consider`
+(~530: `accepted` requires `!is_known(x)`; a known re-find reaches
+`reject`), `near_any` (~592, against the archive at `radius`), `run_mlsl`
+(~647–690: pool, `radius = gamma·√n·(ln N/N)^(1/n)`, single-linkage filter
+`better_near[i] || near_any(pool_x[i], radius)`), the archive type;
+`options.rs` (`patience`, `gamma`); `crates/pounce-cli/src/cli.rs` ~328;
+`python/pounce/_minima.py`; `docs/src/find-minima*.md`. Guards:
+`issue989_mlsl_cli.rs`, `python/tests/test_minima.py` (camel six minima at
+`--max-solves 60 --patience 15`; `sample_cap_reached` at gamma 100),
+`python/tests/test_minima_cli_parity.py`, `scripts/sweep-minima.sh` (54
+lines; the saddle `found=0` lines and the `kkt_rej` line).
+
+**Measured (R4 table, seed 0).** gamma 0.5: found 1 in **9** solves, status
+`converged` — eight consecutive launches re-find minimum 1 and trip
+`patience 8` with 21 of 30 solves unused; gamma 2 (0.12.0): found 2 in 11,
+because the larger radius filters those launches before they run.
+`p-base --gamma 0.5` reproduces found 1 / 9, so it is the rule, not gh#966.
+
+**Hypothesis.** The patience counter was written for multistart, where
+every solve is an independent draw and eight failures in a row is
+evidence the landscape is exhausted. Under MLSL a launch whose sample
+passed the clustering filter and then converged to an archived minimum is
+evidence that the **filter's radius under-covers that basin**, not that
+the search is done. Rule: on such a re-find (i) grow that minimum's
+exclusion radius in the archive to the distance from the launching sample
+to the minimum (so `near_any` filters that basin from the next round on),
+and (ii) count it as a strike only when the round produced no launch at
+all, or at half weight — the stagnation that remains is "rounds without a
+new minimum", which is what patience is for.
+
+**Reproduce.** `p-prev` row above (found 1 / 9 / `converged`); count the
+re-finds in the trace (`TraceEntry.accepted == false` with `success`).
+
+**Measure first.** The 10-seed table R4 step 2 produces (seeds 0–9, camel /
+circle_parabola_t0p5 / haverly_t3_brf0 / wavy / wavy_1e12, gamma 0.5) —
+reuse it if R4 ran; otherwise run it here, adding per run: launches that
+re-found an archived minimum, and the stop reason. The item is worth it
+only if re-finds dominate the stop on circle_parabola on most seeds and
+are rare where found already equals the target (camel 4–5 of 6, wavy 6).
+
+**Steps.**
+1. Per-minimum radius in the archive (initialised to the dedup radius,
+   grown on re-finds); `near_any` reads it.
+2. `reject` takes a reason; a re-find under MLSL does not count a full
+   strike (pick (ii)'s exact weighting from the table; document it).
+3. `pounce-minima` unit test: a 1-D two-basin function sampled so that
+   every early sample lands in basin 1 — without the rule the search stops
+   at `patience`; with it, basin 2 is reached within the sample budget.
+   Mutation-checked both ways.
+4. Python: the crate is shared, so `find_minima` inherits the rule; run
+   `test_minima_cli_parity.py` if the extension builds, else say so and
+   leave `_minima.py` untouched (no default moved).
+
+**Acceptance.** `scripts/sweep-minima.sh` `p-prev` vs new:
+`circle_parabola_t0p5 mlsl` reads `found=2`; no `mlsl` line reads fewer
+minima; non-`mlsl` lines diff **empty**. 10-seed table: mean minima on
+camel / wavy / wavy_1e12 / haverly not below gamma-0.5's; mean solves not
+up by more than 20%. `scripts/sweep-fixtures.sh` diffs empty.
+
+**Validation.** `sweep-minima.sh`, `sweep-fixtures.sh` (empty), `cargo test
+-p pounce-minima -p pounce-cli`, the Python tests if buildable; the
+10-seed table in the log and the commit message.
+
+**Must not regress.** `mlsl_default_gamma_finds_all_six_camel_minima`,
+`the_sample_cap_is_named_as_such`, gh#966 parity, the saddle `found=0`
+lines, the `kkt_rej` line, the gh#103 sample budget (the rule must not
+make a round that launches nothing loop forever — `note_sample` still
+bounds it).
+
+**Sibling rule with R4.** If R4 moves gamma and recovers found=2 on ≥ 8 of
+10 seeds, R4b is re-baselined: kept only if it recovers seeds the gamma
+change misses or lowers mean solves, with the table; otherwise `dropped —
+recovered by R4`. If R4b lands first and recovers, R4 is `dropped` (gamma
+stays 0.5, help text and docs unchanged). Never both in one iteration.
+
+**Stop.** Re-finds do not dominate the stop on circle_parabola across
+seeds; any `mlsl` line loses a minimum; two iterations.
+
 ## 4. Loop protocol
 
 **Pick the next item** in the §2 order whose Status is `todo` and whose
-dependencies are `done` or `skipped` (R3 waits for R2; B2/B3 wait for B1 and
-the corpus). One item per iteration. Never start a second item in the same
+dependencies are `done`, `skipped`, `not recoverable` or `dropped` (B1 waits
+for the R2 family; R4b waits for R4's table; B2/B3 wait for B1 and the
+corpus). One item per iteration. Never start a second item in the same
 iteration, even if the first was quick — its sweep is the evidence for its
 own commit.
+
+**Status vocabulary.** `todo`; `done`; `not recoverable (reason)` (hypothesis
+refuted, docs-only commit); `dropped — recovered by <id>` (a sibling's
+reproduce step no longer reproduces, numbers recorded); `re-baselined after
+<id>: <numbers>` (a sibling that still has something to recover, with its
+acceptance restated against the new tip); `swept — needs <corpus> before
+merge` (code, tests and the fixture sweep are in and explained, but the
+item changes an arm's trajectory corpus-wide and the corpus that would
+measure the blast radius is not on this machine — `benchmarks/qp` for the
+convex arm, `vanderbei` for the NLP arm, `mittelmann` added for B1). A
+`swept — needs …` item is **not** `done`: it is left for the owner to A/B
+on a machine with the corpus, and its commit message says so in the
+first line after the numbers. `POUNCE_BENCH_DATA` is unset here and
+`bench_data_root` resolves nothing; re-check once per iteration, not more.
+
+**Sibling items** (R2b/c/d/e; R1b/c/d/e; R4/R4b). Each family shares one
+defect; the members are different levers on the same iteration-4 chain or
+the same τ-collapse. Rules:
+
+1. Before starting a sibling, run its own **reproduce** step on the current
+   tip (which may contain an earlier sibling). If the regression no longer
+   reproduces to within the item's acceptance, mark it `dropped — recovered
+   by <id>` with the before/after numbers and do not implement it. A
+   docs-only commit records the drop.
+2. If it still reproduces partially, restate the acceptance against the new
+   numbers in the item log (`re-baselined after <id>: …`) and proceed only if
+   the sibling's hypothesis names a mechanism the landed item does not
+   touch (R1d's first-solve cut after R1b has fixed the retry; R2e's
+   walk-back after R2c has fixed the exit). "The same fixture moves again"
+   is not independent value; "a different population moves" or "the same
+   fixture's *hidden* cost (first-solve iterations, restoration calls,
+   wall time) moves" is. Say which, with numbers.
+3. Never land two siblings whose only evidence is the same fixture line.
+   The second must move something the first did not, and its sweep must be
+   taken against the tip containing the first.
+4. A landed sibling is not reverted because a later one would have been
+   narrower. Record the comparison (both counts, both collateral lists) in
+   §5 and leave the choice to the owner.
+5. M1's table is re-recorded after every landed R2x item; the R1 family
+   re-records `scaled_feasible_a` / `_b` both legs, the total HSDE
+   iterations of the call (both solves), and the convex engine split.
+6. A family is closed when its target is met or every member is `done`,
+   `dropped`, `swept — needs …` or `not recoverable`; the inventory row of
+   the parent (R1, R2, R4) gets a one-line summary pointing at the member
+   that did it.
 
 **Per-iteration checklist.**
 1. `git status` clean, on `claude/pounce-regressions-recovery-tz8uh2`,
@@ -645,7 +1568,8 @@ raise it. Docs-only iterations (skips) still run `cargo fmt --check`.
   (`m_eq = 0`), the `pres = 5.0e-6` plateau is the rounding floor of
   inequality rows at `‖x̂‖ = 5e9` (`ε·5e9 = 1.1e-6`; `cap_p = 7.1e-5`, which
   `pres` already satisfies), and through the plateau the un-homogenized point
-  is **not optimal** (`true_kkt_error` 2.6e5 at it 20, 9.8e3 at it 120, 23 at
+  is **not optimal** (the candidate shapes at the end of this bullet are now
+  items R1b–R1e in §3) (`true_kkt_error` 2.6e5 at it 20, 9.8e3 at it 120, 23 at
   it 125). The earliest any in-loop certificate could stop is it 165, after a
   blow-up (`inf_pr` 4.8e9 at it 140) and a 15-iteration recovery — 200 → ~166
   at best, and dependent on that blow-up. Suggested follow-up issue: **"HSDE:
@@ -668,7 +1592,9 @@ raise it. Docs-only iterations (skips) still run `cargo fmt --check`.
   driver's scale-relative arm (~4303) already names this plateau as `≈ 4 ulp`
   of a `5e9` cancellation — the plan's "regularization floor" reading was
   wrong.
-- **R2 `pooling_rt2stp` exact 492 it (v0.12.0: 162).** Not recoverable
+- **R2 `pooling_rt2stp` exact 492 it (v0.12.0: 162).** (The candidate
+  shapes at the end of this bullet are now items R2b–R2e in §3, plus R2d for
+  the 71-vs-72 count itself.) Not recoverable
   with the planned Gershgorin / quasi-definite acceptance: of 1310 ladder
   factorizations, the 146 `WrongInertia` ones with `δ_c > 0` **all** have an
   indefinite (1,1) block (0 PD, 0 Gershgorin-dominant), so the rule is
