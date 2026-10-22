@@ -42,7 +42,7 @@ iterations after a now-*correct* inertia report.
 | id | fixture / benchmark (leg) | v0.12.0 → 0.13.0 | suspected cause | recoverable? | Status |
 |---|---|---|---|---|---|
 | **R1** | `scaled_feasible_a` (exact and lbfgs) | nlp 22 / 19 it → cvx-qp **200 / 200** it, right answer | #1002 `f6a4e4c2`: HSDE endgame certifies the gh#293 equilibrated retry, whose loop never meets `pres < tol` (plateau 5.0e-6 → 5.7e-7) while `mu` runs to 1e-121; `Optimal` is stamped only by the post-loop `true_kkt_error` upgrade | **yes** — a stall-gated in-loop certificate, or a primal-residual floor that reads the stalled `pres` as the regularization floor it is | **not recoverable this way** (2026-10-22: hypothesis refuted — `m_eq = 0`, the plateau is a rounding floor, and the iterate is not optimal until it 165; see log + §5) |
-| **R2** | `pooling_rt2stp` (exact, x86) | 162 → **492** it (arm64: 109 → 242 total, *issue*) | FERAL 0.21 trajectory; `2599c2be` removed the latch (904 → 492); the remaining cost is the `δ_x` ladder climbing to `max_hessian_perturbation` with `δ_c` on (*issue*, unmeasured) | **partial** — the "stop the ladder once inertia is guaranteed" follow-up the issue names; must be measured first | todo |
+| **R2** | `pooling_rt2stp` (exact, x86) | 162 → **492** it (arm64: 109 → 242 total, *issue*) | FERAL 0.21 trajectory; `2599c2be` removed the latch (904 → 492); the remaining cost is the `δ_x` ladder climbing to `max_hessian_perturbation` with `δ_c` on (*issue*, unmeasured) | **partial** — the "stop the ladder once inertia is guaranteed" follow-up the issue names; must be measured first | **not recoverable this way** (2026-10-22: hypothesis refuted — 0 of 146 `WrongInertia` factors with `δ_c > 0` had a PD (1,1) block; the climb answers a genuinely indefinite `W`, λ_min down to −1.2e19 vs v0.12.0's −2.2e9; trigger found at iteration 4, see log + §5) |
 | **R3** | `dallass` (exact, x86) | 41 → **123** it (arm64 41 → 65, *issue*) | FERAL 0.21 path lands on `x = 0` of `|x|²·|x|^0.85` terms 12 times instead of 2; each is a non-finite Hessian → restoration entry; `5fc8c797` only stops the third from ending the solve | **partial** — (A) the Hessian is an evaluator artefact (`0·∞` from the product rule; the true second derivative of `|x|^2.85` at 0 is 0), fixable in `pounce-nl`; (B) R2 may move it; re-baseline after R2 | todo |
 | **R4** | minima `circle_parabola_t0p5` mlsl | found 2 of 2 → **1** | #993 `91b6dcda`: `MLSL_GAMMA` 2 → 0.5; at 0.5 the extra launches re-find the first minimum and the stagnation counter (`patience 8`) stops the search | **partial** — no single gamma wins at seed 0 (table in R4); needs a 10-seed measurement or a structural stagnation rule; non-blocking | todo |
 | **B1** | benchmark `qcqp1000-2c` (mittelmann) | 99 it / 28 s → 163 it / 112 s (*comment*) | pounce reuses the symbolic ordering FERAL chose for the least-squares multiplier-init matrix (W = 0, D = I) for every later KKT; `invalidate_symbolic_cache()` after the init factor halves factor time (*comment*) | **yes** for the code change; **measurement blocked** here (no benchmark corpus on this machine); a branch `perf/feral-symbolic-after-init` is said to be in progress — check `origin` first | todo |
@@ -52,7 +52,7 @@ iterations after a now-*correct* inertia report.
 | X1 | exact `deb7` arm64 Optimal/147 → Acceptable/180 | (*issue*) | FERAL 0.21 NEON trajectory | **not recoverable here** (x86 improves 143 → 114) (§5) | n/a |
 | X2 | lbfgs `dallass` arm64 Optimal/224 → ErrorInStep/308 | (*issue*); x86 fails on both versions | FERAL 0.21 trajectory | **not recoverable here**; the x86 lbfgs failure predates 0.13.0 (§5) | n/a |
 | X3 | lbfgs `pooling_rt2stp` arm64 −4391.83 → −3273.95 | (*issue*); x86 failing → solved | bistable nonconvex model | **no** — both are certified optima (§5) | n/a |
-| F1 | `issue_592` pin `< 500` sits 8 above x86's 492 | — | R2 | resolved by R2; **do not raise the pin** | with R2 |
+| F1 | `issue_592` pin `< 500` sits 8 above x86's 492 | — | R2 | resolved by R2; **do not raise the pin** | open — R2 did not land; pin untouched, margin still 8 (follow-up in §5) |
 
 ## 2. Ordering
 
@@ -311,6 +311,18 @@ systems where the block was provably PD.
 (the `2599c2be` fix); gh#592's walk-back tests; gh#981's reinstatement test
 (`issue981_cstr_dup_row`); gh#540/gh#1003 `pounce-feral` unit tests; the
 `issue_250` hang guard; `deb7` must stay `SolveSucceeded` on the exact leg.
+
+**Refuted (R2 iteration, 2026-10-22).** Measured with a temporary dense
+probe on every ladder factorization (log below): no `WrongInertia` factor
+with `δ_c > 0` has a positive-definite (1,1) block, so the planned
+"accept when Sylvester guarantees the inertia" arm would never fire on this
+fixture. The ladder stops within ~1 rung of the (1,1) PD threshold
+(median `δ_x / −λ_min(W+Σ_x)` = 5.7); it climbs high because `W` itself is
+indefinite by 1e13–1e19 after iteration 5, which v0.12.0 never is. The
+trigger is an iteration-4 step from a `δ_c`-free, numerically singular
+factor that iterative refinement accepts because the matrix's single
+quality escalation was already spent by the ladder's too-few-negatives
+branch. Follow-up in §5.
 
 ### R3 — `dallass` exact: the `|x|²·|x|^0.85` kink
 
@@ -656,6 +668,42 @@ raise it. Docs-only iterations (skips) still run `cargo fmt --check`.
   driver's scale-relative arm (~4303) already names this plateau as `≈ 4 ulp`
   of a `5e9` cancellation — the plan's "regularization floor" reading was
   wrong.
+- **R2 `pooling_rt2stp` exact 492 it (v0.12.0: 162).** Not recoverable
+  with the planned Gershgorin / quasi-definite acceptance: of 1310 ladder
+  factorizations, the 146 `WrongInertia` ones with `δ_c > 0` **all** have an
+  indefinite (1,1) block (0 PD, 0 Gershgorin-dominant), so the rule is
+  inert here. The high `δ_x` is the correct answer to a `W` whose λ_min is
+  −1e13…−1.2e19 (151 of 516 systems below −1e10; v0.12.0: worst −2.2e9,
+  none below −1e10). The `W` blow-up starts at iteration 4: the gh#592
+  walk-back withdraws `δ_c` (both versions do this) and the `δ_c`-free
+  factor at `δ_x = 1e-4` is numerically singular (min |eig| 2e-17, FERAL
+  reports `Success`, 72 negatives); its solve has a dual part of **6.4e16**.
+  On v0.12.0 the same decision gives 3.5e16, but iterative refinement stalls
+  (7.5e-9), escalates pivot quality, refactors and gets **3.0e6**. On
+  0.13.0 the ladder's first factor at iteration 4 reported 71 < 72
+  negatives, which takes `pd_full_space_solver.rs`'s too-few-negatives
+  branch and spends the matrix's one quality escalation there
+  (`augsys_improved = true`); refinement then stalls at 1.6e-8, cannot
+  escalate, takes the `S` exit (ratio < `residual_ratio_singular`) and keeps
+  the 6.4e16 step; λ_min(W) is −4.1e13 at iteration 5. Counterfactual
+  (probe build only, env-gated, not committed): letting refinement escalate
+  even when `augsys_improved` is set takes `pooling_rt2stp` exact
+  **492 → 109** (−4391.826, the other certified optimum; 3 restoration
+  calls), `dallass` 123 and `deb7` 114 unchanged — but as a blanket rule it
+  moves 19 sweep lines (escalations run to the cap of 12/24 on 15 of them;
+  lbfgs `circle_parabola_t0p5` changes second-opinion rung and objective
+  8.155 → 10.428; lbfgs `scale_audit_retry_meyer3` 112 → 152). Suggested
+  follow-up issue: **"PD solver: a quality escalation spent by the inertia
+  ladder's too-few-negatives branch leaves iterative refinement none for
+  the same matrix, so a numerically singular `δ_c`-free factor's step is
+  kept (`pooling_rt2stp`, 492 vs 109 it)"** — numbers: iteration-4 dual
+  step 6.4e16 kept vs 3.0e6 after escalation; λ_min(W) −2.2e9 (v0.12.0) vs
+  −1.2e19 (0.13.0); 492 → 109 under the blanket counterfactual with 19
+  collateral sweep lines. Candidate shapes for that issue: track the two
+  escalation reasons separately (one for the inertia branch, one for
+  refinement, per matrix), or refuse the `S` exit when the step's dual part
+  is many orders above the right-hand side's. Both are trajectory changes
+  across the NLP arm; they need the full sweep and the vanderbei A/B.
 - **Anything that requires the benchmark corpus** (B1's benefit, B2, B3) is
   blocked on this machine: `POUNCE_BENCH_DATA` is unset and no
   `~/projects/pounce-bench-data` exists. The code half of B1 is still in
@@ -755,3 +803,146 @@ no mutation check, no fixture sweep (nothing can move) and no `cargo test`;
 corpus: `POUNCE_BENCH_DATA` unset, `bench_data_root` finds none), Python
 tests (no code change).
 
+
+### R2 — 2026-10-22 — not recoverable this way (hypothesis refuted)
+
+Measured on x86_64 (4 CPUs, AVX2+FMA). `p-prev` = release `pounce` built
+from the clean tip `463eeeae` (code-identical to `75e410d2`) with its own
+`CARGO_TARGET_DIR`; the cached binary from the R1 iteration was not reused
+because a rebuild from the clean tree was not byte-identical (R1's
+reverted instrumentation had touched `pounce-convex`). `p-base` = v0.12.0.
+
+**Reproduced (before any change).**
+
+| run | engine | status | it | objective | resto calls / it | q | lg(rg) ≥ 19 / ≥ 10 |
+|---|---|---|---|---|---|---|---|
+| `p-prev` exact | nlp | SolveSucceeded | 492 | −3273.95499 | 24 / 106 | 3 | 40 / 171 |
+| `p-prev` lbfgs | nlp | SolveSucceeded | 82 | −3273.954992 | — | 0 | — |
+| `p-base` exact | nlp | SolveSucceeded | 162 | −3273.954992 | 3 / 9 | 4 | 0 / 0 |
+| `p-prev` exact, `perturb_delta_c_max_rungs=0` | nlp | SolveSucceeded | 115 (stalls, dual inf 1.8e8) + re-solve 205 | −3273.95500 | 0 | — | 2 / 50 |
+| `p-base` exact, `perturb_delta_c_max_rungs=0` | nlp | SolveSucceeded | 116 | — | 2 / 7 | — | 0 / 0 |
+
+No second opinion on the default exact run. `p-base`'s largest `δ_x` is
+3.6e9 (40 iterations ≥ 1e4); `p-prev`'s is 9.7e19 (183 iteration records
+≥ 1e10, restoration included).
+
+**Instrumented (temporary probe, reverted; not committed).** In
+`StdAugSystemSolver::solve`, after every factorization: the assembled KKT
+densified and its eigenvalues taken (faer), the (1,1) block `W + Σ_x + δ_x I`
+— its λ_min and Gershgorin margin — the slack diagonal minimum, `δ_x`,
+`δ_c`, FERAL's reported negative count against the required 72, and the
+max-norm of the primal and dual parts of the solution; in
+`PdFullSpaceSolver` the iteration at each `consider_new_system`, the
+accepted deltas, and the iterative-refinement residual ratios. The same
+probe was applied to a v0.12.0 worktree (built with its own target dir) so
+both versions were measured identically. Restoration ladders run in the
+same 46-variable space (`AugRestoSystemSolver` condenses), so the counts
+below include them. The probe does not perturb the run: 492 / 162
+reproduced under it.
+
+All 1310 ladder factorizations on `p-prev` (re-solves after a quality
+escalation excluded), by status, `δ_c`, and whether the (1,1) block is PD
+(λ_min > 0) / Gershgorin-dominant:
+
+| status | `δ_c > 0` | (1,1) PD | Gershgorin | count |
+|---|---|---|---|---|
+| WrongInertia | yes | no | no | **146** |
+| WrongInertia | yes | yes | — | **0** |
+| WrongInertia | no | yes | 7 of 9 | 9 |
+| WrongInertia | no | no | no | 138 |
+| Singular | yes | yes | yes | 5 |
+| Singular | yes | no | no | 202 |
+| Singular | no | yes | 55 of 57 | 57 |
+| Singular | no | no | no | 237 |
+| Success | (all) | | | 516 |
+
+- The planned arm (`WrongInertia`, `δ_c > 0` or `m_c = 0`, block provably
+  PD) has **zero** candidates: `m_c = 40`, and every `WrongInertia` with
+  `δ_c > 0` has an indefinite (1,1) block. The 9 PD `WrongInertia` factors
+  have `δ_c = 0`, where Sylvester proves nothing without a rank argument for
+  `J`. The 5 provable cases are `Singular` (excluded by the plan: gh#981
+  territory).
+- Of 516 ladders, 170 end at `δ_x ≥ 1e10` (1 overflows). In those, the
+  first-rung λ_min(W+Σ_x) is negative in 165 (median −1.5e14, min −1.2e19).
+  At acceptance `δ_x / −λ_min` has quantiles 0.00016 / 1.4 / 2.4 / **5.7** /
+  2.1e5 / 3.7e8 (min/10/25/50/75/90 %): the median ladder stops about one
+  rung past the (1,1) PD threshold. 88 of 169 accept at their first
+  non-zero rung (the start is `δ_x_last/3`), and the over-damped tail
+  (41 + 14 ladders > 100× the threshold) comes from that inherited start,
+  not from climbing.
+- `W` itself: λ_min(W+Σ_x) at each system, quantiles min/5/10/25/50 %:
+  `p-prev` −1.2e19 / −1.2e19 / −3.4e15 / −6.0e12 / −1.1e6 (151 of 516 below
+  −1e10, 347 below −1e4); `p-base` −2.2e9 / −2.2e9 / −2.2e9 / −8.2e5 /
+  −6.4e5 (0 of 162 below −1e10, 132 below −1e4).
+
+**Where `W` blows up (iteration 4 → 5).**
+
+| | `p-base` v0.12.0 | `p-prev` 0.13.0 |
+|---|---|---|
+| it-4 ladder | WI(73), WI, WI with `δ_c` → walk-back `w` → Success at `δ_x` 3.3e-3, `δ_c` 0 | WI(**71** < 72) → too-few-negatives branch **escalates quality** (`q`) → Singular → WI(73) ×3 with `δ_c` → walk-back → Success at `δ_x` 1e-4, `δ_c` 0 |
+| min eig of the accepted factor | 1.6e-17 | 2.0e-17 |
+| dual part of the solve | 3.5e16 | 6.4e16 |
+| refinement ratios | 9.0e-7, 7.5e-9, 7.5e-9 → stall, `augsys_improved` false → escalate, refactor | 9.1e-6, 2.2e-8, 1.2e-8, 1.6e-8 → stall, `augsys_improved` already true → `S` exit (< `residual_ratio_singular`), step kept |
+| dual part after refinement | **3.0e6** (ratio 1e-16) | **6.4e16** |
+| λ_min(W+Σ_x) at iteration 5 | −7.4e2 | **−4.1e13** |
+
+So both versions withdraw `δ_c` and accept a numerically singular factor
+at iteration 4; v0.12.0 is rescued by the refinement's quality escalation,
+0.13.0 is not, because FERAL 0.21's count at that iteration's unperturbed
+factor (71 instead of 73) spent the escalation in the inertia branch. The
+`2599c2be` reset is not involved.
+
+**Counterfactual (probe build only, env-gated, not committed).** Allowing
+the refinement branch to escalate even when `augsys_improved` is set:
+`pooling_rt2stp` exact 492 → **109**, −4391.82601 (the other certified
+optimum, accepted by `issue_592`), 3 restoration calls, q = 4; `dallass`
+exact 123 (unchanged), `deb7` exact 114 (unchanged). Full sweep, `p-prev`
+vs counterfactual, 19 lines move:
+
+```
+exact  infeasible_square_scaled_1em4  q=3 -> q=12
+exact  pooling_rt2stp                 it=492 q=3 obj=-3273.95499 -> it=109 q=4 obj=-4391.82601
+exact  square_flowsheet_resto         it=95 q=4 -> it=76 q=13
+lbfgs  circle_parabola_t0p5           it=77 q=4 2nd=feral_scaling=mc64@.../48,tot=125 obj=8.155059653
+                                   -> it=51 q=24 2nd=start_point_perturbation=1e-2@.../48,tot=227 obj=10.42794559
+lbfgs  circle_parabola_t1p5           q=10 -> q=12
+lbfgs  cresc4                         q=0 2nd=feral_increase_quality=no@.../3000,tot=3200 -> q=24 2nd=-
+lbfgs  degenerate_start_infeasible    tot=74 -> tot=77
+lbfgs  eigena2                        it=239 q=3 tot=478 -> it=164 q=11 tot=328 (ErrorInStep both)
+lbfgs  eigmaxa                        q=2 -> q=12
+lbfgs  infeasible_square_scaled_1em4  q=1 -> q=12
+lbfgs  issue880_sigma_uncertified     it=67 q=8 -> it=59 q=12
+lbfgs  issue981_water_main            q=1 -> q=12
+lbfgs  issue_508_infeasible_gap_1em2  q=5 tot=284 -> q=12 tot=290
+lbfgs  issue_508_infeasible_gap_1em4  q=1 tot=346 -> q=12 tot=349
+lbfgs  scale_audit_retry_meyer3       it=112 q=5 -> it=152 q=12
+```
+
+No status or engine moves, but the blanket rule runs escalations to the
+cap and changes an lbfgs objective, so it is a measurement of where the
+lever is, not a candidate fix. The narrower shapes are in §5.
+
+**Verdict.** The plan's hypothesis — FERAL miscounting the inertia of a
+provably quasi-definite matrix, so that the ladder climbs past a rung where
+Sylvester already guarantees it — is false on this fixture: the arm it
+describes has zero candidates in 1310 factorizations. The climb is the
+correct response to a Hessian of the Lagrangian that is indefinite by up to
+1.2e19, and that comes from multipliers blown up by one kept step at
+iteration 4. Per §4 step 4 no code change was made; the follow-up issue
+(title + numbers) is in §5. The `issue_592` `< 500` pin is untouched (F1
+stays open with a margin of 8). The unit tests named in the plan were not
+needed — nothing they guard changed.
+
+**Effect on R3.** R2 changed no code, so R3's re-baseline is the baseline:
+`dallass` exact 123 it / 12 restoration calls / q = 19, lbfgs
+ErrorInStepComputation 146 (tot 292), both re-measured on `p-prev` in this
+iteration's sweep. R3's dependency is resolved (R2 closed as not
+recoverable); R3 proceeds to its step 2 (the `pounce-nl` peephole).
+
+**Tests / sweep.** Docs-only commit: no code changed, so no regression
+test, no mutation check, no `cargo test`; `cargo fmt --all -- --check` run
+(clean). `scripts/sweep-fixtures.sh` was run on `p-prev` (234 fixture-legs;
+engine split nlp 127, cvx-qp 92, cvx-qcqp 14, square-lm 1) only as the
+baseline for the counterfactual above; there is no new binary to diff
+against. Not run: `benchmarks/vanderbei` (no corpus: `POUNCE_BENCH_DATA`
+unset), Python tests (no code change), arm64 (not available).
