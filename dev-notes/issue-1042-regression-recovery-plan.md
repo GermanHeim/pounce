@@ -46,11 +46,11 @@ iterations after a now-*correct* inertia report.
 | **R1c** | `scaled_feasible_a` (sibling of R1) | both HSDE solves run at `τ ≈ 1e-10` to represent `‖x̂‖ = 5e9` from the unit self-dual start | cold start not sized to the data; the direct driver's gh#689 Mehrotra recentering took the same model 175 → 27 | **candidate** — seed the embedding from the recentered cold seed at `τ = 1`; the largest blast radius of the R1 family | todo (`needs benchmarks/qp before merge` at best) |
 | **R1d** | `scaled_feasible_a` (sibling of R1) | first, unequilibrated HSDE solve burns 200 it to `true_kkt 0.149` before the gh#293 retry: 400 HSDE it for a reported 200 | no early-failure detection: `τ` creeps linearly 1.6e-9 → 7.6e-8 over it 19–199 with `mu ~1e-37` | **candidate** — hand the retry the budget early; independent value (halves the work) even if R1b/c land, reported count unchanged | todo (`needs benchmarks/qp before merge` at best) |
 | **R1e** | `scaled_feasible_a` (sibling of R1) | retry it 165 → 200 is certifiable (`true_kkt 8.6e-9`) but the loop waits on `pres < tol`, unreachable at 4 ulp of `5e9` | stopping test has no exit for an iterate whose only unmet term is pinned at its rounding floor | **partial** — ≤ 17% of this model's count; R1 declined it as insufficient alone; kept as a sibling because it composes with R1b/c and may have corpus-wide value | todo (lowest priority in the family) |
-| **R2** | `pooling_rt2stp` (exact, x86) | 162 → **492** it (arm64: 109 → 242 total, *issue*) | FERAL 0.21 trajectory; `2599c2be` removed the latch (904 → 492); the remaining cost is the `δ_x` ladder climbing to `max_hessian_perturbation` with `δ_c` on (*issue*, unmeasured) | **partial** — the "stop the ladder once inertia is guaranteed" follow-up the issue names; must be measured first | **not recoverable this way** (2026-10-22: hypothesis refuted — 0 of 146 `WrongInertia` factors with `δ_c > 0` had a PD (1,1) block; the climb answers a genuinely indefinite `W`, λ_min down to −1.2e19 vs v0.12.0's −2.2e9; trigger found at iteration 4, see log + §5). Alternate routes: **R2b–R2e** below. **Family target met on x86 by R2b** (492 → 109, `swept — needs vanderbei before merge`); R2e still to be re-checked per §4 sibling rule 1 |
-| **R2b** | `pooling_rt2stp` (exact, x86; sibling of R2) | 492 it; blanket counterfactual 492 → 109 with 19 collateral lines | one `augsys_improved` flag per matrix is shared by the inertia ladder's too-few-negatives branch and iterative refinement; at iteration 4 the former spends it on a 71-vs-72 count and refinement keeps a 6.4e16 step | **candidate** — one escalation budget per consumer per matrix; must avoid the counterfactual's collateral (lbfgs `circle_parabola_t0p5` 8.155 → 10.428, lbfgs `scale_audit_retry_meyer3` 112 → 152, 15 lines escalating to cap) | **swept — needs vanderbei before merge** (2026-10-22: exact 492 → **109** it, −4391.826, 24 → **3** restoration calls, q 3 → 4; lbfgs 82 unchanged. Measured population of the split on the whole corpus, both legs: **one** matrix — pooling iteration 4 — so the sweep moves exactly that one line; the blanket counterfactual's collateral came from 43 matrices escalating 10–12 times each from refinement, which one-per-consumer forbids. No narrowing needed; see log) |
+| **R2** | `pooling_rt2stp` (exact, x86) | 162 → **492** it (arm64: 109 → 242 total, *issue*) | FERAL 0.21 trajectory; `2599c2be` removed the latch (904 → 492); the remaining cost is the `δ_x` ladder climbing to `max_hessian_perturbation` with `δ_c` on (*issue*, unmeasured) | **partial** — the "stop the ladder once inertia is guaranteed" follow-up the issue names; must be measured first | **not recoverable this way** (2026-10-22: hypothesis refuted — 0 of 146 `WrongInertia` factors with `δ_c > 0` had a PD (1,1) block; the climb answers a genuinely indefinite `W`, λ_min down to −1.2e19 vs v0.12.0's −2.2e9; trigger found at iteration 4, see log + §5). Alternate routes: **R2b–R2e** below. ~~Family target met on x86 by R2b~~ **Correction (R2e iteration): the target is not met.** R2b's reported 109 is the `mu_strategy_fallback` re-solve; its base solve is **494 it, `Solved_To_Acceptable_Level`, −4336.99 (not an optimum), 22 resto calls**, against 0.13.0's single `Solve_Succeeded` 492 — total 603 iterations / 25 resto calls, and neither the JSON report nor the sweep shows the first attempt (R2e log). Every member is now terminal (§4 rule 6: R2/R2c/R2d/R2e not recoverable, R2b swept), so the family is closed **by status with its target unmet**; R2b needs the owner's (or a correction iteration's) re-measurement before anything is built on it |
+| **R2b** | `pooling_rt2stp` (exact, x86; sibling of R2) | 492 it; blanket counterfactual 492 → 109 with 19 collateral lines | one `augsys_improved` flag per matrix is shared by the inertia ladder's too-few-negatives branch and iterative refinement; at iteration 4 the former spends it on a 71-vs-72 count and refinement keeps a 6.4e16 step | **candidate** — one escalation budget per consumer per matrix; must avoid the counterfactual's collateral (lbfgs `circle_parabola_t0p5` 8.155 → 10.428, lbfgs `scale_audit_retry_meyer3` 112 → 152, 15 lines escalating to cap) | **swept — needs vanderbei before merge** — **see the correction in the R2e log: the 109 below is `mu_strategy_fallback`'s re-solve; R2b's base solve is 492 `Solve_Succeeded` → 494 `Solved_To_Acceptable_Level` (−4336.99, 22 resto), so the base verdict got worse and the pin `issue_1042_pooling_escalation_budget.rs` passes on the fallback's count** (2026-10-22 as recorded: exact 492 → **109** it, −4391.826, 24 → **3** restoration calls, q 3 → 4; lbfgs 82 unchanged. Measured population of the split on the whole corpus, both legs: **one** matrix — pooling iteration 4 — so the sweep moves exactly that one line; the blanket counterfactual's collateral came from 43 matrices escalating 10–12 times each from refinement, which one-per-consumer forbids. No narrowing needed; see log) |
 | **R2c** | `pooling_rt2stp` (exact, x86; sibling of R2) | iteration-4 refinement stalls at ratio 1.6e-8 and takes the `S` exit with a dual part of 6.4e16 | `compute_residual_ratio` caps its normalizer at `1e6·‖rhs‖`, so the `S` test (ratio < `residual_ratio_singular` = 1e-5) is blind to a step many orders above the RHS | **candidate** — refuse `S` (take `s` → `perturb_for_singular`) when `‖res‖∞ > κ·‖rhs‖∞`; the narrowest of the family | **not recoverable this way (measured)** (2026-10-22: a step dwarfing the RHS is the *ordinary* `S` exit, not the tail — 135 of the corpus's 188 `S` exits are above `κ = 1e6`, 90 above `1e12`, and the pooling iteration-4 exit (2.2e14) ranks 62nd; keeping the rule under the item's 10% stop needs `κ ≥ 4.7e20`. Counterfactual at `κ = 1e6` / `1e12`: pooling's base solve is lost (`ErrorInStep` 795 / 173, rescued by the `mu_strategy=adaptive` rung at 140), exact `circle_parabola_t1p5` Infeasible → MaxIter 3000, and the `s` path never reinstates `δ_c` (six uncertified `Singular`s climb `δ_x` to 8.7 at `δ_c = 0`); see log). Next: **R2b** |
 | **R2d** | `pooling_rt2stp` iteration 4 (sibling of R2) | FERAL 0.21 reports 71 negatives, 72 required; FERAL 0.20 reported 73 on v0.12.0's matrix | either an inertia-count defect in FERAL (crates.io dependency `feral = 0.21.0`, upstream jkitchin/feral — not vendored) or a genuinely ambiguous near-singular matrix | **measure first** — exact count vs both FERAL counts on the dumped matrix; fix upstream, or work around in `pounce-feral` (classify as noise → `Singular`, no escalation spent) | **not recoverable here — not a count defect (measured)** (2026-10-22: the 0.13.0 iteration-4 matrix is singular to working precision — two scaled eigenvalues 1.6e-18 / 1.1e-15, next 7.7e-4 — and its exact count is 71, which FERAL 0.21, 0.20 and 0.18 all report on the dump; v0.12.0's iteration-4 matrix is a *different*, nonsingular one (min \|λ\| 2.4e-9, exact 73, all three FERALs 73); the noise rule is gated off by `min_piv` 5.95e-14 vs floor 3.33e-14; three pounce-feral workarounds measured, none admissible; see log). Next: **R2c** |
-| **R2e** | `pooling_rt2stp` iteration 4 (sibling of R2) | both versions accept a `δ_c`-free factor with min \|eig\| 2e-17 after the gh#592 walk-back | the walk-back accepts any factor FERAL calls `Success`; a numerically singular one is the source of the 6.4e16 step | **candidate** — refuse the withdrawal when the factor's `min_pivot_magnitude` is under the inertia trust floor; keeps `δ_c` instead of repairing the step downstream | todo (`needs vanderbei before merge` at best) |
+| **R2e** | `pooling_rt2stp` iteration 4 (sibling of R2) | both versions accept a `δ_c`-free factor with min \|eig\| 2e-17 after the gh#592 walk-back | the walk-back accepts any factor FERAL calls `Success`; a numerically singular one is the source of the 6.4e16 step | **candidate** — refuse the withdrawal when the factor's `min_pivot_magnitude` is under the inertia trust floor; keeps `δ_c` instead of repairing the step downstream | **not recoverable this way (measured)** (2026-10-22 on `3e186634`. *Re-baselined after R2b* first: the regression still reproduces — base solve 494 it `Solved_To_Acceptable_Level`, 22 resto, rescued by `mu_strategy_fallback` (109) — so not `dropped`. Refuted by the item's own clause: the iteration-4 walk-back's `Success` has `min_piv` **3.98e-14, above** the `150·ε` = 3.33e-14 floor. The rule's corpus population, both legs, is **8** first-`δ_c`-free `Success` factors, all on exact pooling (iterations 5–39 + restoration); firing on them takes the base solve 494 Acceptable → **3000 `MaximumIterationsExceeded`** and the reported verdict `SolveSucceeded` → MaxIter. The widened form (certify sub-floor uncertified `Singular`s too) is gh#981's rejected "reinstate on any `Singular`": base 141 Acceptable at −3261.36, reported 491, gh#884's reproducer dual 1.3e-10 → 7.0e-5; see log) |
 | **R3** | `dallass` (exact, x86) | 41 → **123** it (arm64 41 → 65, *issue*) | FERAL 0.21 path lands on `x = 0` of `|x|²·|x|^0.85` terms 12 times instead of 2; each is a non-finite Hessian → restoration entry; `5fc8c797` only stops the third from ending the solve | **partial** — (A) the Hessian is an evaluator artefact (`0·∞` from the product rule; the true second derivative of `|x|^2.85` at 0 is 0), fixable in `pounce-nl`; (B) R2 may move it; re-baseline after R2 | **done** (2026-10-22, option A: `.nl` reader merges `|e|^p·|e|^q`; exact 123 → **28** it, 12 → **0** restoration calls; lbfgs ErrorInStep/146 → SolveSucceeded/301; see log) |
 | **R4** | minima `circle_parabola_t0p5` mlsl | found 2 of 2 → **1** | #993 `91b6dcda`: `MLSL_GAMMA` 2 → 0.5; at 0.5 the extra launches re-find the first minimum and the stagnation counter (`patience 8`) stops the search | **partial** — no single gamma wins at seed 0 (table in R4); needs a 10-seed measurement; the structural stagnation rule is now its own item, **R4b** | todo |
 | **R4b** | minima `circle_parabola_t0p5` mlsl (sibling of R4) | at gamma 0.5 the search ends `converged` after 9 solves: 8 consecutive launches re-find minimum 1 and trip `patience 8` with 21 of 30 solves unused | the stagnation counter treats an MLSL launch that converges to an archived minimum as a failed independent draw; it is basin information | **candidate** — grow that minimum's exclusion radius and do not count the re-find as a full strike; gamma stays 0.5 | todo |
@@ -61,7 +61,7 @@ iterations after a now-*correct* inertia report.
 | X1 | exact `deb7` arm64 Optimal/147 → Acceptable/180 | (*issue*) | FERAL 0.21 NEON trajectory | **not recoverable here** (x86 improves 143 → 114) (§5) | n/a |
 | X2 | lbfgs `dallass` arm64 Optimal/224 → ErrorInStep/308 | (*issue*); x86 fails on both versions | FERAL 0.21 trajectory | **not recoverable here**; the x86 lbfgs failure predates 0.13.0 (§5) | n/a |
 | X3 | lbfgs `pooling_rt2stp` arm64 −4391.83 → −3273.95 | (*issue*); x86 failing → solved | bistable nonconvex model | **no** — both are certified optima (§5) | n/a |
-| F1 | `issue_592` pin `< 500` sits 8 above x86's 492 | — | R2 | resolved by whichever of R2b–R2e lands; **do not raise the pin** | margin 8 → **391** on x86 with R2b (pooling exact 109); the `< 500` pin is **untouched** — it guards gh#544's 812 régime, and R2b's own pin (`issue_1042_pooling_escalation_budget.rs`, ≤ 300) carries the tighter bound; tightening `issue_592` itself is left until R2b clears the vanderbei A/B |
+| F1 | `issue_592` pin `< 500` sits 8 above x86's 492 | — | R2 | resolved by whichever of R2b–R2e lands; **do not raise the pin** | **correction (R2e iteration): margin is 6 on the base solve** (494, Acceptable) — the pin reads the JSON `iteration_count`, which is `mu_strategy_fallback`'s 109; R2b's log recorded margin 8 → **391** on x86 (pooling exact 109); the `< 500` pin is **untouched** — it guards gh#544's 812 régime, and R2b's own pin (`issue_1042_pooling_escalation_budget.rs`, ≤ 300) carries the tighter bound; tightening `issue_592` itself is left until R2b clears the vanderbei A/B |
 | **M1** | re-measurement pass after every landed R2x item | — | R2b/c/d/e each move the NLP arm's step for every exact-Hessian solve; R3 landed *before* them (dallass 28), so the original "R3 after R2" re-baseline is inverted | rule, not a code item: see §3 M1 and §4 "Sibling items" | standing (runs inside each R2x iteration) |
 
 ## 2. Ordering
@@ -97,7 +97,13 @@ to the rest of a family once one member recovers the target.
    moves one line (§6 R2b log).
 4. **R2e** walk-back refuses a numerically singular `δ_c`-free factor —
    upstream of both R2b and R2c in the iteration-4 chain, but touches
-   gh#592/gh#981 territory, so last in the family.
+   gh#592/gh#981 territory, so last in the family. **Closed 2026-10-22:
+   not recoverable this way** — the iteration-4 factor it aimed at is
+   above the floor (3.98e-14 vs 3.33e-14); its only corpus population is
+   8 later factors on pooling, and firing there sends the base solve to
+   the 3000 cap. The same iteration found that **R2b's 109 is the
+   `mu_strategy_fallback` re-solve** (base solve 494 Acceptable), so the
+   R2 family closes by status with its target unmet (§6 R2e log).
    — **M1** runs inside each R2x iteration: re-measure the inventory on the
    new tip before the next sibling starts (§3 M1).
 5. **B1** symbolic-ordering reuse — after the R2 family, not between its
@@ -1715,6 +1721,42 @@ raise it. Docs-only iterations (skips) still run `cargo fmt --check`.
   hidden cost falls 6008 → 51 total iterations at `κ = 1e12` (same
   `square-lm` verdict; its base solve ends `RestorationFailed`/22 instead
   of running to the 3000 cap).
+- **R2e certify a sub-floor `δ_c`-free factor after the gh#592
+  walk-back.** Not recoverable this way (measured on `3e186634`). The
+  iteration-4 factor the item was written against has `min_piv` 3.98e-14
+  against the `150·ε` = 3.33e-14 floor (1.19× above) — the item's own
+  refutation clause. Corpus, both legs: 63 walk-backs on 8 fixture-legs
+  (39 on exact pooling); first `δ_c`-free factor `WrongInertia` 21 (all
+  above the floor), `Success` 14 (8 sub-floor, all exact pooling),
+  certified `Singular` 9, uncertified `Singular` 19 (all sub-floor — the
+  gh#540 noise rule only speaks below it). As specified the rule fires
+  only on pooling and sends its base solve 494 Acceptable → 3000
+  `MaximumIterationsExceeded` (reported `SolveSucceeded`/109 →
+  MaxIter/3000, tot 4406); widened it is gh#981's rejected candidate
+  (pooling base 141 Acceptable −3261.36, reported 491; gh#884's
+  reproducer dual 1.3e-10 → 7.0e-5). No follow-up issue for the lever:
+  17 of pooling's 24 accepted `δ_c`-free factors are sub-floor, so a
+  sub-floor pivot is not the marker of the bad one.
+- **R2b's result is a `mu_strategy_fallback` rescue, and the reporting
+  hides it** (found in the R2e iteration). On `3e186634` pooling exact's
+  default run is two attempts: base 494 it, `Solved_To_Acceptable_Level`
+  at −4336.990888 (unscaled dual inf 5.3e6), 22 resto calls; then the
+  pounce#748 fallback re-solves and its `Solve_Succeeded`/109/−4391.826
+  is promoted. The JSON report (`iteration_count`, `restoration_calls`,
+  no fallback field), hence the sweep line, `issue_592`'s `< 500` pin and
+  R2b's own `≤ 300` pin all read the fallback's numbers. 0.13.0 (`p-head`,
+  `0a299151`) and v0.12.0 run pooling as one attempt (492 / 162; checked on
+  the console), and the pre-R2b tip's sweep line is `p-head`'s. With
+  `mu_strategy_fallback=no` the tip reports `SolvedToAcceptableLevel` 494.
+  Suggested follow-up issues: **"pooling_rt2stp: R2b's split escalation
+  budget turns the base solve Optimal/492 into Acceptable/494; the 109
+  is mu_strategy_fallback's"** (numbers: 492 → 494, Optimal → Acceptable,
+  total 603 iterations / 25 resto calls vs 492 / 24) — R2b's census of the
+  one changed decision stands, its outcome reading does not; and
+  **"solve report / sweep: record a promoted mu_strategy_fallback
+  attempt"** (the sweep's 2nd column covers the second-opinion ladder
+  only; a promoted fallback leaves no trace, which is how this was
+  misread, the gh#850 lesson one mechanism over).
 - **Anything that requires the benchmark corpus** (B1's benefit, B2, B3) is
   blocked on this machine: `POUNCE_BENCH_DATA` is unset and no
   `~/projects/pounce-bench-data` exists. The code half of B1 is still in
@@ -2618,3 +2660,166 @@ this tip: the iteration-4 walk-back still accepts the same `δ_c`-free
 factor (R2b repairs the step downstream, it does not stop the factor being
 accepted), so whether R2e is `dropped — recovered by R2b` or has a
 *different population* to move (rule 2) is that iteration's measurement.
+
+### R2e — 2026-10-22 — not recoverable this way (measured); R2b's 109 is a fallback rescue
+
+Measured on x86_64 (4 CPUs, AVX2+FMA). `p-prev` = release `pounce` rebuilt
+from the tip `3e186634` (R2b) in a separate worktree with its own
+`CARGO_TARGET_DIR`; its sweep (234 fixture-legs, both legs; engine split
+nlp 127, cvx-qp 92, cvx-qcqp 14, square-lm 1) matches R2b's after-sweep
+line for line. `p-head` (`0a299151`, 0.13.0) and `p-base` (v0.12.0) are the
+binaries the baseline was taken with. The probe build is the same tip in
+the same worktree (not committed): an env-gated line after every KKT
+factorization in `PdFullSpaceSolver`'s retry loop (`POUNCE_R2E_PROBE`:
+iteration, status, `singularity_certified`, negatives vs required, the
+handler's `delta_c_abandoned` / `withdrawal_untested` /
+`delta_c_reinstated`, `δ_x`, `δ_c`, and the factor's `min_piv`, `max_piv`
+and `inertia_trust_floor`, from a thread-local set in
+`FeralSolverInterface::factor`), plus two counterfactual rules behind
+`POUNCE_R2E_CF` / `POUNCE_R2E_CF2` (below). With the probe on and no rule
+set its 234 result lines are identical to `p-prev`'s sweep.
+`POUNCE_BENCH_DATA` unset, `bench_data_root` resolves nothing (checked
+once).
+
+**Reproduce (§4 sibling rule 1) — and a correction to R2b.** `p-prev`, the
+M1 fixtures, read off the JSON report as every earlier iteration did:
+identical to R2b's M1 table (pooling exact SolveSucceeded **109**, q 4,
+3 / 66 restoration, −4391.82601; lbfgs 82; dallass 28 / 301; deb7 114 /
+RestorationFailed 1206 tot 1738; scaled_feasible_a 200 / 200;
+scaled_feasible_b 36 / 36; lbfgs circle_parabola_t0p5 77 q 4
+`feral_scaling=mc64` tot 125 8.155059653; lbfgs meyer3 112 q 5). Read off
+the **console**, the pooling exact run is two attempts:
+
+| binary | attempt 1 (base solve) | attempt 2 | JSON / sweep reports |
+|---|---|---|---|
+| `p-base` v0.12.0 | 162, `Solve_Succeeded`, 3 resto | — | 162 |
+| `p-head` 0.13.0 | 492, `Solve_Succeeded`, −3273.95499, 24 resto | — | 492 |
+| `p-prev` R2b tip | **494, `Solved_To_Acceptable_Level`, −4336.990888, unscaled dual inf 5.3e6, 22 resto** | `mu_strategy_fallback` (pounce#748) re-solve: 109, `Solve_Succeeded`, −4391.82601, 3 resto — promoted | 109, 3 resto |
+| `p-prev`, `mu_strategy_fallback=no` | 494, Acceptable (the gh#884 dual-divergence retry then runs 294, Acceptable, not promoted) | — | `SolvedToAcceptableLevel` 494 |
+
+The JSON report carries no field for a promoted fallback, so its
+`iteration_count` and `restoration_calls` are attempt 2's alone; the
+sweep's `2nd=` column covers the second-opinion ladder only (it reads
+`-`); and both pooling pins — `issue_592`'s `< 500` and R2b's
+`issue_1042_pooling_escalation_budget.rs` `≤ 300` / `< 24` resto / "no
+second opinion" — read those fields. So R2b's "492 → 109, 24 → 3
+restoration calls" is the fallback's result: R2b's one changed decision
+(its census stands) moved the base solve from `Solve_Succeeded`/492 to
+`Solved_To_Acceptable_Level`/494 at a non-optimal point, and the total
+cost of the run rose to 603 iterations / 25 restoration calls. That is
+recorded in the inventory (R2, R2b, F1 rows) and §5 with two suggested
+issues; R2b's code is not touched here (§4 rule 4, one item per
+iteration). Of the other M1 rows only pooling exact reports a promoted
+attempt that `p-head` did not need (dallass, deb7 exact, pooling lbfgs,
+scaled_feasible_* are single attempts; the multi-attempt rows —
+circle_parabola_t0p5 lbfgs, deb7 lbfgs, meyer3 — are second-opinion or
+scale-audit attempts already in the sweep's columns or pre-existing).
+
+Against R2e's acceptance (as R2c's: pooling ≤ 300, resto < 24, an
+optimum) the regression **does reproduce** on the base solve (494, 22,
+not an optimum), so R2e is not `dropped — recovered by R2b`;
+re-baselined after R2b, its target is the base solve: `Solve_Succeeded`
+≤ 300 at an optimum with < 24 restoration calls and no fallback attempt.
+
+**The item's target factor.** Pooling iteration 4 on this tip runs the
+same ladder as before (R2b acts in refinement, after it): `WrongInertia`
+71 (`min_piv` 5.95e-14) → escalation → `Singular` 70 (6.5e-15) →
+`WrongInertia` 73 ×3 with `δ_c` (1.8e-3) → walk-back → `Success` at
+`δ_x` 1e-4, `δ_c` 0, 72 negatives, **`min_piv` 3.977e-14**, `max_piv`
+1.48e4, floor `150·ε` = **3.331e-14**. The pivot is 1.19× *above* the
+floor — the item's own refutation clause ("refuted if the pooling
+iteration-4 pivot is not below the floor"; R2d measured 4.0e-14 on the
+pre-R2b tip). The rule could never have stopped the 6.4e16 step. R2c's
+note that every `δ_c`-free factor after the iteration-4 walk-back is
+sub-floor described the `s` path its own counterfactual opened.
+
+**Population census** (whole corpus, both legs, second-opinion rungs,
+fallback attempts and restoration sub-solves included; 51 360
+factorizations). Walk-backs (first `δ_c`-free factor after a
+withdrawal): **63 on 8 fixture-legs** — exact pooling_rt2stp 39, exact
+unbounded_exp 9, lbfgs issue_508_infeasible_gap_1em2 8, exact
+mu_fallback_point_floor 2, exact square_flowsheet_resto 2, exact
+circle_parabola_t1p5 / infeasible_square_scaled_1em4 / issue981_cstr_dup_row
+1 each.
+
+| first `δ_c`-free factor | above floor | below floor |
+|---|---|---|
+| `WrongInertia` (gh#592's full-rank case) | 21 | 0 |
+| `Success` | 6 (pooling 5, lbfgs issue_508_1em2 1) | **8 (all exact pooling)** |
+| certified `Singular` (gh#981 already reinstates) | — | 9 |
+| uncertified `Singular` (gh#540 noise rule) | 0 | 19 (pooling 16, mu_fallback_point_floor 2, square_flowsheet_resto 1) |
+
+The 8 sub-floor `Success`es sit at pooling iterations 5, 7, 8, 10, 30, 39
+(`min_piv` 2.5e-14 … 2.8e-16) and two in later attempts / restoration
+(7.3e-19, 1.4e-14); `min_piv/floor` over all 14 first-factor `Success`es
+spans 1e-5 … 1e15 with no gap at the floor. Over every accepted
+`δ_c`-free factor (any rung) 20 of 38 are sub-floor — pooling 17 of 24,
+mu_fallback_point_floor 2 of 2, square_flowsheet_resto 1 of 1. The rule as
+specified has no population outside pooling (§4 rule 2), and on pooling
+it does not reach iteration 4.
+
+**Counterfactual 1 — the rule as specified** (`POUNCE_R2E_CF`: a
+`Success` while the withdrawal is untested and not reinstated, with
+`min_piv < floor`, is reported certified `Singular`, so gh#981 reinstates
+`δ_c`). Run on the 8 walk-back fixture-legs; no other leg has a
+walk-back, and trajectories are identical up to the first firing, so no
+other line can move. Attempts read off the console:
+
+| fixture-leg | `p-prev` attempts → reported | CF 1 attempts → reported | fires |
+|---|---|---|---|
+| exact pooling_rt2stp | 494 Acceptable + 109 → SolveSucceeded 109 | **3000 MaxIter** (25 resto, −3183.18) + `feral_increase_quality=no` rung 1406 kept → **MaximumIterationsExceeded 3000**, tot 4406 | 3 base (it 5, 105, 141) + 1 rung |
+| the other 7 | — | identical | 0 |
+
+First firing at iteration 5 (`min_piv` 2.48e-14): the reinstated `δ_c`
+meets the surplus count (74 of 72) the walk-back had answered, `δ_x`
+climbs to 0.14 with `δ_c` on, and the run sits at `lg(rg)` 17–20 to the
+cap; the fallback is not eligible (MaxIter) and the rung does not rescue
+it. A reported status lost.
+
+**Counterfactual 2 — the widened reading** (`POUNCE_R2E_CF2`: also treat an
+uncertified `Singular` with `min_piv < floor` from the first `δ_c`-free
+factor as certified). The gh#540 noise rule reports `Singular` only below
+the floor, so this is "reinstate on any first `Singular`" — the gh#981
+candidate `dev-notes/issue-981-delta-c-walkback.md` measured and rejected:
+
+| fixture-leg | `p-prev` | CF 2 | fires |
+|---|---|---|---|
+| exact pooling_rt2stp | 494 Acc + 109 → SolveSucceeded 109 | base **141 Acceptable at −3261.358** (8 resto) + fallback 491 → SolveSucceeded **491**, −3273.954992; tot 632 | 11 |
+| exact square_flowsheet_resto | SolveSucceeded 95 | SolveSucceeded 107 | 1 |
+| exact mu_fallback_point_floor | 55 Acc + 31 → Acceptable 55 | 49 Acc + 46 → Acceptable 49 | 2 |
+| `mpcc_qpec_small_biactive`, `bound_relax_factor=0 mu_strategy_fallback=no` (gh#884's reproducer; not a sweep line) | SolveSucceeded 97, unscaled dual inf 1.3e-10 | SolveSucceeded 53, unscaled dual inf **7.0e-5** | 1 |
+| the other 5 walk-back legs | — | identical | 0 |
+
+Neither base solve is optimal; the widened rule's reported count is
+0.13.0's (491 vs 492), and it reopens gh#884's failure class — the
+certified/uncertified split is gh#981's guard, so this is the "weaken an
+original fix" stop of §4.
+
+**Verdict.** Not `dropped`: on the base solve the regression still
+reproduces (494, Acceptable). **Not recoverable this way**: the item's
+own refutation clause holds (iteration-4 pivot above the floor), its
+only population is 8 later pooling factors where firing loses the solve
+(reported `SolveSucceeded` → `MaximumIterationsExceeded` 3000), and the
+widened form is gh#981's rejected candidate (gh#884 dual 1.3e-10 →
+7.0e-5). No follow-up issue for this lever (§5); two for what the
+reproduce step found about R2b (§5). Every R2 member is now terminal, so
+the family closes by status (§4 rule 6) **with its target unmet** on the
+base solve. **Next per §2: B1** — but B1 waits for the R2 family *so that
+its re-baselines are not confounded*, and the R2 baseline it would be
+taken against is the corrected one above; the owner may prefer a
+correction iteration on R2b first (re-measure its census outcome with the
+fallback visible, and make its pin read the base solve), which this plan
+does not yet list as an item.
+
+**Tests / sweep.** Docs-only commit: no code changed, so no regression
+test, mutation check, clippy run or `cargo test`, and M1 is not triggered
+(no landed R2x code; the M1 fixtures were re-measured above as the
+reproduce step: JSON numbers unchanged from R2b's table, F1 margin 391 on
+the reported count and **6** on the base solve). `cargo fmt --all --
+--check` clean. `scripts/sweep-fixtures.sh` was run once on `p-prev` (the
+baseline the probe census was checked against, identical); with no new
+binary there is nothing to diff. Not run: `benchmarks/vanderbei` (no
+corpus), arm64 (not available), Python tests (no code change). The probe
+and both counterfactuals lived only in the scratch worktree, which was
+removed.
+
