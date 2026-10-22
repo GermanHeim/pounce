@@ -1099,6 +1099,46 @@ impl OrigIpoptNlp {
                 Rc::get_mut(&mut self.x_u).expect("relax_bounds: x_u is uniquely owned"),
                 1.0,
             );
+        } else {
+            // Keeping the box still widens a variable whose declared box is
+            // a single point (`x_L == x_U`, kept in the iterate under
+            // `fixed_variable_treatment=relax_bounds`). It has no interior
+            // for a barrier to live in, so no interior-point solve -- the
+            // base attempt's included -- can return it on its bound; leaving
+            // it zero-width made the re-solve lean on the safe-slack
+            // adjustment instead. Measured on a fixed `z = 0.5` beside three
+            // bound-active controls: un-widened, `z` came back `3.1e-13`
+            // below its value; the base attempt, widened, `1.2e-11`.
+            let cls = self.adapter.borrow().classification().clone();
+            let n_var = cls.x_not_fixed_map.len();
+            let mut lower = vec![Number::NEG_INFINITY; n_var];
+            let mut upper = vec![Number::INFINITY; n_var];
+            for (&v, &b) in cls.x_l_map.iter().zip(self.x_l.expanded_values().iter()) {
+                lower[v as usize] = b;
+            }
+            for (&v, &b) in cls.x_u_map.iter().zip(self.x_u.expanded_values().iter()) {
+                upper[v as usize] = b;
+            }
+            let point = |v: Index| lower[v as usize] == upper[v as usize];
+            let delta = |b: Number| (relax * b.abs().max(1.0)).min(cap);
+            {
+                let xl = Rc::get_mut(&mut self.x_l).expect("relax_bounds: x_l is uniquely owned");
+                let vals = xl.values_mut();
+                for (i, &v) in cls.x_l_map.iter().enumerate() {
+                    if point(v) {
+                        vals[i] -= delta(vals[i]);
+                    }
+                }
+            }
+            {
+                let xu = Rc::get_mut(&mut self.x_u).expect("relax_bounds: x_u is uniquely owned");
+                let vals = xu.values_mut();
+                for (i, &v) in cls.x_u_map.iter().enumerate() {
+                    if point(v) {
+                        vals[i] += delta(vals[i]);
+                    }
+                }
+            }
         }
         apply_d(
             Rc::get_mut(&mut self.d_l).expect("relax_bounds: d_l is uniquely owned"),

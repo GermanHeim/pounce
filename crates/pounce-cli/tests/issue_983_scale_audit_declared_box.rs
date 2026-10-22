@@ -31,11 +31,13 @@ use std::process::Command;
 
 const F_STAR: f64 = -3e-3;
 
-fn fixture() -> PathBuf {
+const FIXTURE: &str = "scale_audit_bound_active.nl";
+
+fn fixture_path(name: &str) -> PathBuf {
     let mut fx = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     fx.push("tests");
     fx.push("fixtures");
-    fx.push("scale_audit_bound_active.nl");
+    fx.push(name);
     fx
 }
 
@@ -46,6 +48,17 @@ struct Run {
 }
 
 fn run(tag: &str, extra: &[&str]) -> Run {
+    let r = run_on(FIXTURE, tag, extra);
+    assert_eq!(
+        r.report["solution"]["status"].as_str(),
+        Some("SolveSucceeded"),
+        "{}",
+        r.stdout
+    );
+    r
+}
+
+fn run_on(name: &str, tag: &str, extra: &[&str]) -> Run {
     let dir = std::env::temp_dir().join(format!(
         "pounce_983_declared_box_{}_{tag}",
         std::process::id()
@@ -54,7 +67,7 @@ fn run(tag: &str, extra: &[&str]) -> Run {
     let sol = dir.join("out.sol");
     let json = dir.join("out.json");
     let out = Command::new(env!("CARGO_BIN_EXE_pounce"))
-        .arg(fixture())
+        .arg(fixture_path(name))
         .arg(&sol)
         .arg("--no-options-file")
         .arg("--json-output")
@@ -63,7 +76,6 @@ fn run(tag: &str, extra: &[&str]) -> Run {
         .output()
         .expect("run pounce");
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    assert!(out.status.success(), "pounce failed:\n{stdout}");
     let report = serde_json::from_str(&std::fs::read_to_string(&json).expect("read json"))
         .expect("parse json");
     Run {
@@ -74,9 +86,13 @@ fn run(tag: &str, extra: &[&str]) -> Run {
 }
 
 fn verify(sol: &Path) -> String {
+    verify_on(FIXTURE, sol)
+}
+
+fn verify_on(name: &str, sol: &Path) -> String {
     let out = Command::new(env!("CARGO_BIN_EXE_pounce"))
         .arg("verify")
-        .arg(fixture())
+        .arg(fixture_path(name))
         .arg(sol)
         .output()
         .expect("run pounce verify");
@@ -85,13 +101,26 @@ fn verify(sol: &Path) -> String {
 
 /// The returned point is inside the declared box, by the report's own
 /// measurement, by reading `x` directly, and by `pounce verify`.
-fn assert_inside_declared_box(r: &Run) {
-    let x: Vec<f64> = r.report["solution"]["x"]
+fn solution_x(r: &Run) -> Vec<f64> {
+    r.report["solution"]["x"]
         .as_array()
         .expect("solution.x")
         .iter()
         .map(|v| v.as_f64().expect("x entry"))
-        .collect();
+        .collect()
+}
+
+/// Every "Variable bound violation" the console printed, one per attempt, in
+/// order (the internal-scaled column; the two columns agree on the box).
+fn console_box_violations(out: &str) -> Vec<f64> {
+    out.lines()
+        .filter_map(|l| l.strip_prefix("Variable bound violation:"))
+        .map(|v| v.split_whitespace().next().unwrap().parse().unwrap())
+        .collect()
+}
+
+fn assert_inside_declared_box(r: &Run) {
+    let x = solution_x(r);
     assert_eq!(x.len(), 4, "{:?}", x);
     // `y` (bounds ±10) is first; the three controls follow.
     assert!((-10.0..=10.0).contains(&x[0]), "y = {}", x[0]);
@@ -166,4 +195,105 @@ fn audit_off_is_the_base_attempt() {
     let r = run("audit_off", &["solve_quality_audit=no"]);
     assert!(!r.stdout.contains("gh#983 scale audit"), "{}", r.stdout);
     assert_inside_declared_box(&r);
+}
+
+/// `fixed_variable_treatment=relax_bounds` with a variable fixed by its box
+/// (`z ∈ [0.5, 0.5]`): the branch of the re-solve's box handling where a
+/// single-point box is still widened (a barrier needs an interior, so no
+/// interior-point solve returns such a variable on its value), and the
+/// declared-box conjunct leaves it out of the comparison. The controls must
+/// still come back inside `[0, 1]`, and the audit must still promote.
+///
+/// Mutation-checked: leaving the single-point box zero-width returns `z`
+/// `3.1e-13` *below* its value from a re-solve that leans on the safe-slack
+/// adjustment; counting `z` in the conjunct declines this re-solve (base `z`
+/// `1.2e-11` off, re-solve `2.0e-11`) although every control is inside its box.
+#[test]
+fn a_fixed_variable_under_relax_bounds_still_promotes_inside_the_box() {
+    const NAME: &str = "scale_audit_fixed_var.nl";
+    const F_STAR_FIXED: f64 = -2.91e-3;
+    let r = run_on(
+        NAME,
+        "fixed_relax",
+        &["fixed_variable_treatment=relax_bounds"],
+    );
+    assert!(
+        r.stdout.contains("gh#983 scale audit: promoted"),
+        "{}",
+        r.stdout
+    );
+    let x = solution_x(&r);
+    assert_eq!(x.len(), 5, "{x:?}");
+    // [y, z, x1, x2, x3]
+    assert!(
+        x[1] >= 0.5 && x[1] - 0.5 < 1e-8,
+        "z = {:.17e}: a single-point box is widened, never left zero-width",
+        x[1]
+    );
+    for (i, &xi) in x[2..].iter().enumerate() {
+        assert!(
+            (0.0..=1.0).contains(&xi),
+            "x{} = {xi:.17e} outside [0, 1]\n{}",
+            i + 1,
+            r.stdout
+        );
+    }
+    let obj = r.report["solution"]["objective"].as_f64().unwrap();
+    assert!(
+        obj >= F_STAR_FIXED && obj - F_STAR_FIXED < 1e-10,
+        "objective {obj:.12e}"
+    );
+    // Under the default treatment `z` is spliced in exactly: box violation 0.
+    let r = run_on(NAME, "fixed_param", &[]);
+    assert!(
+        r.stdout.contains("gh#983 scale audit: promoted"),
+        "{}",
+        r.stdout
+    );
+    assert_eq!(solution_x(&r)[1], 0.5);
+    let v = verify_on(NAME, &r.sol);
+    assert!(v.contains("max bound violation     : 0.000e0"), "{v}");
+}
+
+/// The μ-strategy fallback's decline path floors the declared-box
+/// measurement with the rest of the certificate.
+///
+/// `mu_fallback_declined_bound_active.nl` at `max_iter=11`: the base attempt
+/// stops at the cap with its controls inside `[0, 1]`; the fallback's retry
+/// (adaptive) stops at the cap too, on the widened bound, and is declined.
+/// Before the fix the report carried the discarded retry's `9.46e-9` beside
+/// the base attempt's point, whose violation is `0`. Measured, not
+/// assumed: the expected value is computed from the reported `solution.x`.
+#[test]
+fn a_declined_mu_fallback_reports_the_base_attempts_box_violation() {
+    const NAME: &str = "mu_fallback_declined_bound_active.nl";
+    let r = run_on(NAME, "mu_fallback", &["max_iter=11"]);
+    assert_eq!(
+        r.report["solution"]["status"].as_str(),
+        Some("MaximumIterationsExceeded"),
+        "{}",
+        r.stdout
+    );
+    // The premise that gives the test teeth: two attempts, and the discarded
+    // one sat outside the declared box while the base did not.
+    let per_attempt = console_box_violations(&r.stdout);
+    assert!(per_attempt.len() >= 2, "{}", r.stdout);
+    assert!(
+        per_attempt[1] > 1e-9 && per_attempt[0] == 0.0,
+        "premise: base attempt inside the box, retry outside it: {per_attempt:?}"
+    );
+    let x = solution_x(&r);
+    assert_eq!(x.len(), 5, "{x:?}");
+    // [a, b, x1, x2, x3]; `a` and `b` are free.
+    let measured = x[2..]
+        .iter()
+        .map(|&v| (v - 1.0).max(-v).max(0.0))
+        .fold(0.0_f64, f64::max);
+    let reported = r.report["statistics"]["final_declared_box_viol"]
+        .as_f64()
+        .unwrap();
+    assert_eq!(
+        reported, measured,
+        "the report's declared-box violation is not the returned point's"
+    );
 }

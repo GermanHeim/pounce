@@ -953,6 +953,8 @@ fn a_retry_that_does_not_promote_leaves_the_base_answer_in_place() {
     let base_x = captured.borrow().clone().expect("finalize_solution ran").x;
     let base_obj = a.statistics().final_objective;
     let base_kkt = a.statistics().final_unscaled_kkt_error;
+    let base_box = a.statistics().final_declared_box_viol;
+    let base_rows = a.statistics().final_declared_constr_viol;
 
     let (tnlp, captured) = QpecSmallProdEq::new(false);
     let mut a = app(false, 300);
@@ -985,6 +987,18 @@ fn a_retry_that_does_not_promote_leaves_the_base_answer_in_place() {
     assert_eq!(
         s.final_unscaled_kkt_error, base_kkt,
         "the refused retry changed the reported residual",
+    );
+    // The declared-model measurements describe the point too. The floor
+    // left both behind until gh#983's declared-box fix, so a refused retry's
+    // own distance outside the declared rows and box was reported beside
+    // the base attempt's point.
+    assert_eq!(
+        s.final_declared_box_viol, base_box,
+        "the refused retry's declared-box violation was reported",
+    );
+    assert_eq!(
+        s.final_declared_constr_viol, base_rows,
+        "the refused retry's declared-row violation was reported",
     );
 }
 

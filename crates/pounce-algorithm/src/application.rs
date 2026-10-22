@@ -666,40 +666,106 @@ fn retry_answer_is_admissible(
     true
 }
 
+/// How far `x` sits outside the declared box, **relative to each bound's own
+/// magnitude**: `max_i viol_i / max(1, |b_i|)`, where `b_i` is the bound
+/// `x_i` crosses and bounds at or beyond the infinity sentinels are absent.
+///
+/// Relative because the quantity it is compared on is: `bound_relax_factor`
+/// widens bound `b` by `factor · max(1, |b|)` (capped at `constr_viol_tol`),
+/// so a point pinned to the widened bound sits a *relative* distance from the
+/// box that does not depend on `|b|`, while its rounding is one ulp of `|b|`
+/// -- `1.2e-10` at `|b| = 1e6`, two orders above any absolute floor that
+/// still separates `1e-8` from noise on a unit bound.
+///
+/// A variable fixed by its declared box (`x_L == x_U`) is skipped. Under
+/// `fixed_variable_treatment=relax_bounds` it stays in the iterate with its
+/// point widened into a band -- in the base attempt and the re-solve alike,
+/// since a barrier needs an interior -- so where it lands inside that band is
+/// barrier noise, not a choice to use the widening: on a fixed `z = 0.5`
+/// beside three bound-active controls the base attempt returned it `1.2e-11`
+/// off and the re-solve `2.0e-11`, and counting it declined a re-solve whose
+/// controls were all inside their box. Under the default `make_parameter` it
+/// is spliced in at its exact value and reads `0` either way.
+///
+/// `NaN` when the lengths disagree (nothing to measure against).
+fn declared_box_relative_violation(
+    x: &[Number],
+    x_l: &[Number],
+    x_u: &[Number],
+    lower_inf: Number,
+    upper_inf: Number,
+) -> Number {
+    if x.len() != x_l.len() || x.len() != x_u.len() {
+        return Number::NAN;
+    }
+    let mut worst = 0.0_f64;
+    for i in 0..x.len() {
+        let (l, u) = (x_l[i], x_u[i]);
+        if l == u {
+            continue;
+        }
+        if l > lower_inf && x[i] < l {
+            worst = worst.max((l - x[i]) / l.abs().max(1.0));
+        }
+        if u < upper_inf && x[i] > u {
+            worst = worst.max((x[i] - u) / u.abs().max(1.0));
+        }
+    }
+    worst
+}
+
+/// A relative declared-box violation at or below this is rounding, not use of
+/// the widening: four ulps of the bound's magnitude (`4 · ε ≈ 8.9e-16`).
+///
+/// Measured populations on either side of it. Rounding: a point pinned to a
+/// bound reads at most one ulp off it, `ε/2 .. ε` relative at any magnitude.
+/// Genuine use of the widening, from the bound-magnitude probe (the
+/// `scale_audit_bound_active` model with `x_U` in `{1, 10, 1e2, 1e3, 1e4,
+/// 1e6}`, each with the box at `[0, x_U]` and at `[x_U − 1, x_U]`, under a
+/// named `bound_relax_factor=1e-8`): the re-solve's excess over the base
+/// attempt is `4.97e-9` relative at `x_U = 1`, `9.5e-9` at `10`, `9.9e-9` at
+/// `1e2`, `2.5e-9` at `1e3`, `2.5e-10` at `1e4` and `2.5e-12` at `1e6` (the
+/// last three are where `constr_viol_tol = 1e-4` caps the widening). The
+/// smallest of those is three and a half orders above this floor, the
+/// largest rounding three times below it.
+const RETRY_BOX_REL_NOISE: Number = 4.0 * Number::EPSILON;
+
 /// May a retry's point ship, as far as the box the caller *declared* goes?
 ///
 /// Only when it sits no further outside that box than the base attempt's
-/// point does, up to [`RETRY_VIOL_NOISE_FLOOR`]. Every interior-point solve
-/// runs on bounds widened by `bound_relax_factor`, so "outside the declared
-/// box" is something any converged point can be, by up to the widening; what
-/// this refuses is a retry that *uses more of it* than the answer already in
-/// hand. That is the gh#983 scale audit's failure mode exactly: its re-solve
-/// drives complementarity down, which on a bound-active variable is the same
-/// as driving the point onto the widened bound, so `ex1_320`'s re-solve
-/// shipped `1.0e-8` outside the box its base attempt satisfied exactly.
+/// point does, measured relative to each bound's magnitude
+/// ([`declared_box_relative_violation`]) and up to [`RETRY_BOX_REL_NOISE`].
+/// Every interior-point solve runs on bounds widened by `bound_relax_factor`,
+/// so "outside the declared box" is something any converged point can be, by
+/// up to the widening; what this refuses is a retry that *uses more of it*
+/// than the answer already in hand. That is the gh#983 scale audit's failure
+/// mode exactly: its re-solve drives complementarity down, which on a
+/// bound-active variable is the same as driving the point onto the widened
+/// bound, so `ex1_320`'s re-solve shipped `1.0e-8` outside the box its base
+/// attempt satisfied exactly.
 ///
 /// Unconditional, unlike rule 2 of [`retry_answer_is_admissible`]: a point
 /// outside the box is the defect whatever the objective did, and a re-solve
 /// whose objective move is under that rule's tolerance shipped it all the
-/// same. The scale audit runs its re-solve un-widened when the caller left
-/// `bound_relax_factor` alone, so there this conjunct is a backstop; it bites
-/// when the caller named a widening, where both attempts solve the widened
-/// model and the re-solve may not exploit it further.
+/// same. When the caller left `bound_relax_factor` alone the scale audit's
+/// re-solve keeps the variable box as declared (its inequality rows are
+/// still widened, as in the base attempt), so there this conjunct is a
+/// backstop. It bites when the caller named a widening: both attempts then
+/// solve the widened box, and the re-solve may not exploit it further.
 ///
-/// `NaN` means "not measured" (an arm that does not snapshot the declared
-/// bounds). A retry that cannot be measured is refused unless the base could
-/// not be either: there is then nothing to compare and the rule has no
-/// opinion.
-fn retry_keeps_declared_box(base_box_viol: Number, retry_box_viol: Number) -> bool {
-    if retry_box_viol.is_nan() {
-        return base_box_viol.is_nan();
+/// `NaN` means "not measured". A retry that cannot be measured is refused
+/// unless the base could not be either: there is then nothing to compare and
+/// the rule has no opinion.
+fn retry_keeps_declared_box(base_rel_viol: Number, retry_rel_viol: Number) -> bool {
+    if retry_rel_viol.is_nan() {
+        return base_rel_viol.is_nan();
     }
-    let base = if base_box_viol.is_nan() {
+    let base = if base_rel_viol.is_nan() {
         0.0
     } else {
-        base_box_viol.max(0.0)
+        base_rel_viol.max(0.0)
     };
-    retry_box_viol <= base + RETRY_VIOL_NOISE_FLOOR
+    retry_rel_viol <= base + RETRY_BOX_REL_NOISE
 }
 
 /// What [`IpoptApplication::initialize_with_option_file`] did — enough
@@ -2053,6 +2119,12 @@ impl IpoptApplication {
         // solve's.
         self.statistics.borrow_mut().warnings.clear();
         self.statistics.borrow_mut().sqp_warm_working_set_applied = false;
+        // Belongs to the scale audit's re-solve alone, which runs below this
+        // entry point (`optimize_constrained`, never `optimize_tnlp`), so no
+        // solve that starts here may inherit it. `RetryOptionScope` clears it
+        // on every exit already; this is the belt to that, for a solve on an
+        // application a caught panic left behind.
+        self.retry_keeps_declared_box.set(false);
         let status = self.optimize_tnlp_dispatch(tnlp, derivative_test_tnlp);
         // Printed once, for the run whose point is returned. They used to be
         // printed by every audited attempt, so a promoted retry's console
@@ -4446,7 +4518,12 @@ impl IpoptApplication {
         let prev = self.options.get_string_value("mu_strategy", "").ok();
         let was_adaptive = self.effective_mu_strategy_is_adaptive();
         let flipped = if was_adaptive { "monotone" } else { "adaptive" };
-        let _ = self
+        // Unwind cover only: the normal-path restore below writes the
+        // resolved value back as caller-set, deliberately, and the scope must
+        // not change that. A panic in the retry used to leave the flipped
+        // strategy in the option table of an application `ffi_guard` keeps.
+        let mut scope = RetryOptionScope::enter(self, &["mu_strategy"], true);
+        let _ = scope
             .options
             .set_string_value("mu_strategy", flipped, true, false);
         // Floor the *answer*, not just the status (pounce#870).
@@ -4479,12 +4556,12 @@ impl IpoptApplication {
         // deliberately reports the l1-best least-infeasible point, which the
         // option help calls informative in its own right. Changing that needs
         // its own measurement.
-        let solution_floor = self.last_finalize.borrow().clone();
-        let certificate_floor = SolutionCertificate::of(&self.statistics.borrow());
-        let trace_floor = *self.last_iter_stats.borrow();
-        let retry_status = self.optimize_constrained(Rc::clone(&tnlp));
+        let solution_floor = scope.last_finalize.borrow().clone();
+        let certificate_floor = SolutionCertificate::of(&scope.statistics.borrow());
+        let trace_floor = *scope.last_iter_stats.borrow();
+        let retry_status = scope.optimize_constrained(Rc::clone(&tnlp));
         // Restore the user's original option-table view.
-        let _ = self.options.set_string_value(
+        let _ = scope.options.set_string_value(
             "mu_strategy",
             prev.as_ref()
                 .filter(|(_, found)| *found)
@@ -4493,6 +4570,7 @@ impl IpoptApplication {
             true,
             false,
         );
+        drop(scope);
         if matches!(retry_status, ApplicationReturnStatus::SolveSucceeded) {
             return retry_status;
         }
@@ -4756,13 +4834,16 @@ impl IpoptApplication {
              perturb_always_cd=yes.",
             first_status, base_unscaled_kkt);
         let prev = self.options.get_string_value("perturb_always_cd", "").ok();
-        let _ = self
+        // Unwind cover only, as for the μ-strategy fallback: the restore
+        // below is the normal path and is left exactly as it was.
+        let mut scope = RetryOptionScope::enter(self, &["perturb_always_cd"], true);
+        let _ = scope
             .options
             .set_string_value("perturb_always_cd", "yes", true, false);
-        let retry_status = self.dispatch_standard_solve(Rc::clone(&tnlp));
+        let retry_status = scope.dispatch_standard_solve(Rc::clone(&tnlp));
         // Restore the caller's option-table view. Absence is restored as
         // absence would be seen: the registered default is `no`.
-        let _ = self.options.set_string_value(
+        let _ = scope.options.set_string_value(
             "perturb_always_cd",
             prev.as_ref()
                 .filter(|(_, found)| *found)
@@ -4771,6 +4852,7 @@ impl IpoptApplication {
             true,
             false,
         );
+        drop(scope);
         let retry_unscaled_kkt = self.statistics.borrow().final_unscaled_kkt_error;
         let retry_viol = self.statistics.borrow().final_unscaled_constr_viol;
         // Conjuncts 3, 4 and 5. Conjunct 4 is the one that distinguishes
@@ -5133,6 +5215,24 @@ impl IpoptApplication {
         status
     }
 
+    /// The variable box `tnlp` declares, `(x_L, x_U)` in its own (full-x)
+    /// space -- the space a `finalize_solution` payload is in. `None` if the
+    /// TNLP declines to say.
+    fn declared_x_box(&self, tnlp: &Rc<RefCell<dyn TNLP>>) -> Option<(Vec<Number>, Vec<Number>)> {
+        let mut t = tnlp.borrow_mut();
+        let info = t.get_nlp_info()?;
+        let (n, m) = (info.n.max(0) as usize, info.m.max(0) as usize);
+        let (mut x_l, mut x_u) = (vec![0.0; n], vec![0.0; n]);
+        let (mut g_l, mut g_u) = (vec![0.0; m], vec![0.0; m]);
+        t.get_bounds_info(BoundsInfo {
+            x_l: &mut x_l,
+            x_u: &mut x_u,
+            g_l: &mut g_l,
+            g_u: &mut g_u,
+        })
+        .then_some((x_l, x_u))
+    }
+
     /// The re-solve half of [`Self::audit_solve_quality`].
     fn run_scale_retry(
         &mut self,
@@ -5181,15 +5281,32 @@ impl IpoptApplication {
             .ok()
             .and_then(|(v, f)| f.then_some(v));
         let prev_user_factor = prev_user.unwrap_or(1.0);
+        let caller_named_relax = self
+            .options
+            .get_numeric_value("bound_relax_factor", "")
+            .is_ok_and(|(_, found)| found);
+        // Everything below until the scope drops is this re-solve's own
+        // configuration; the scope puts every entry back, and clears the box
+        // flag, however the re-solve exits.
+        let mut scope = RetryOptionScope::enter(
+            self,
+            &[
+                "obj_scaling_factor",
+                "max_iter",
+                "max_cpu_time",
+                "max_wall_time",
+            ],
+            false,
+        );
         if let ScaleAudit::Upscale(k) = kind {
-            let _ = self.options.set_numeric_value(
+            let _ = scope.options.set_numeric_value(
                 "obj_scaling_factor",
                 prev_user_factor * k,
                 true,
                 false,
             );
         }
-        let _ = self
+        let _ = scope
             .options
             .set_integer_value("max_iter", retry_iter, true, false);
         // Solve the re-solve on the caller's own variable box: the rows are
@@ -5229,18 +5346,14 @@ impl IpoptApplication {
         // A caller who named the factor defined the model that way and keeps
         // it; for that case the declared-box conjunct of the promotion gate
         // below is what holds the line.
-        let caller_named_relax = self
-            .options
-            .get_numeric_value("bound_relax_factor", "")
-            .is_ok_and(|(_, found)| found);
-        self.retry_keeps_declared_box.set(!caller_named_relax);
+        scope.retry_keeps_declared_box.set(!caller_named_relax);
         if let Some(t) = cpu_left {
-            let _ = self
+            let _ = scope
                 .options
                 .set_numeric_value("max_cpu_time", t, true, false);
         }
         if let Some(t) = wall_left {
-            let _ = self
+            let _ = scope
                 .options
                 .set_numeric_value("max_wall_time", t, true, false);
         }
@@ -5253,38 +5366,19 @@ impl IpoptApplication {
         // `brainpc3` 120 + 120, `brainpc9` timing out in the second leg).
         // No promoted re-solve in the release sweep needed the flip except
         // `robot_b` past the cap, which keeps its `Solve_Succeeded` base.
-        let retry_status = self.optimize_constrained(Rc::clone(&seeded));
-        match prev_iter {
-            Some((v, true)) => {
-                let _ = self.options.set_integer_value("max_iter", v, true, false);
-            }
-            _ => {
-                self.options.unset_value("max_iter");
-            }
+        if match scope.options.get_integer_value("print_level", "") {
+            Ok((v, true)) => v >= 1,
+            _ => true,
+        } {
+            println!();
+            println!(
+                "gh#983 scale audit: re-solving from the returned point ({kind:?}); the \
+                 summary below is a candidate's, and the line after it says whether it \
+                 replaced the answer above."
+            );
         }
-        self.retry_keeps_declared_box.set(false);
-        for (tag, prev) in [("max_cpu_time", prev_cpu), ("max_wall_time", prev_wall)] {
-            match prev {
-                Some((v, true)) => {
-                    let _ = self.options.set_numeric_value(tag, v, true, false);
-                }
-                _ => {
-                    self.options.unset_value(tag);
-                }
-            }
-        }
-        if matches!(kind, ScaleAudit::Upscale(_)) {
-            match prev_user {
-                Some(v) => {
-                    let _ = self
-                        .options
-                        .set_numeric_value("obj_scaling_factor", v, true, false);
-                }
-                None => {
-                    self.options.unset_value("obj_scaling_factor");
-                }
-            }
-        }
+        let retry_status = scope.optimize_constrained(Rc::clone(&seeded));
+        drop(scope);
         let retry = self.statistics.borrow().clone();
         let sense = if prev_user_factor < 0.0 { -1.0 } else { 1.0 };
         let clean = match first_status {
@@ -5312,10 +5406,24 @@ impl IpoptApplication {
             acceptable_tol,
             sense,
         );
-        let keeps_box = retry_keeps_declared_box(
-            certificate_floor.declared_box_viol,
-            retry.final_declared_box_viol,
-        );
+        // Measured on the two `finalize_solution` payloads -- the points a
+        // caller would actually receive -- against the box the user TNLP
+        // declares.
+        let (base_box_rel, retry_box_rel) = match self.declared_x_box(&tnlp) {
+            Some((x_l, x_u)) => {
+                let (lo, up) = (self.nlp_lower_bound_inf(), self.nlp_upper_bound_inf());
+                let rel = |x: &[Number]| declared_box_relative_violation(x, &x_l, &x_u, lo, up);
+                (
+                    solution_floor.as_ref().map_or(Number::NAN, |f| rel(&f.x)),
+                    self.last_finalize
+                        .borrow()
+                        .as_ref()
+                        .map_or(Number::NAN, |f| rel(&f.x)),
+                )
+            }
+            None => (Number::NAN, Number::NAN),
+        };
+        let keeps_box = retry_keeps_declared_box(base_box_rel, retry_box_rel);
         let promote = clean && better && admissible && keeps_box;
         let console_output = match self.options.get_integer_value("print_level", "") {
             Ok((v, true)) => v >= 1,
@@ -5345,6 +5453,19 @@ impl IpoptApplication {
                      {:.4e} against the base attempt's {:.4e}); the base attempt's answer \
                      is the one reported.",
                     retry.final_unscaled_kkt_error, base.final_unscaled_kkt_error
+                );
+            }
+            if !promote {
+                // The re-solve's own end summary printed above this line, with
+                // *its* objective and bound violation, before the verdict was
+                // known (`emit_end_summary` runs inside each attempt). Say
+                // which block that was and restate the numbers that ship, so
+                // the console cannot be read as reporting the discarded point.
+                println!(
+                    "gh#983 scale audit: the summary block above is the discarded re-solve's; \
+                     the reported answer is the base attempt's (objective {:.16e}, variable \
+                     bound violation {:.16e}).",
+                    certificate_floor.objective, certificate_floor.declared_box_viol
                 );
             }
         }
@@ -8887,6 +9008,76 @@ struct FinalizeSnapshot {
     obj_value: Number,
 }
 
+/// The option-table overrides (and the box flag) one retry applies for its
+/// own solve, put back when the scope ends -- on **every** exit, unwinding
+/// included.
+///
+/// The retries used to restore by hand after `optimize_constrained`
+/// returned, so a panic inside it left the overrides in place. That is not
+/// hypothetical for an embedder: `pounce-cinterface`'s `ffi_guard` catches the
+/// panic and keeps the `IpoptApplication`, so the next `IpoptSolve` on that
+/// handle ran with the scale audit's `max_iter` (`3x` the base solve's),
+/// `obj_scaling_factor` multiplied by `k`, a CPU / wall budget shrunk to what
+/// the audited run had left -- and, since gh#983's declared-box fix, the
+/// variable box un-widened.
+///
+/// Derefs to the application, so the retry runs *through* the scope:
+/// `scope.optimize_constrained(..)`. Each entry is restored with
+/// [`OptionsList::restore_entry`], i.e. exactly as it stood, absence as
+/// absence.
+///
+/// `on_unwind_only` is for the two retries (μ-strategy fallback, gh#884)
+/// whose normal-path restore is deliberately *not* "as it stood" -- both
+/// write the resolved value back with `found = true` -- and whose behaviour
+/// on that path this guard must not change: there it only covers the unwind.
+struct RetryOptionScope<'a> {
+    app: &'a mut IpoptApplication,
+    saved: Vec<(
+        &'static str,
+        pounce_common::options_list::OptionEntrySnapshot,
+    )>,
+    on_unwind_only: bool,
+}
+
+impl<'a> RetryOptionScope<'a> {
+    fn enter(app: &'a mut IpoptApplication, tags: &[&'static str], on_unwind_only: bool) -> Self {
+        let saved = tags
+            .iter()
+            .map(|&t| (t, app.options.snapshot_entry(t)))
+            .collect();
+        Self {
+            app,
+            saved,
+            on_unwind_only,
+        }
+    }
+}
+
+impl std::ops::Deref for RetryOptionScope<'_> {
+    type Target = IpoptApplication;
+    fn deref(&self) -> &IpoptApplication {
+        self.app
+    }
+}
+
+impl std::ops::DerefMut for RetryOptionScope<'_> {
+    fn deref_mut(&mut self) -> &mut IpoptApplication {
+        self.app
+    }
+}
+
+impl Drop for RetryOptionScope<'_> {
+    fn drop(&mut self) {
+        if self.on_unwind_only && !std::thread::panicking() {
+            return;
+        }
+        for (tag, snap) in self.saved.drain(..) {
+            self.app.options.restore_entry(tag, snap);
+        }
+        self.app.retry_keeps_declared_box.set(false);
+    }
+}
+
 /// The `final_*` half of [`SolveStatistics`] — the numbers that describe the
 /// answer and the certificate attached to it.
 ///
@@ -11184,6 +11375,51 @@ mod tests {
             -9.7321185691e-2,
             6.21e-13
         ));
+    }
+
+    /// The declared-box conjunct is scale-safe: at a bound of `1e6`, two
+    /// points pinned to the same widened bound differ by an ulp (`1.2e-10`),
+    /// which an absolute `1e-12` floor read as the re-solve using more of the
+    /// widening; relative to the bound it is rounding. A genuine excess at
+    /// that magnitude -- the bound-magnitude probe's `2.5e-6`, i.e. `2.5e-12`
+    /// relative -- is still refused, and at a unit bound `1e-8` is.
+    #[test]
+    fn the_declared_box_conjunct_is_relative_to_each_bounds_magnitude() {
+        let (lo, up) = (-1e19, 1e19);
+        let rel = |x: &[Number], l: &[Number], u: &[Number]| {
+            declared_box_relative_violation(x, l, u, lo, up)
+        };
+        let ub: Number = 1e6;
+        let pinned: Number = ub + 1e-4; // on the widened bound (`constr_viol_tol` cap)
+        let one_ulp_out = f64::from_bits(pinned.to_bits() + 1);
+        assert!(
+            one_ulp_out - pinned > 1e-12,
+            "premise: an ulp of 1e6 exceeds 1e-12"
+        );
+        let (l, u) = (vec![0.0], vec![ub]);
+        let base = rel(&[pinned], &l, &u);
+        assert!(retry_keeps_declared_box(base, rel(&[one_ulp_out], &l, &u)));
+        // The absolute rule this replaces declined exactly that pair.
+        assert!(one_ulp_out - ub > (pinned - ub) + 1e-12);
+        let genuine = rel(&[ub + 9.9995e-5], &l, &u);
+        let base_genuine = rel(&[ub + 9.7494e-5], &l, &u);
+        assert!(!retry_keeps_declared_box(base_genuine, genuine));
+        // Unit bound: the widening's own size is refused, rounding is not.
+        let (l1, u1) = (vec![0.0], vec![1.0]);
+        assert!(!retry_keeps_declared_box(0.0, rel(&[1.0 + 1e-8], &l1, &u1)));
+        assert!(retry_keeps_declared_box(
+            0.0,
+            rel(&[f64::from_bits(1.0f64.to_bits() + 1)], &l1, &u1)
+        ));
+        // Lower bounds, sentinels, and single-point boxes.
+        assert_eq!(rel(&[-2e-4], &[-1e4], &[1e19]), 0.0);
+        assert!(rel(&[-1e4 - 1e-4], &[-1e4], &[1e19]) > 0.0);
+        assert_eq!(rel(&[5.0], &[-1e19], &[1e19]), 0.0);
+        assert_eq!(rel(&[0.5 + 1e-8], &[0.5], &[0.5]), 0.0);
+        assert!(rel(&[1.0], &[0.0, 0.0], &[1.0, 1.0]).is_nan());
+        // `NaN` is "not measured".
+        assert!(retry_keeps_declared_box(Number::NAN, Number::NAN));
+        assert!(!retry_keeps_declared_box(0.0, Number::NAN));
     }
 
     /// Rule 2: an objective *improvement* bought with primal slack.

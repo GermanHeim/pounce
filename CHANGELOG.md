@@ -295,11 +295,44 @@ changes.
   unchanged (`5.1312222e-4`, bound violation 0). Un-widening the rows as well
   (`bound_relax_factor=0`) was measured and rejected. It makes the re-solve a
   tighter model than the base, and its objective then reads worse by the row
-  widening's worth (`masked_certificate_fuzz` case 12). A caller who *names*
-  `bound_relax_factor` keeps the widening in the re-solve. For that case a new
+  widening's worth (`masked_certificate_fuzz` case 12). A variable fixed by
+  its box (`x_L == x_U`, kept in the iterate under
+  `fixed_variable_treatment=relax_bounds`) is still widened, since a barrier
+  needs an interior.
+
+  **Behaviour change for a caller who names `bound_relax_factor`, even at its
+  default `1e-8`.** Naming it keeps the widening in the re-solve, and a new
   promotion conjunct, `retry_keeps_declared_box`, declines any re-solve that
-  sits further outside the declared box than the base attempt. The decline
-  shows up as a console line and in the `objective_scale_small` warning.
+  sits further outside the declared box than the base attempt. On a
+  bound-active model that is every re-solve, so the audit's promotion is lost
+  there and the base attempt's answer ships, with an `objective_scale_small`
+  warning that names the reason. All 12 named-factor probes (bound magnitudes
+  `1` to `1e6`, two box shapes each) declined; all 12 unnamed ones promoted.
+  The conjunct compares the violation relative to each bound's magnitude, with
+  a floor of four ulps (`4ε`). The smallest genuine excess in that probe is
+  `2.5e-12` relative, at `x_U = 1e6`; rounding is at most `ε`. An absolute
+  floor could not do this, because above `|b| ≈ 1e4` one ulp of the bound
+  exceeds any floor that still separates `1e-8` from noise on a unit bound.
+  Variables fixed by their box are left out of the comparison, because under
+  `relax_bounds` both attempts return them somewhere in the widened band. The
+  CLI's convex fall-through writes `bound_relax_factor=0` as caller-named
+  (`pounce-cli/src/main.rs`) when it hands a model to the NLP arm. That counts
+  as "named" here and is harmless: at factor `0` neither attempt widens
+  anything, so the box is the declared one either way.
+
+  On a declined re-solve the console now says so. A line before the re-solve
+  calls its summary block a candidate. After the verdict, a further line
+  names that block as the discarded re-solve's and restates the objective and
+  bound violation that actually ship. The JSON report was already right.
+
+  The re-solve's temporary configuration is now restored by a drop guard
+  (`RetryOptionScope`) on every exit, unwinding included: `max_iter`,
+  `obj_scaling_factor`, the CPU/wall budget and the box flag. Before this, a
+  panic inside it left all of them set, and `pounce-cinterface`'s `ffi_guard`
+  keeps the application, so the next `IpoptSolve` on that handle ran with the
+  audit's settings. The μ-strategy fallback's `mu_strategy` and the gh#884
+  retry's `perturb_always_cd` have the same unwind cover. Their normal-path
+  restores are unchanged. `optimize_tnlp` also clears the box flag on entry.
   Adjacent defect, also fixed: the certificate floor that puts a declined
   retry's statistics back (the scale audit, the gh#884 retry and the
   mu-strategy fallback all use it) did not restore `final_declared_box_viol`
@@ -317,9 +350,13 @@ changes.
   `-2.999999985e-3`. Tests: `crates/pounce-cli/tests/issue_983_scale_audit_declared_box.rs`
   (`.sol`/JSON/`pounce verify`) and
   `crates/pounce-algorithm/tests/issue_983_scale_audit_declared_box.rs` (the
-  `optimize_tnlp` path the C interface and Python drive). Each was
-  mutation-checked against reverting the box change, the conjunct, and the
-  certificate restore separately.
+  `optimize_tnlp` path the C interface and Python drive, bounds of `1e4` and
+  `1e6`, the next solve after a promotion, a decline and an injected panic).
+  New fixtures: `scale_audit_fixed_var.nl` (relax_bounds with a fixed
+  variable) and `mu_fallback_declined_bound_active.nl` (the μ-fallback decline
+  path, which reported the discarded retry's `9.46e-9` beside a point inside
+  its box). The gh#884 decline path is pinned in
+  `issue_884_biactive_dual_divergence.rs`. Each test was mutation-checked.
 - **An overflowed `δ_x` ladder no longer poisons every later one.** When the
   inertia-correction ladder climbs past `max_hessian_perturbation` it gives up
   on the system and clears the remembered `δ_x_last`. It left the overflowed
