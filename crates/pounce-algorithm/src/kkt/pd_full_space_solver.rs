@@ -66,11 +66,9 @@ pub struct PdFullSpaceSolver {
     /// Ipopt form that ignores it. Only read when
     /// `neg_curv_test_tol > 0`.
     pub neg_curv_test_reg: bool,
-    /// Upstream's `augsys_improved_`, split per consumer (gh#1042 R2b):
-    /// which of the two escalation sites has already spent its one
-    /// quality escalation on the current matrix. Cleared each time the
-    /// cached aug-system data changes. See [`EscalationBudget`].
-    escalation_budget: EscalationBudget,
+    /// Mirrors `augsys_improved_`. Set by quality-escalation; cleared
+    /// each time the cached aug-system data changes.
+    augsys_improved: bool,
     /// Count of *successful* `AugSystemSolver::increase_quality()` calls
     /// — escalations the backend accepted, i.e. exactly the ones that
     /// print a `q` in the info-string column. Shared with the owning
@@ -128,69 +126,6 @@ pub struct PdFullSpaceSolver {
 /// whole budget" regime the issue is about.
 const FACTOR_OVERSHOOT_BUDGET_FRACTION: Number = 0.5;
 
-/// The two places in [`PdFullSpaceSolver`] that may ask the backend for a
-/// better factorization (`AugSystemSolver::increase_quality`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EscalationConsumer {
-    /// The inertia ladder's too-few-negatives branch in `solve_once`: a
-    /// `WrongInertia` with fewer negative eigenvalues than constraints.
-    InertiaDeficit,
-    /// Iterative refinement in `solve`, after the residual ratio stalls.
-    Refinement,
-}
-
-/// One quality escalation per consumer per matrix (gh#1042 R2b).
-///
-/// **Departs from upstream on purpose.** `IpPDFullSpaceSolver.cpp` keeps a
-/// single `augsys_improved_` flag per matrix that both consumers read and
-/// set, so whichever escalates first leaves the other none. On
-/// `pooling_rt2stp` (exact, x86, 0.13.0) the ladder's first factor at
-/// iteration 4 is a matrix singular to working precision (nullity 2, R2d)
-/// whose count reads 71 of 72 negatives; the inertia branch spends the
-/// escalation on it, the next factor comes back `Singular` anyway, the
-/// gh#592 walk-back accepts a `δ_c`-free factor, and refinement — which
-/// stalls on that factor's 6.4e16 step — can no longer escalate, so it
-/// takes the `S` exit and keeps the step. `λ_min(W)` is −4.1e13 one
-/// iteration later and the solve takes 492 iterations; with refinement
-/// given its own escalation it refactors and takes 109.
-///
-/// The budget stays **one** per consumer: letting refinement escalate
-/// whenever it stalls (R2's blanket counterfactual) takes 43 matrices of
-/// the fixture corpus to 10–12 refinement escalations each (38 of them
-/// to the backend's rung cap) and moves 15 sweep lines, two lbfgs objectives and
-/// second-opinion rungs among them. Measured population of this split
-/// on the 234 fixture-legs at `85d08bc6` (both legs, second-opinion
-/// rungs and restoration sub-solves included): 3 successful
-/// inertia-branch escalations in all, and exactly **one** matrix on
-/// which refinement later stalled with the shared flag spent — the
-/// pooling iteration-4 one. No other matrix sees a different decision,
-/// so no matrix is escalated more than twice.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct EscalationBudget {
-    inertia_spent: bool,
-    refinement_spent: bool,
-}
-
-impl EscalationBudget {
-    /// Whether `consumer` may still ask for an escalation on this matrix.
-    fn may_escalate(&self, consumer: EscalationConsumer) -> bool {
-        match consumer {
-            EscalationConsumer::InertiaDeficit => !self.inertia_spent,
-            EscalationConsumer::Refinement => !self.refinement_spent,
-        }
-    }
-
-    /// Record a *successful* escalation by `consumer`. A declined one
-    /// spends nothing, as upstream's flag stays `false` on a declined
-    /// `IncreaseQuality`.
-    fn record_success(&mut self, consumer: EscalationConsumer) {
-        match consumer {
-            EscalationConsumer::InertiaDeficit => self.inertia_spent = true,
-            EscalationConsumer::Refinement => self.refinement_spent = true,
-        }
-    }
-}
-
 impl PdFullSpaceSolver {
     pub fn new(
         aug_solver: Box<dyn AugSystemSolver>,
@@ -207,7 +142,7 @@ impl PdFullSpaceSolver {
             residual_improvement_factor: 0.999_999_999,
             neg_curv_test_tol: 0.0,
             neg_curv_test_reg: true,
-            escalation_budget: EscalationBudget::default(),
+            augsys_improved: false,
             quality_escalations: Rc::new(Cell::new(0)),
             matrix_considered: false,
             last_dep_tags: None,
@@ -228,17 +163,16 @@ impl PdFullSpaceSolver {
     /// Ask the backend to escalate, recording the answer.
     ///
     /// The single place `increase_quality()` is called from, so the
-    /// tally cannot drift from the per-consumer [`EscalationBudget`] or
-    /// from the `q` info-string the two call sites both emit. The tally
-    /// counts every successful escalation, whichever consumer asked.
+    /// tally cannot drift from the `augsys_improved` flag or from the
+    /// `q` info-string the two historical call sites both emit.
     /// Returns what the backend returned.
-    fn escalate_aug_quality(&mut self, consumer: EscalationConsumer) -> bool {
+    fn escalate_aug_quality(&mut self) -> bool {
         let improved = self.aug_solver.increase_quality();
         if improved {
             self.quality_escalations
                 .set(self.quality_escalations.get().saturating_add(1));
-            self.escalation_budget.record_success(consumer);
         }
+        self.augsys_improved = improved;
         improved
     }
 
@@ -655,7 +589,7 @@ impl PdFullSpaceSolver {
     fn invalidate_aug_cache(&mut self) {
         self.matrix_considered = false;
         self.last_dep_tags = None;
-        self.escalation_budget = EscalationBudget::default();
+        self.augsys_improved = false;
     }
 
     /// Solve the full PD system. `res = α · M⁻¹ · rhs + β · res_in`,
@@ -805,8 +739,8 @@ impl PdFullSpaceSolver {
         // are unchanged since the last successful `solve()`, the matrix
         // is "uptodate" — keep `matrix_considered = true` so the
         // perturbation handler is NOT re-entered, and reuse the
-        // existing `augsys_improved_` state (here the per-consumer
-        // `escalation_budget`). On a cache miss, reset both.
+        // existing `augsys_improved_` state. On a cache miss, reset
+        // both flags.
         let cur_tags: [Tag; 13] = [
             blocks.w.as_tagged().get_tag(),
             blocks.j_c.as_tagged().get_tag(),
@@ -857,7 +791,7 @@ impl PdFullSpaceSolver {
             }
             self.last_dep_tags = Some(cur_tags);
             self.matrix_considered = false;
-            self.escalation_budget = EscalationBudget::default();
+            self.augsys_improved = false;
         }
 
         let mut done = false;
@@ -957,13 +891,9 @@ impl PdFullSpaceSolver {
                     resolve_with_better_quality = false;
 
                     if !pretend_singular_last_time {
-                        // gh#1042 R2b: refinement's own budget, not one an
-                        // inertia-branch escalation on this matrix spent.
-                        if self
-                            .escalation_budget
-                            .may_escalate(EscalationConsumer::Refinement)
-                        {
-                            if self.escalate_aug_quality(EscalationConsumer::Refinement) {
+                        if !self.augsys_improved {
+                            self.escalate_aug_quality();
+                            if self.augsys_improved {
                                 data.borrow_mut().append_info_string("q");
                                 resolve_with_better_quality = true;
                             } else {
@@ -1757,13 +1687,12 @@ impl PdFullSpaceSolver {
                 && self.aug_solver.number_of_neg_evals() < num_neg_evals
             {
                 let mut assume_singular = true;
-                if self
-                    .escalation_budget
-                    .may_escalate(EscalationConsumer::InertiaDeficit)
-                    && self.escalate_aug_quality(EscalationConsumer::InertiaDeficit)
-                {
-                    data.borrow_mut().append_info_string("q");
-                    assume_singular = false;
+                if !self.augsys_improved {
+                    self.escalate_aug_quality();
+                    if self.augsys_improved {
+                        data.borrow_mut().append_info_string("q");
+                        assume_singular = false;
+                    }
                 }
                 if assume_singular {
                     let curr_mu = data.borrow().curr_mu;
@@ -2455,51 +2384,7 @@ impl AugSystemSolver for NoopAugSolver {
 
 #[cfg(test)]
 mod tests {
-    use super::{EscalationBudget, EscalationConsumer};
     use super::{deadline_exceeded, factor_overshoot_predicted};
-
-    /// gh#1042 R2b, in the order the two sites consult the budget on
-    /// `pooling_rt2stp`'s iteration-4 matrix: the inertia ladder's
-    /// too-few-negatives branch escalates first, refinement stalls on the
-    /// accepted factor later. Refinement must still get its escalation
-    /// (a single shared flag — upstream's `augsys_improved_`, and pounce
-    /// before R2b — fails here), and only one (an unbounded rule, R2's
-    /// blanket counterfactual, fails the second refinement assertion).
-    #[test]
-    fn refinement_keeps_one_escalation_after_the_inertia_branch_spends_its_own() {
-        let mut b = EscalationBudget::default();
-        assert!(b.may_escalate(EscalationConsumer::InertiaDeficit));
-        assert!(b.may_escalate(EscalationConsumer::Refinement));
-
-        b.record_success(EscalationConsumer::InertiaDeficit);
-        assert!(!b.may_escalate(EscalationConsumer::InertiaDeficit));
-        assert!(
-            b.may_escalate(EscalationConsumer::Refinement),
-            "an inertia-branch escalation must not spend refinement's"
-        );
-
-        b.record_success(EscalationConsumer::Refinement);
-        assert!(
-            !b.may_escalate(EscalationConsumer::Refinement),
-            "refinement escalates at most once per matrix"
-        );
-        assert!(!b.may_escalate(EscalationConsumer::InertiaDeficit));
-    }
-
-    /// The other order, and a fresh matrix: refinement spending its
-    /// escalation leaves the inertia branch's, and a cache miss (which
-    /// resets the budget to its default) restores both.
-    #[test]
-    fn each_consumer_budget_is_independent_and_per_matrix() {
-        let mut b = EscalationBudget::default();
-        b.record_success(EscalationConsumer::Refinement);
-        assert!(!b.may_escalate(EscalationConsumer::Refinement));
-        assert!(b.may_escalate(EscalationConsumer::InertiaDeficit));
-
-        b = EscalationBudget::default();
-        assert!(b.may_escalate(EscalationConsumer::Refinement));
-        assert!(b.may_escalate(EscalationConsumer::InertiaDeficit));
-    }
     use crate::ipopt_data::IpoptData;
     use pounce_common::timing::Deadline;
     use std::cell::RefCell;

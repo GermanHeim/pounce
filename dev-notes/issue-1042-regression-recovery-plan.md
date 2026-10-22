@@ -46,8 +46,8 @@ iterations after a now-*correct* inertia report.
 | **R1c** | `scaled_feasible_a` (sibling of R1) | both HSDE solves run at `τ ≈ 1e-10` to represent `‖x̂‖ = 5e9` from the unit self-dual start | cold start not sized to the data; the direct driver's gh#689 Mehrotra recentering took the same model 175 → 27 | **candidate** — seed the embedding from the recentered cold seed at `τ = 1`; the largest blast radius of the R1 family | todo (`needs benchmarks/qp before merge` at best) |
 | **R1d** | `scaled_feasible_a` (sibling of R1) | first, unequilibrated HSDE solve burns 200 it to `true_kkt 0.149` before the gh#293 retry: 400 HSDE it for a reported 200 | no early-failure detection: `τ` creeps linearly 1.6e-9 → 7.6e-8 over it 19–199 with `mu ~1e-37` | **candidate** — hand the retry the budget early; independent value (halves the work) even if R1b/c land, reported count unchanged | todo (`needs benchmarks/qp before merge` at best) |
 | **R1e** | `scaled_feasible_a` (sibling of R1) | retry it 165 → 200 is certifiable (`true_kkt 8.6e-9`) but the loop waits on `pres < tol`, unreachable at 4 ulp of `5e9` | stopping test has no exit for an iterate whose only unmet term is pinned at its rounding floor | **partial** — ≤ 17% of this model's count; R1 declined it as insufficient alone; kept as a sibling because it composes with R1b/c and may have corpus-wide value | todo (lowest priority in the family) |
-| **R2** | `pooling_rt2stp` (exact, x86) | 162 → **492** it (arm64: 109 → 242 total, *issue*) | FERAL 0.21 trajectory; `2599c2be` removed the latch (904 → 492); the remaining cost is the `δ_x` ladder climbing to `max_hessian_perturbation` with `δ_c` on (*issue*, unmeasured) | **partial** — the "stop the ladder once inertia is guaranteed" follow-up the issue names; must be measured first | **not recoverable this way** (2026-10-22: hypothesis refuted — 0 of 146 `WrongInertia` factors with `δ_c > 0` had a PD (1,1) block; the climb answers a genuinely indefinite `W`, λ_min down to −1.2e19 vs v0.12.0's −2.2e9; trigger found at iteration 4, see log + §5). Alternate routes: **R2b–R2e** below. ~~Family target met on x86 by R2b~~ **Correction (R2e iteration): the target is not met.** R2b's reported 109 is the `mu_strategy_fallback` re-solve; its base solve is **494 it, `Solved_To_Acceptable_Level`, −4336.99 (not an optimum), 22 resto calls**, against 0.13.0's single `Solve_Succeeded` 492 — total 603 iterations / 25 resto calls, and neither the JSON report nor the sweep shows the first attempt (R2e log). Every member is now terminal (§4 rule 6: R2/R2c/R2d/R2e not recoverable, R2b swept), so the family is closed **by status with its target unmet**; R2b needs the owner's (or a correction iteration's) re-measurement before anything is built on it |
-| **R2b** | `pooling_rt2stp` (exact, x86; sibling of R2) | 492 it; blanket counterfactual 492 → 109 with 19 collateral lines | one `augsys_improved` flag per matrix is shared by the inertia ladder's too-few-negatives branch and iterative refinement; at iteration 4 the former spends it on a 71-vs-72 count and refinement keeps a 6.4e16 step | **candidate** — one escalation budget per consumer per matrix; must avoid the counterfactual's collateral (lbfgs `circle_parabola_t0p5` 8.155 → 10.428, lbfgs `scale_audit_retry_meyer3` 112 → 152, 15 lines escalating to cap) | **swept — needs vanderbei before merge** — **see the correction in the R2e log: the 109 below is `mu_strategy_fallback`'s re-solve; R2b's base solve is 492 `Solve_Succeeded` → 494 `Solved_To_Acceptable_Level` (−4336.99, 22 resto), so the base verdict got worse and the pin `issue_1042_pooling_escalation_budget.rs` passes on the fallback's count** (2026-10-22 as recorded: exact 492 → **109** it, −4391.826, 24 → **3** restoration calls, q 3 → 4; lbfgs 82 unchanged. Measured population of the split on the whole corpus, both legs: **one** matrix — pooling iteration 4 — so the sweep moves exactly that one line; the blanket counterfactual's collateral came from 43 matrices escalating 10–12 times each from refinement, which one-per-consumer forbids. No narrowing needed; see log) |
+| **R2** | `pooling_rt2stp` (exact, x86) | 162 → **492** it (arm64: 109 → 242 total, *issue*) | FERAL 0.21 trajectory; `2599c2be` removed the latch (904 → 492); the remaining cost is the `δ_x` ladder climbing to `max_hessian_perturbation` with `δ_c` on (*issue*, unmeasured) | **partial** — the "stop the ladder once inertia is guaranteed" follow-up the issue names; must be measured first | **not recoverable this way** (2026-10-22: hypothesis refuted — 0 of 146 `WrongInertia` factors with `δ_c > 0` had a PD (1,1) block; the climb answers a genuinely indefinite `W`, λ_min down to −1.2e19 vs v0.12.0's −2.2e9; trigger found at iteration 4, see log + §5). Alternate routes: **R2b–R2e** below. ~~Family target met on x86 by R2b~~ **Correction (R2e iteration): the target is not met; R2b reverted in C1** — pooling exact is back to 0.13.0's single-attempt 492. R2b's reported 109 is the `mu_strategy_fallback` re-solve; its base solve is **494 it, `Solved_To_Acceptable_Level`, −4336.99 (not an optimum), 22 resto calls**, against 0.13.0's single `Solve_Succeeded` 492 — total 603 iterations / 25 resto calls, and neither the JSON report nor the sweep shows the first attempt (R2e log). Every member is now terminal (§4 rule 6: R2/R2c/R2d/R2e not recoverable, R2b swept), so the family is closed **by status with its target unmet**; R2b needs the owner's (or a correction iteration's) re-measurement before anything is built on it |
+| **R2b** | `pooling_rt2stp` (exact, x86; sibling of R2) | 492 it; blanket counterfactual 492 → 109 with 19 collateral lines | one `augsys_improved` flag per matrix is shared by the inertia ladder's too-few-negatives branch and iterative refinement; at iteration 4 the former spends it on a 71-vs-72 count and refinement keeps a 6.4e16 step | **candidate** — one escalation budget per consumer per matrix; must avoid the counterfactual's collateral (lbfgs `circle_parabola_t0p5` 8.155 → 10.428, lbfgs `scale_audit_retry_meyer3` 112 → 152, 15 lines escalating to cap) | **reverted — first solve regressed** (C1, 2026-10-22: with the fallback visible, R2b turned 0.13.0's single `Solve_Succeeded`/492 (24 resto) into a first attempt `Solved_To_Acceptable_Level`/494 at −4336.99 (unscaled dual inf 5.3e6, 22 resto) rescued by `mu_strategy_fallback`'s 109 — total 603 it / 25 resto. No narrowing exists inside the lever: its census population is one matrix, and the `refuted` / `dc0` / `refuted_dc0` variants were byte-identical to the split, so every variant either takes that decision (494 Acceptable) or is the revert (492 Optimal). Code `git revert`ed; its §3 text and §6 log are kept as the record. As first recorded: "swept — needs vanderbei before merge", exact 492 → 109 — that 109 was the fallback's) |
 | **R2c** | `pooling_rt2stp` (exact, x86; sibling of R2) | iteration-4 refinement stalls at ratio 1.6e-8 and takes the `S` exit with a dual part of 6.4e16 | `compute_residual_ratio` caps its normalizer at `1e6·‖rhs‖`, so the `S` test (ratio < `residual_ratio_singular` = 1e-5) is blind to a step many orders above the RHS | **candidate** — refuse `S` (take `s` → `perturb_for_singular`) when `‖res‖∞ > κ·‖rhs‖∞`; the narrowest of the family | **not recoverable this way (measured)** (2026-10-22: a step dwarfing the RHS is the *ordinary* `S` exit, not the tail — 135 of the corpus's 188 `S` exits are above `κ = 1e6`, 90 above `1e12`, and the pooling iteration-4 exit (2.2e14) ranks 62nd; keeping the rule under the item's 10% stop needs `κ ≥ 4.7e20`. Counterfactual at `κ = 1e6` / `1e12`: pooling's base solve is lost (`ErrorInStep` 795 / 173, rescued by the `mu_strategy=adaptive` rung at 140), exact `circle_parabola_t1p5` Infeasible → MaxIter 3000, and the `s` path never reinstates `δ_c` (six uncertified `Singular`s climb `δ_x` to 8.7 at `δ_c = 0`); see log). Next: **R2b** |
 | **R2d** | `pooling_rt2stp` iteration 4 (sibling of R2) | FERAL 0.21 reports 71 negatives, 72 required; FERAL 0.20 reported 73 on v0.12.0's matrix | either an inertia-count defect in FERAL (crates.io dependency `feral = 0.21.0`, upstream jkitchin/feral — not vendored) or a genuinely ambiguous near-singular matrix | **measure first** — exact count vs both FERAL counts on the dumped matrix; fix upstream, or work around in `pounce-feral` (classify as noise → `Singular`, no escalation spent) | **not recoverable here — not a count defect (measured)** (2026-10-22: the 0.13.0 iteration-4 matrix is singular to working precision — two scaled eigenvalues 1.6e-18 / 1.1e-15, next 7.7e-4 — and its exact count is 71, which FERAL 0.21, 0.20 and 0.18 all report on the dump; v0.12.0's iteration-4 matrix is a *different*, nonsingular one (min \|λ\| 2.4e-9, exact 73, all three FERALs 73); the noise rule is gated off by `min_piv` 5.95e-14 vs floor 3.33e-14; three pounce-feral workarounds measured, none admissible; see log). Next: **R2c** |
 | **R2e** | `pooling_rt2stp` iteration 4 (sibling of R2) | both versions accept a `δ_c`-free factor with min \|eig\| 2e-17 after the gh#592 walk-back | the walk-back accepts any factor FERAL calls `Success`; a numerically singular one is the source of the 6.4e16 step | **candidate** — refuse the withdrawal when the factor's `min_pivot_magnitude` is under the inertia trust floor; keeps `δ_c` instead of repairing the step downstream | **not recoverable this way (measured)** (2026-10-22 on `3e186634`. *Re-baselined after R2b* first: the regression still reproduces — base solve 494 it `Solved_To_Acceptable_Level`, 22 resto, rescued by `mu_strategy_fallback` (109) — so not `dropped`. Refuted by the item's own clause: the iteration-4 walk-back's `Success` has `min_piv` **3.98e-14, above** the `150·ε` = 3.33e-14 floor. The rule's corpus population, both legs, is **8** first-`δ_c`-free `Success` factors, all on exact pooling (iterations 5–39 + restoration); firing on them takes the base solve 494 Acceptable → **3000 `MaximumIterationsExceeded`** and the reported verdict `SolveSucceeded` → MaxIter. The widened form (certify sub-floor uncertified `Singular`s too) is gh#981's rejected "reinstate on any `Singular`": base 141 Acceptable at −3261.36, reported 491, gh#884's reproducer dual 1.3e-10 → 7.0e-5; see log) |
@@ -61,8 +61,8 @@ iterations after a now-*correct* inertia report.
 | X1 | exact `deb7` arm64 Optimal/147 → Acceptable/180 | (*issue*) | FERAL 0.21 NEON trajectory | **not recoverable here** (x86 improves 143 → 114) (§5) | n/a |
 | X2 | lbfgs `dallass` arm64 Optimal/224 → ErrorInStep/308 | (*issue*); x86 fails on both versions | FERAL 0.21 trajectory | **not recoverable here**; the x86 lbfgs failure predates 0.13.0 (§5) | n/a |
 | X3 | lbfgs `pooling_rt2stp` arm64 −4391.83 → −3273.95 | (*issue*); x86 failing → solved | bistable nonconvex model | **no** — both are certified optima (§5) | n/a |
-| F1 | `issue_592` pin `< 500` sits 8 above x86's 492 | — | R2 | resolved by whichever of R2b–R2e lands; **do not raise the pin** | **correction (R2e iteration): margin is 6 on the base solve** (494, Acceptable) — the pin reads the JSON `iteration_count`, which is `mu_strategy_fallback`'s 109; R2b's log recorded margin 8 → **391** on x86 (pooling exact 109); the `< 500` pin is **untouched** — it guards gh#544's 812 régime, and R2b's own pin (`issue_1042_pooling_escalation_budget.rs`, ≤ 300) carries the tighter bound; tightening `issue_592` itself is left until R2b clears the vanderbei A/B |
-| **C1** | the measurement instrument (correction iteration, after R2e) | — | a promoted `mu_strategy_fallback` (pounce#138/#748) re-solve replaces `iteration_count`, `restoration_calls` and the status in the JSON report, and the sweep had no column for it, so a first attempt that got *worse* read as a speed-up (R2b's 492 → 109) | **yes** — report the fallback, re-audit every item with it | **instrument landed** (2026-10-22: `statistics.mu_strategy_fallback` in the JSON report — first attempt's status / iterations / restoration calls / objective, re-solve's strategy / status / iterations, `promoted` — and a `mu=` sweep column; re-audit at v0.12.0 / 0.13.0 / pre-R2b / tip: the only fallback line that moved anywhere is R2b's pooling exact; see log) |
+| F1 | `issue_592` pin `< 500` sits 8 above x86's 492 | — | R2 | resolved by whichever of R2b–R2e lands; **do not raise the pin** | **margin 8 on a single attempt** (C1, after R2b's revert: pooling exact is one `Solve_Succeeded` attempt at 492, `mu=-`, so `< 500` is met by the first solve, not a fallback. On the R2b tip it had been met by the fallback's 109 with the first attempt at 494 — margin 6, Acceptable). The `< 500` pin is untouched; it gets no fallback assertion here because pooling's arm64 trajectory (issue: "109 → 242 total") is unmeasured and may legitimately take a retry there |
+| **C1** | the measurement instrument (correction iteration, after R2e) | — | a promoted `mu_strategy_fallback` (pounce#138/#748) re-solve replaces `iteration_count`, `restoration_calls` and the status in the JSON report, and the sweep had no column for it, so a first attempt that got *worse* read as a speed-up (R2b's 492 → 109) | **yes** — report the fallback, re-audit every item with it | **done** (2026-10-22: `statistics.mu_strategy_fallback` in the JSON report — first attempt's status / iterations / restoration calls / objective, re-solve's strategy / status / iterations, `promoted` — and a `mu=` sweep column, report-only (patched sweeps byte-identical to unpatched on four binaries). Re-audit at v0.12.0 / 0.13.0 / pre-R2b / tip: the only fallback line the branch moved is R2b's pooling exact; `csfi2` exact is a pre-existing promotion on all four; R3 stands. R2b reverted on the numbers; R3's pin asserts no fallback; see log) |
 | **M1** | re-measurement pass after every landed R2x item | — | R2b/c/d/e each move the NLP arm's step for every exact-Hessian solve; R3 landed *before* them (dallass 28), so the original "R3 after R2" re-baseline is inverted | rule, not a code item: see §3 M1 and §4 "Sibling items" | standing (runs inside each R2x iteration) |
 
 ## 2. Ordering
@@ -95,7 +95,9 @@ to the rest of a family once one member recovers the target.
    counterfactual's 19-line collateral is the thing to avoid). **Landed
    2026-10-22, `swept — needs vanderbei before merge`:** pooling exact
    492 → 109; the split's corpus population is one matrix and the sweep
-   moves one line (§6 R2b log).
+   moves one line (§6 R2b log). **Reverted 2026-10-22 in C1:** the 109 was
+   `mu_strategy_fallback`'s re-solve; the first attempt went Optimal/492 →
+   Acceptable/494, total 603 (§6 C1 log).
 4. **R2e** walk-back refuses a numerically singular `δ_c`-free factor —
    upstream of both R2b and R2c in the iteration-4 chain, but touches
    gh#592/gh#981 territory, so last in the family. **Closed 2026-10-22:
@@ -874,6 +876,11 @@ exits; more than one status loss in the sweep; the `s` path overflows
 two iterations.
 
 ### R2b — one quality-escalation budget per consumer per matrix
+
+> **Reverted in C1 (2026-10-22).** The result below was scored on the
+> reported count, which was `mu_strategy_fallback`'s re-solve; the first
+> attempt regressed (Optimal/492 → Acceptable/494, total 603). Kept as the
+> record of the lever and its census (§6 R2b and C1 logs).
 
 **Goal.** Refinement keeps its one escalation on a matrix even when the
 inertia ladder's too-few-negatives branch has already spent one, so the
@@ -1778,6 +1785,12 @@ raise it. Docs-only iterations (skips) still run `cargo fmt --check`.
   attempt"** (the sweep's 2nd column covers the second-opinion ladder
   only; a promoted fallback leaves no trace, which is how this was
   misread, the gh#850 lesson one mechanism over).
+  **Resolved in C1 (2026-10-22):** the second issue is implemented
+  (`statistics.mu_strategy_fallback`, the sweep's `mu=` column); the first
+  is moot — R2b's code is reverted, pooling exact is 0.13.0's single
+  `Solve_Succeeded` attempt at 492 again. The R2 family's target (pooling
+  ≤ 300 on the first attempt) remains unmet with every member terminal;
+  a further lever would need a new item, measured on the first attempt.
 - **Anything that requires the benchmark corpus** (B1's benefit, B2, B3) is
   blocked on this machine: `POUNCE_BENCH_DATA` is unset and no
   `~/projects/pounce-bench-data` exists. The code half of B1 is still in
@@ -2844,7 +2857,7 @@ corpus), arm64 (not available), Python tests (no code change). The probe
 and both counterfactuals lived only in the scratch worktree, which was
 removed.
 
-### C1 — 2026-10-22 — instrument landed (R2b decision in the next commit)
+### C1 — 2026-10-22 — done; R2b reverted (first solve regressed)
 
 Measured on x86_64 (4 CPUs, AVX2+FMA). Four binaries, each carrying the C1
 report patch (below) so that all four columns are read the same way, each
@@ -2970,3 +2983,107 @@ Restored. R3's pin (`issue_1042_dallass_abs_pow_merge.rs`) now asserts
 mutation check: pointed at `pooling_rt2stp.nl` on the R2b tip, every
 earlier assertion passes (Optimal, no second opinion) and the new one fails
 with the record (`494 … Solved_To_Acceptable_Level … promoted`). Restored.
+
+**R2b decision: revert.** The criterion (this iteration's brief): the first
+attempt must not get worse than 0.13.0's Optimal/492 and total work must
+not exceed it, unless a net win elsewhere is shown; a fallback rescue is not
+a recovery.
+
+| pooling_rt2stp (exact) | first attempt | retry | reported | total it / resto |
+|---|---|---|---|---|
+| 0.13.0 (`0a299151`) | `Solve_Succeeded` 492, −3273.95499, 24 resto | — | 492 | 492 / 24 |
+| pre-R2b (`85d08bc6`) | same | — | 492 | 492 / 24 |
+| R2b (`36fefb32`) | **`Solved_To_Acceptable_Level` 494, −4336.990888, unscaled dual inf 5.3e6, 22 resto** | adaptive, `Solve_Succeeded` 109, −4391.82601, 3 resto — promoted | 109 | **603 / 25** |
+| after revert (this commit) | `Solve_Succeeded` 492, −3273.95499, 24 resto, q 3 | — | 492 | 492 / 24 |
+
+Both halves of the criterion fail (first attempt Optimal → Acceptable at a
+non-optimal point; total 492 → 603), and there is no win elsewhere to set
+against it: the sweep moved no other line (R2b's census — one changed
+decision in the whole corpus — is confirmed by C1's tip-vs-pre-R2b diff,
+which is that one line on every column including `mu=`). Lbfgs pooling 82
+either way. **No narrowing can help inside this lever:** the population is
+one matrix, and R2b's own measurement found the `refuted`, `dc0` and
+`refuted_dc0` narrowings byte-identical to the split, so any variant that
+still takes the iteration-4 decision reproduces the Acceptable/494 first
+attempt and any that does not is the revert. So `git revert 3e186634` for
+the code (`pd_full_space_solver.rs` back to `85d08bc6`'s byte for byte, and
+R2b's CLI pin `issue_1042_pooling_escalation_budget.rs` removed with it —
+it passed on the fallback's count, which is the defect C1 names); R2b's §3
+text and §6 log stay as the record, marked reverted. §4 rule 4 ("a landed
+sibling is not reverted because a later one would have been narrower") does
+not apply: this is not a narrower-sibling comparison but a landed item
+whose own target was never met on the first attempt.
+
+**Fixture sweep** (`scripts/sweep-fixtures.sh`, 234 fixture-legs, both
+legs). The `mu=` column moves every line's layout, so the diff is read two
+ways. (1) Old columns only (`sed -E 's/ mu=[^ ]+ +/ /'`), tip vs the final
+binary (the tip's old columns are R2c's unpatched `85d08bc6` sweep plus
+R2b's recorded pooling line; whitespace squeezed below):
+
+```
+< exact  pooling_rt2stp  nlp  SolveSucceeded  it=109  q=4  2nd=-  obj=-4391.82601
+> exact  pooling_rt2stp  nlp  SolveSucceeded  it=492  q=3  2nd=-  obj=-3273.95499
+```
+
+(2) All columns, whitespace squeezed, patched tip vs final:
+
+```
+< exact pooling_rt2stp nlp SolveSucceeded it=109 q=4 2nd=- mu=adaptive@Solved_To_Acceptable_Level/494,tot=603 obj=-4391.82601
+> exact pooling_rt2stp nlp SolveSucceeded it=492 q=3 2nd=- mu=- obj=-3273.95499
+```
+
+- exact `pooling_rt2stp`: R2b's one decision undone; the run is again
+  0.13.0's single attempt (first-attempt status unchanged from 0.13.0,
+  `mu=` promotion gone). Expected and the purpose of the revert.
+- Nothing else moves. The final sweep equals the patched pre-R2b sweep
+  line for line (all columns), and with `mu=` dropped it equals R2c's
+  unpatched `85d08bc6` sweep. Engine split unchanged: nlp 127, cvx-qp 92,
+  cvx-qcqp 14, square-lm 1. The four other `mu=` lines (csfi2 exact
+  promoted; mu_fallback_point_floor both legs, eigenb2 lbfgs kept) are
+  identical on all four binaries.
+
+**M1 (new tip)** — pre-R2b's column of the audit table, first attempts
+named: pooling exact Optimal 492 single attempt (24 / 106 resto, q 3,
+−3273.95499); pooling lbfgs 82 single; dallass 28 / 301, single attempts
+both legs; deb7 114 / RestorationFailed 1206 (`kept(1)`, tot 1738);
+scaled_feasible_a 200 / 200 cvx-qp; scaled_feasible_b 36 / 36; lbfgs
+circle_parabola_t0p5 77 q 4 `feral_scaling=mc64@Infeasible/48` tot 125;
+lbfgs meyer3 112 q 5. No M1 row carries a fallback.
+
+**F1.** The `issue_592` `< 500` pin is met by a single attempt at 492
+(margin 8), not by a fallback. On the R2b tip it was met by the fallback's
+109 while the first attempt sat at 494 (margin 6, Acceptable). The pin is
+untouched — not raised, and no fallback assertion added, because pooling's
+arm64 run (issue: "109 → 242 total") is unmeasured and might take a retry
+there legitimately; that is for whoever can run arm64.
+
+**Pins.** R3's pin asserts `statistics.mu_strategy_fallback` is absent
+before it reads a count (mutation check above). R2b's pin is removed with
+its code. `nonfinite_hessian_restoration_strike.rs` (the `5fc8c797`
+exemption) unchanged and run.
+
+**Run.** `cargo fmt --all -- --check` (clean); `cargo clippy --workspace
+--exclude pounce-hsl --all-targets -- -D clippy::correctness -D
+clippy::suspicious` (clean, nothing denied); `cargo test -p pounce-nlp -p
+pounce-solve-report -p pounce-algorithm -p pounce-cli --no-fail-fast` on the
+final tree (`CARGO_INCREMENTAL=0 CARGO_PROFILE_{DEV,TEST}_DEBUG=0`; 249 test
+binaries, **2083 passed, 0 failed**, 1 ignored) — among them the guards
+this brief names: `issue_592_delta_c_walkback` (all three, incl.
+`the_walkback_is_inert_on_this_fixture_since_gh693`), R3's
+`issue_1042_dallass_abs_pow_merge` (with the new assertion),
+`nonfinite_hessian_restoration_strike` (the `5fc8c797` exemption), gh#981's
+`a_duplicated_row_keeps_its_delta_c` (± adaptive μ), and
+`issue_870_mu_fallback_solution_floor`, `issue857_*`,
+`issue_983_scale_audit_retry_budget`, `issue_250_dual_guard_never_worse`,
+`issue_884_*`; the new `issue_1042_mu_fallback_is_reported`. The four
+sweeps and the final sweep above. Not run: `benchmarks/vanderbei` (no
+corpus) — moot for R2b now that it is reverted, and C1's instrument changes
+no decision; arm64 (not available); Python tests (no `maturin` / built
+extension here; the Python report reads `SolveStatistics` through
+`pounce-py`, which compiles under the clippy run, and gains the field
+additively). The scratch worktrees and their target dirs were removed.
+
+**Next.** Per §2, **B1** — its re-baselines can now be taken with the
+fallback visible. The R2 family stays closed with its target unmet
+(pooling exact 492 on the first attempt); any new lever on it is a new
+item, scored on the first attempt per §4's C1 rule.
