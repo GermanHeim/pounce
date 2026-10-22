@@ -9,6 +9,8 @@ changes.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-22
+
 ### Added
 - **Square-system recovery: the last stage of the second-opinion ladder
   solves `c(x) = 0` directly (`square_system_recovery`, POUNCE extension, on
@@ -201,6 +203,47 @@ changes.
   `docs/src/troubleshooting.md` now says which rung moves the start.
 
 ### Changed
+- **FERAL 0.20 → 0.21.0 (#1038).** The new FERAL brings feral#221/#222: 2×2
+  pivots now pair with fully-summed partners, fronts that cannot delay are
+  factorized in two phases, bit-parity is restored, and cascade-break is new.
+  This removes FERAL 0.19–0.20's ~250× factorization slowdown on KKT matrices
+  with extra negative pivots. On the release benchmark (arm64, 300 s, against
+  FERAL 0.20):
+  - vanderbei goes from 695 to 707 of 733. All of brainpc0–9 solve again, and
+    dallasl, dallasm, discs, britgas and steenbrd now solve too.
+  - mittelmann goes from 43 to 45 of 47 (nql180 and qcqp1000-2c).
+  - qp_convex's NLP leg goes from 137 to 138 (BOYD2), and lbfgs goes from
+    43 to 45 on the exact leg and from 31 to 33 on the limited one.
+  - Combined, POUNCE solves 1308 of 1345, against Ipopt's 1260.
+
+  Recorded losses:
+  - **Against 0.12.0 (FERAL 0.18):**
+    - qcqp1500-1c goes from Optimal to `Maximum_CpuTime_Exceeded`.
+    - brainpc0, brainpc1 and qcqp1000-2c solve but are 4–70× slower.
+    - Both are tracked in feral#224: brainpc0/1 run a much longer IPM path,
+      and qcqp1000-2c pays 2.4× more per factorization.
+  - **Against FERAL 0.20, vanderbei:**
+    - cresc132 goes from Optimal to `Infeasible_Problem_Detected`, the same
+      verdict as Ipopt.
+    - ssebnln stays solved but at Acceptable rather than Optimal.
+  - **Fixture sweep against v0.12.0** (56 of 230 fixture-legs move on arm64,
+    57 on x86_64, each accounted for line by line):
+    - exact `deb7` goes from Optimal/147 to Acceptable/180 on arm64 only; on
+      x86_64 it improves, 143 → 114.
+    - lbfgs `dallass` goes from Optimal/224 to `Error_In_Step_Computation` on
+      arm64 only.
+    - lbfgs `pooling_rt2stp` lands on the local −3273.95 instead of −4391.83
+      on arm64, and goes from failing to solved on x86_64.
+    - exact `pooling_rt2stp` costs 109 → 242 iterations in total on arm64
+      and 162 → 492 on x86_64.
+    - exact `dallass` costs 41 → 65 on arm64 and 41 → 123 on x86_64.
+  - **Minima sweep:** `circle_parabola_t0p5` under mlsl now finds one of its
+    two minima, a side effect of the MLSL default `gamma` change (#993).
+
+  FERAL has separate NEON and AVX2+FMA kernels, so trajectories on nonconvex
+  models differ by architecture. Several of the moves above are one-arch only.
+  These costs, along with `scaled_feasible_a` now running to the convex IPM's
+  200-iteration cap, are tracked in #1042, which also names the follow-ups.
 - **`pounce.find_minima` runs on the shared Rust search (gh#966).** The
   pure-Python loop in `python/pounce/_minima.py` is gone: the problem is still
   built exactly as `pounce.minimize` builds it (`_prepare_nlp` — bounds,
