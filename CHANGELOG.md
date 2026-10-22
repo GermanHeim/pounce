@@ -9,6 +9,8 @@ changes.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-21
+
 ### Added
 - **Square-system recovery: the last stage of the second-opinion ladder
   solves `c(x) = 0` directly (`square_system_recovery`, POUNCE extension, on
