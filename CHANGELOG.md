@@ -135,6 +135,11 @@ changes.
   and re-exported from `pounce_sensitivity::solver`.
 - `covariance` with a per-group `sigma_sq` that misses a group raises before
   the classification's warnings rather than after them.
+- `Covariance.conditioned_on` and `Information.conditioned_on` are found in
+  the same call as the matrix, from the classification that call already
+  ran, rather than on first access. A call takes one back-solve per
+  near-bound variable outside the block whether or not the caller reads them,
+  and a result no longer keeps the session and its factor alive.
 ### Fixed
 - **A convex QCQP whose ball sits far from the origin now solves on the
   conic path (gh #1041).** `min x s.t. (x − 1000)² ≤ 1` under

@@ -279,6 +279,19 @@ pub struct Covariance {
     /// The noise variance per residual group, in their order, or one value
     /// when no groups were declared.
     pub sigma_sq: Vec<Number>,
+    /// The strongly active model variables outside the block, which the
+    /// matrix is conditional on. See [`conditioned_on`].
+    pub conditioned_on: Vec<usize>,
+}
+
+/// The information matrix, and the bounds it is conditional on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Information {
+    /// The information over the block, in its order.
+    pub matrix: Dense,
+    /// The strongly active model variables outside the block, which the
+    /// matrix is conditional on. See [`conditioned_on`].
+    pub conditioned_on: Vec<usize>,
 }
 
 /// A member's activity, at the reduced level: item 0's rule with `q` the
@@ -319,6 +332,9 @@ struct Context<'s, 'a, E: BarrierIterate + ?Sized> {
     /// Equality rows.
     n_eq: usize,
     dim: usize,
+    /// The classification of the solve, computed when first needed, so
+    /// the members, the rows and the conditioned bounds read the same one.
+    act: std::cell::OnceCell<ActivityReport>,
 }
 
 impl<'s, 'a, E: BarrierIterate + ?Sized> Context<'s, 'a, E> {
@@ -338,7 +354,16 @@ impl<'s, 'a, E: BarrierIterate + ?Sized> Context<'s, 'a, E> {
             n_var: dims[0],
             n_eq: dims[2],
             dim: conv.engine().dim(),
+            act: std::cell::OnceCell::new(),
         })
+    }
+
+    fn act(&self) -> Result<&ActivityReport, StatsError> {
+        if let Some(act) = self.act.get() {
+            return Ok(act);
+        }
+        let act = self.conv.classify_activity()?;
+        Ok(self.act.get_or_init(|| act))
     }
 
     fn primal_row(&self, full: usize, at: RemovedAt) -> Result<usize, StatsError> {
@@ -449,7 +474,7 @@ fn classify_block<E: BarrierIterate + ?Sized>(
 ) -> Result<Classified, StatsError> {
     let n_params = rows.len();
     let mut r_exact: Option<Dense> = None;
-    let act = cx.conv.classify_activity()?;
+    let act = cx.act()?;
     let mu = act.mu;
     // M, and so R_W, is natural-units by the kkt_solve contract, and so are
     // the report's diagonals and the row normals, so everything composes
@@ -720,20 +745,24 @@ pub fn conditioned_on<E: BarrierIterate + ?Sized>(
     rows: &[usize],
 ) -> Result<Vec<usize>, StatsError> {
     let cx = Context::new(conv, Declarations::default())?;
-    let act = conv.classify_activity()?;
-    conditioned_on_with(&cx, &act, rows)
+    conditioned_on_with(&cx, rows)
 }
 
 fn conditioned_on_with<E: BarrierIterate + ?Sized>(
     cx: &Context<'_, '_, E>,
-    act: &ActivityReport,
     rows: &[usize],
 ) -> Result<Vec<usize>, StatsError> {
+    let act = cx.act()?;
     let mu = act.mu;
     let pre = if mu > 0.0 { mu.sqrt() } else { 0.0 };
+    let inside: std::collections::HashSet<usize> = rows.iter().copied().collect();
     let mut out = Vec::new();
     for (idx, &st) in act.var_status.iter().enumerate() {
-        if rows.contains(&idx) || st == UNBOUNDED || st == FIXED || st == EQUALITY || st == INACTIVE
+        if inside.contains(&idx)
+            || st == UNBOUNDED
+            || st == FIXED
+            || st == EQUALITY
+            || st == INACTIVE
         {
             continue;
         }
@@ -1009,7 +1038,7 @@ fn covariance_inner<E: BarrierIterate + ?Sized>(
         if hessian == HessianForm::GaussNewton || !homoscedastic {
             return Err(StatsError::DeficientNeedsLagrangian { reason });
         }
-        let act = conv.classify_activity()?;
+        let act = cx.act()?;
         let flagged: Vec<usize> = (0..n_params)
             .filter(|&i| {
                 let st = act.var_status[setup.rows[i]];
@@ -1026,6 +1055,7 @@ fn covariance_inner<E: BarrierIterate + ?Sized>(
         return Ok(Covariance {
             matrix: cov,
             sigma_sq: group_sigma,
+            conditioned_on: conditioned_on_with(&cx, &setup.rows)?,
         });
     };
 
@@ -1125,6 +1155,7 @@ fn covariance_inner<E: BarrierIterate + ?Sized>(
     Ok(Covariance {
         matrix: cov,
         sigma_sq: group_sigma,
+        conditioned_on: conditioned_on_with(&cx, &setup.rows)?,
     })
 }
 
@@ -1147,7 +1178,7 @@ pub fn information<E: BarrierIterate + ?Sized>(
     block: Block<'_>,
     hessian: HessianForm,
     max_pdpert: Option<Number>,
-) -> Outcome<Dense> {
+) -> Outcome<Information> {
     let mut findings = Vec::new();
     let result = information_inner(conv, decl, block, hessian, max_pdpert, &mut findings);
     Outcome { findings, result }
@@ -1160,7 +1191,7 @@ fn information_inner<E: BarrierIterate + ?Sized>(
     hessian: HessianForm,
     max_pdpert: Option<Number>,
     findings: &mut Vec<StatsFinding>,
-) -> Result<Dense, StatsError> {
+) -> Result<Information, StatsError> {
     let explicit = block.is_some();
     if block.is_none() && decl.fit_rows.is_empty() {
         return Err(StatsError::NoBlock);
@@ -1274,7 +1305,10 @@ fn information_inner<E: BarrierIterate + ?Sized>(
             }
         }
     }
-    Ok(info)
+    Ok(Information {
+        matrix: info,
+        conditioned_on: conditioned_on_with(&cx, &setup.rows)?,
+    })
 }
 
 /// The standard errors and the correlation matrix of a covariance. An entry

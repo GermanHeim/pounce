@@ -17,6 +17,7 @@ use pounce_sens_core::barrier::{
 };
 
 use crate::algorithm_backsolver::{CorrectorSigma, PdSensBacksolver};
+use crate::backsolver::SensBacksolver;
 use crate::vec_util::dense_to_vec;
 
 impl BarrierIterate for PdSensBacksolver {
@@ -46,6 +47,14 @@ impl BarrierIterate for PdSensBacksolver {
     /// expansions are handled exactly as the solve handles them. Setting a
     /// trial point leaves `curr` alone.
     fn barrier_residual(&self, point: &[Number], out: &mut [Number]) -> Result<(), String> {
+        let dim = self.dim();
+        if point.len() != dim || out.len() != dim {
+            return Err(format!(
+                "barrier residual: point of length {} and out of length {} for a KKT system of {dim}",
+                point.len(),
+                out.len()
+            ));
+        }
         let iv = self
             .pack_public(point)
             .map_err(|_| "corrector: pack failed".to_string())?;

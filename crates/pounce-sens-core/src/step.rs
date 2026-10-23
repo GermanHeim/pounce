@@ -213,19 +213,41 @@ pub fn refuse_on_pdpert<E: BarrierIterate + ?Sized>(
 /// back.
 struct Maps {
     to_var: Vec<Option<usize>>,
+    /// The model variable of each factor row of the `x` block.
+    to_full: Vec<Option<usize>>,
 }
 
 impl Maps {
     fn new<E: BarrierIterate + ?Sized>(conv: &ConvergedSolve<'_, E>) -> Result<Self, SolverError> {
         let n_full = conv.n_full_x()?;
         let rows: Vec<Index> = (0..n_full as Index).collect();
-        Ok(Self {
-            to_var: conv
-                .x_primal_rows(&rows)?
-                .into_iter()
-                .map(|r| r.map(|r| r as usize))
-                .collect(),
-        })
+        let to_var: Vec<Option<usize>> = conv
+            .x_primal_rows(&rows)?
+            .into_iter()
+            .map(|r| r.map(|r| r as usize))
+            .collect();
+        let mut to_full = vec![None; conv.engine().block_dims()[0]];
+        for (full, r) in to_var.iter().enumerate() {
+            if let Some(slot) = r.and_then(|r| to_full.get_mut(r)) {
+                *slot = Some(full);
+            }
+        }
+        Ok(Self { to_var, to_full })
+    }
+
+    /// Returns `BadShape` when a vector over the model's variables has
+    /// another length. Unchecked, it would be read past its end or paired
+    /// with the wrong entries.
+    fn check_full(&self, what: &'static str, got: usize) -> Result<(), SolverError> {
+        if got == self.to_var.len() {
+            Ok(())
+        } else {
+            Err(SolverError::BadShape {
+                what,
+                got,
+                expected: self.to_var.len(),
+            })
+        }
     }
 
     /// A model-space vector from a factor-space (var-x) one: variables the
@@ -239,8 +261,32 @@ impl Maps {
 
     /// The model variable of a factor row of the `x` block.
     fn full_of(&self, var_row: usize) -> Option<usize> {
-        self.to_var.iter().position(|&r| r == Some(var_row))
+        self.to_full.get(var_row).copied().flatten()
     }
+}
+
+/// Returns `BadShape` when the base point or the variable bounds are not
+/// over the model's variables, or `deltas` is not one per pin. Unchecked,
+/// they would be read past their ends or paired with the wrong entries.
+fn check_inputs(
+    maps: &Maps,
+    model: &dyn ModelFunctions,
+    base_x: &[Number],
+    pins: &[Index],
+    deltas: &[Number],
+) -> Result<(), SolverError> {
+    maps.check_full("base point", base_x.len())?;
+    let (lo, hi) = model.variable_bounds();
+    maps.check_full("variable lower bounds", lo.len())?;
+    maps.check_full("variable upper bounds", hi.len())?;
+    if deltas.len() != pins.len() {
+        return Err(SolverError::BadShape {
+            what: "perturbations",
+            got: deltas.len(),
+            expected: pins.len(),
+        });
+    }
+    Ok(())
 }
 
 /// The step a mode and a degeneracy treatment take, and what came with it.
@@ -455,7 +501,9 @@ fn prelude<E: BarrierIterate + ?Sized>(
 /// [`Mode::Path`] the refinement holds the bounds itself, and `clamp`
 /// decides what happens to anything still outside at the end. A limit
 /// written as a constraint row moves with the perturbation, so it is not
-/// clamped against.
+/// clamped against. A base point or variable bounds not over the model's
+/// variables, or `deltas` not one per pin, return `BadShape` before any
+/// step is taken.
 #[allow(clippy::too_many_arguments)]
 pub fn solution<E: BarrierIterate + ?Sized>(
     conv: &ConvergedSolve<'_, E>,
@@ -483,6 +531,8 @@ fn solution_inner<E: BarrierIterate + ?Sized>(
     findings: &mut Vec<StepFinding>,
 ) -> Result<Vec<Number>, StepError> {
     let b = prelude(conv, o, findings)?;
+    let maps = Maps::new(conv)?;
+    check_inputs(&maps, model, base_x, pins, deltas)?;
     let d = dispatch(conv, pins, deltas, o, b, findings)?;
     let mut step = d.step;
     if o.corrector_iter > 0 {
@@ -496,7 +546,6 @@ fn solution_inner<E: BarrierIterate + ?Sized>(
             findings.push(StepFinding::CorrectorWeak { report });
         }
     }
-    let maps = Maps::new(conv)?;
     let dx = maps.scatter_x(&step);
     let mut x_new: Vec<Number> = base_x.iter().zip(&dx).map(|(a, b)| a + b).collect();
     let (lo, hi) = model.variable_bounds();
@@ -649,7 +698,8 @@ pub struct SolutionReport {
     /// limit of.
     pub crossed_rows: Vec<(usize, Number)>,
     /// The largest constraint violation at the predicted point, against the
-    /// perturbed right-hand sides.
+    /// perturbed right-hand sides, zero with no rows, and NaN where the model
+    /// cannot evaluate a row there.
     pub violation: Number,
     /// The barrier parameter of the held factor, NaN on a relaxed solve.
     pub mu: Number,
@@ -744,7 +794,10 @@ fn refine_ambiguous<E: BarrierIterate + ?Sized>(
 /// at the bounds, so `alpha` is 1 and nothing crosses, unless a margin wide
 /// enough to cover the crossing let the refinement pin nothing.
 /// `refine_activity` re-classifies the ambiguous entries with the reduced
-/// normalizer, at one back-solve each.
+/// normalizer, at one back-solve each. The inputs that make [`solution`]
+/// return an error make this return one too. So do row bounds not over the
+/// model's rows, and constraint values or Jacobian entries the model returns
+/// outside its rows and variables.
 #[allow(clippy::too_many_arguments)]
 pub fn solution_report<E: BarrierIterate + ?Sized>(
     conv: &ConvergedSolve<'_, E>,
@@ -781,13 +834,28 @@ fn report_inner<E: BarrierIterate + ?Sized>(
     findings: &mut Vec<StepFinding>,
 ) -> Result<SolutionReport, StepError> {
     let b = prelude(conv, o, findings)?;
+    let maps = Maps::new(conv)?;
+    check_inputs(&maps, model, base_x, pins, deltas)?;
+    let (g_l, g_u) = model.row_bounds();
+    let n_g = conv.n_full_g()?;
+    for (what, got) in [
+        ("row lower bounds", g_l.len()),
+        ("row upper bounds", g_u.len()),
+    ] {
+        if got != n_g {
+            return Err(SolverError::BadShape {
+                what,
+                got,
+                expected: n_g,
+            }
+            .into());
+        }
+    }
     let d = dispatch(conv, pins, deltas, o, b, findings)?;
     let refine_stop = d.refined.as_ref().map(|(_, s)| *s);
-    let maps = Maps::new(conv)?;
     let dx = maps.scatter_x(&d.step);
     let x_new: Vec<Number> = base_x.iter().zip(&dx).map(|(a, b)| a + b).collect();
     let (lo, hi) = model.variable_bounds();
-    let (g_l, g_u) = model.row_bounds();
 
     // The margin the refinement pinned against, so `alpha` and `crossed`
     // answer with the number that decided the step. Unset keeps the fixed
@@ -836,9 +904,16 @@ fn report_inner<E: BarrierIterate + ?Sized>(
     let m = g_l.len();
     let mut dg = vec![0.0; m];
     for (r, c, v) in model.jacobian(base_x).map_err(StepError::Model)? {
+        if r >= m || c >= dx.len() {
+            return Err(StepError::Model(format!(
+                "the Jacobian has an entry at ({r}, {c}) outside {m} rows and {} columns",
+                dx.len()
+            )));
+        }
         dg[r] += v * dx[c];
     }
     let g_base = model.constraints(base_x).map_err(StepError::Model)?;
+    check_rows(&g_base, m)?;
     // an equality is held to first order and cannot change activity, and a
     // pin row moves by construction
     let mut live: Vec<bool> = (0..m).map(|j| g_l[j] < g_u[j]).collect();
@@ -880,9 +955,8 @@ fn report_inner<E: BarrierIterate + ?Sized>(
         gu_p[p as usize] += dd;
     }
     let g_at = model.constraints(&x_new).map_err(StepError::Model)?;
-    let violation = (0..m).fold(Number::NEG_INFINITY, |acc, j| {
-        acc.max((gl_p[j] - g_at[j]).max(g_at[j] - gu_p[j]).max(0.0))
-    });
+    check_rows(&g_at, m)?;
+    let violation = max_violation(&g_at, &gl_p, &gu_p);
 
     let corrector = if o.corrector_iter > 0 {
         Some(correct(conv, pins, deltas, &d.step, o.corrector_iter)?.1)
@@ -905,6 +979,31 @@ fn report_inner<E: BarrierIterate + ?Sized>(
         corrector,
         refine_stop,
     })
+}
+
+/// The largest amount by which `g` lies outside `[lo, hi]`: zero with no
+/// rows or with every row inside, and NaN when any row is NaN.
+fn max_violation(g: &[Number], lo: &[Number], hi: &[Number]) -> Number {
+    // `f64::max` drops a NaN, so a NaN row is returned as NaN here rather
+    // than read as satisfied
+    if g.iter().any(|v| v.is_nan()) {
+        return Number::NAN;
+    }
+    g.iter()
+        .zip(lo.iter().zip(hi))
+        .fold(0.0, |acc: Number, (v, (l, u))| acc.max((l - v).max(v - u)))
+}
+
+/// Returns a model error when `g` does not hold one value per row.
+fn check_rows(g: &[Number], m: usize) -> Result<(), StepError> {
+    if g.len() == m {
+        Ok(())
+    } else {
+        Err(StepError::Model(format!(
+            "the model returned {} constraint values for {m} rows",
+            g.len()
+        )))
+    }
 }
 
 /// One active-set change along a path step.
@@ -1047,13 +1146,23 @@ pub fn multiplier_row<E: BarrierIterate + ?Sized>(
 /// carries `dp/dp = 1` there, and the one contraction picks up the
 /// explicit partial and the implicit sum together (gh#878). `grad` is the
 /// objective's gradient in the sense the model states it, over the model's
-/// variables.
+/// variables. `col` is the factor's `x` block or a whole KKT column, whose
+/// `x` block comes first. Either at another length returns `BadShape`.
 pub fn total_objective_derivative<E: BarrierIterate + ?Sized>(
     conv: &ConvergedSolve<'_, E>,
     grad: &[Number],
     col: &[Number],
 ) -> Result<Number, SolverError> {
     let maps = Maps::new(conv)?;
+    maps.check_full("objective gradient", grad.len())?;
+    let n_var = conv.engine().block_dims()[0];
+    if col.len() != n_var && col.len() != conv.engine().dim() {
+        return Err(SolverError::BadShape {
+            what: "step column",
+            got: col.len(),
+            expected: n_var,
+        });
+    }
     let dx = maps.scatter_x(col);
     Ok(grad.iter().zip(&dx).map(|(a, b)| a * b).sum())
 }
@@ -1068,6 +1177,17 @@ mod tests {
         let p = [0.0, 1e-3, 0.0, -2e-3];
         assert_eq!(pdpert_verdict(&p, 1e-3), (true, 2e-3));
         assert_eq!(pdpert_verdict(&p, 1e-2), (false, 2e-3));
+    }
+
+    #[test]
+    fn the_violation_is_zero_without_rows_and_nan_with_a_nan_row() {
+        assert_eq!(max_violation(&[], &[], &[]), 0.0);
+        let (lo, hi) = ([0.0, 0.0], [1.0, 1.0]);
+        assert_eq!(max_violation(&[0.5, 1.0], &lo, &hi), 0.0);
+        assert_eq!(max_violation(&[-0.25, 1.5], &lo, &hi), 0.5);
+        for g in [[Number::NAN, 3.0], [3.0, Number::NAN]] {
+            assert!(max_violation(&g, &lo, &hi).is_nan(), "{g:?}");
+        }
     }
 
     #[test]

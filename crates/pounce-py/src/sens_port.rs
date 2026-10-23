@@ -270,6 +270,7 @@ pub fn _sens_covariance<'py>(
         Ok(cov) => {
             d.set_item("matrix", dense_to_py(py, &cov.matrix)?)?;
             d.set_item("sigma_sq", cov.sigma_sq)?;
+            d.set_item("conditioned_on", cov.conditioned_on)?;
             d.set_item("error", py.None())?;
         }
         Err(e) => d.set_item("error", stats_error(py, e))?,
@@ -309,33 +310,14 @@ pub fn _sens_information<'py>(
     let findings: Vec<PyObject> = out.findings.iter().map(|f| stats_finding(py, f)).collect();
     d.set_item("findings", findings)?;
     match out.result {
-        Ok(m) => {
-            d.set_item("matrix", dense_to_py(py, &m)?)?;
+        Ok(info) => {
+            d.set_item("matrix", dense_to_py(py, &info.matrix)?)?;
+            d.set_item("conditioned_on", info.conditioned_on)?;
             d.set_item("error", py.None())?;
         }
         Err(e) => d.set_item("error", stats_error(py, e))?,
     }
     Ok(d)
-}
-
-/// `pounce_sens_core::stats::conditioned_on`: the strongly active model
-/// variables outside `rows`, by full-x index.
-#[pyfunction]
-pub fn _sens_conditioned_on(
-    py: Python<'_>,
-    solver: &PySolver,
-    rows: Vec<usize>,
-) -> PyResult<PyObject> {
-    let out = solver.with_converged(|c| Ok(stats::conditioned_on(c, &rows)))?;
-    let d = PyDict::new_bound(py);
-    match out {
-        Ok(v) => {
-            d.set_item("rows", v)?;
-            d.set_item("error", py.None())?;
-        }
-        Err(e) => d.set_item("error", stats_error(py, e))?,
-    }
-    Ok(d.into_any().unbind())
 }
 
 /// The eigenvalues in ascending order and the sign-pinned eigenvectors of
@@ -779,11 +761,29 @@ pub fn _ratio_test(
         Some(t) => Some(floats(t)?),
         None => None,
     };
+    let (base, step, lo, hi) = (floats(base)?, floats(step)?, floats(lo)?, floats(hi)?);
+    let n = base.len();
+    for (what, len) in [
+        ("step", Some(step.len())),
+        ("lo", Some(lo.len())),
+        ("hi", Some(hi.len())),
+        ("live", live.as_ref().map(Vec::len)),
+        ("on_bound", on_bound.as_ref().map(Vec::len)),
+        ("tol", tol.as_ref().map(Vec::len)),
+    ] {
+        if let Some(len) = len
+            && len != n
+        {
+            return Err(PyValueError::new_err(format!(
+                "ratio test: {what} has {len} entries for a base of {n}"
+            )));
+        }
+    }
     Ok(step::ratio_test(
-        &floats(base)?,
-        &floats(step)?,
-        &floats(lo)?,
-        &floats(hi)?,
+        &base,
+        &step,
+        &lo,
+        &hi,
         live.as_deref(),
         on_bound.as_deref(),
         mu,

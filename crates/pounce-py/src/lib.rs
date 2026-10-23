@@ -91,7 +91,6 @@ fn _pounce(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(read_nl, m)?)?;
     m.add_function(wrap_pyfunction!(sens_port::_sens_covariance, m)?)?;
     m.add_function(wrap_pyfunction!(sens_port::_sens_information, m)?)?;
-    m.add_function(wrap_pyfunction!(sens_port::_sens_conditioned_on, m)?)?;
     m.add_function(wrap_pyfunction!(sens_port::_sym_eigen, m)?)?;
     m.add_function(wrap_pyfunction!(sens_port::_correlation, m)?)?;
     m.add_function(wrap_pyfunction!(sens_port::_sens_solution, m)?)?;

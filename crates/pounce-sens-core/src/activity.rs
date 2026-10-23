@@ -220,9 +220,6 @@ fn present(pos: &[usize], n: usize) -> Vec<bool> {
     mask
 }
 
-/// The inverse of a map from the engine's variables to the model's: for
-/// each model variable, the engine variable it is, or `None` where the
-/// engine removed it.
 /// What every classification reads from the engine: the converged
 /// quantities, the model maps and the scaling, each checked against the
 /// engine's block lengths before anything indexes with them.

@@ -16,7 +16,7 @@ use crate::activity::{
     AMBIGUOUS, ActivityReport, ReducedActivityError, ReducedActivityReport,
     ReducedRowActivityError, ReducedRowActivityReport, WEAKLY_ACTIVE,
 };
-use crate::barrier::{BarrierIterate, EngineScaling, ModelMaps};
+use crate::barrier::{ActivityData, BarrierIterate, EngineScaling, ModelMaps};
 use crate::boundcheck::{BoundMultiplier, PathOperator, PathSegment, RefineStop, WeakBound};
 use crate::corrector::{CorrectorError, CorrectorReport};
 use crate::index::{FullXSlice, VarToFull, VarX};
@@ -117,6 +117,12 @@ pub struct ConvergedSolve<'a, E: BarrierIterate + ?Sized> {
     engine: &'a E,
     bound_relax_factor: Number,
     exact_hessian: bool,
+    /// What the engine reports about its converged iterate, read from it
+    /// once, when first needed. The engine cannot change while this
+    /// borrows it, so every calculation uses that one read.
+    maps: std::cell::OnceCell<ModelMaps>,
+    scaling: std::cell::OnceCell<EngineScaling>,
+    data: std::cell::OnceCell<ActivityData>,
 }
 
 impl<'a, E: BarrierIterate + ?Sized> ConvergedSolve<'a, E> {
@@ -126,6 +132,9 @@ impl<'a, E: BarrierIterate + ?Sized> ConvergedSolve<'a, E> {
             engine,
             bound_relax_factor,
             exact_hessian,
+            maps: std::cell::OnceCell::new(),
+            scaling: std::cell::OnceCell::new(),
+            data: std::cell::OnceCell::new(),
         }
     }
 
@@ -140,23 +149,42 @@ impl<'a, E: BarrierIterate + ?Sized> ConvergedSolve<'a, E> {
     }
 
     /// The engine's model maps, checked against its block lengths.
-    fn maps(&self) -> Result<ModelMaps, SolverError> {
+    fn maps(&self) -> Result<&ModelMaps, SolverError> {
+        if let Some(maps) = self.maps.get() {
+            return Ok(maps);
+        }
         let maps = self
             .engine
             .model_maps()
             .map_err(SolverError::SensComputationFailed)?;
         maps.check(&self.engine.block_dims())
             .map_err(SolverError::SensComputationFailed)?;
-        Ok(maps)
+        Ok(self.maps.get_or_init(|| maps))
     }
 
     /// The engine's scaling, checked against its block lengths.
-    fn scaling(&self) -> Result<EngineScaling, SolverError> {
+    fn scaling(&self) -> Result<&EngineScaling, SolverError> {
+        if let Some(scaling) = self.scaling.get() {
+            return Ok(scaling);
+        }
         let scaling = self.engine.scaling();
         scaling
             .check(&self.engine.block_dims())
             .map_err(SolverError::SensComputationFailed)?;
-        Ok(scaling)
+        Ok(self.scaling.get_or_init(|| scaling))
+    }
+
+    /// The converged quantities the classification reads. The products
+    /// below read the Hessian and the Jacobians from them.
+    fn data(&self) -> Result<&ActivityData, SolverError> {
+        if let Some(data) = self.data.get() {
+            return Ok(data);
+        }
+        let data = self
+            .engine
+            .activity_data()
+            .map_err(SolverError::SensComputationFailed)?;
+        Ok(self.data.get_or_init(|| data))
     }
 
     /// The converged iterate, in the engine frame.
@@ -298,19 +326,16 @@ impl<'a, E: BarrierIterate + ?Sized> ConvergedSolve<'a, E> {
             return Err(bad());
         }
         let scaling = self.scaling()?;
-        let data = self
-            .engine
-            .activity_data()
-            .map_err(SolverError::SensComputationFailed)?;
+        let data = self.data()?;
         let (jac, block_pos, row_scale) =
             match (maps.full_g_to_c[user_row], maps.full_g_to_d[user_row]) {
                 (Some(p), _) => (
-                    data.jac_c,
+                    &data.jac_c,
                     p,
                     scaling.equality_rows.as_ref().map_or(1.0, |v| v[p]),
                 ),
                 (None, Some(p)) => (
-                    data.jac_d,
+                    &data.jac_d,
                     p,
                     scaling.inequality_rows.as_ref().map_or(1.0, |v| v[p]),
                 ),
@@ -356,10 +381,7 @@ impl<'a, E: BarrierIterate + ?Sized> ConvergedSolve<'a, E> {
             });
         }
         let scaling = self.scaling()?;
-        let data = self
-            .engine
-            .activity_data()
-            .map_err(SolverError::SensComputationFailed)?;
+        let data = self.data()?;
         let n = self.engine.block_dims()[0];
         // `H = H̃ ⊙ (d ⊗ d)` under a change of variables (gh#486 stage 3),
         // so `H v = d ⊙ (H̃ (d ⊙ v))`: the factor goes in with the vector
@@ -462,7 +484,7 @@ impl<'a, E: BarrierIterate + ?Sized> ConvergedSolve<'a, E> {
         let dims = self.engine.block_dims();
         let y_c_offset = (dims[0] + dims[1]) as Index;
         let maps = self.maps()?;
-        let dc = self.scaling()?.equality_rows;
+        let dc = &self.scaling()?.equality_rows;
         let n_full_g = maps.n_full_g() as Index;
         let mut rows = Vec::with_capacity(pins.len());
         let mut scales = Vec::with_capacity(pins.len());
@@ -1928,7 +1950,11 @@ impl<'a, E: BarrierIterate + ?Sized> ConvergedSolve<'a, E> {
         &self,
     ) -> Result<(Number, Option<Vec<Number>>, Option<Vec<Number>>), SolverError> {
         let s = self.scaling()?;
-        Ok((s.objective, s.equality_rows, s.inequality_rows))
+        Ok((
+            s.objective,
+            s.equality_rows.clone(),
+            s.inequality_rows.clone(),
+        ))
     }
 
     /// The inertia-correction perturbations `(δ_x, δ_s, δ_c, δ_d)` in the

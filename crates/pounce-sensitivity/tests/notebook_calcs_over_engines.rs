@@ -39,6 +39,7 @@ use pounce_common::types::{Index, Number};
 use pounce_nl::nl_reader::{NlTnlp, read_nl_file};
 use pounce_nlp::TNLP;
 use pounce_nlp::return_codes::ApplicationReturnStatus;
+use pounce_sens_core::backsolver::SensBacksolver;
 use pounce_sens_core::barrier::BarrierIterate;
 use pounce_sens_core::converged::ConvergedSolve;
 use pounce_sens_core::dense::{Dense, sym_eigen};
@@ -263,7 +264,7 @@ fn same_covariance(label: &str, a: &CovRun, b: &CovRun, tol: Number) {
     }
 }
 
-type InfoRun = (Vec<String>, Result<Dense, String>);
+type InfoRun = (Vec<String>, Result<stats::Information, String>);
 
 fn information_runs(s: &Solved, block: Option<&[usize]>, hessian: HessianForm) -> [InfoRun; 3] {
     let (fit, groups) = declarations(s.stem);
@@ -285,6 +286,11 @@ fn same_information(label: &str, a: &InfoRun, b: &InfoRun, tol: Number) {
     assert_eq!(a.0, b.0, "{label}: findings");
     match (&a.1, &b.1) {
         (Ok(ia), Ok(ib)) => {
+            assert_eq!(
+                ia.conditioned_on, ib.conditioned_on,
+                "{label}: conditioned on"
+            );
+            let (ia, ib) = (&ia.matrix, &ib.matrix);
             assert_close_dense(&format!("{label}: information"), ia, ib, tol);
             let (va, ea) = sym_eigen(ia).expect("eigen");
             let (vb, eb) = sym_eigen(ib).expect("eigen");
@@ -768,7 +774,7 @@ fn the_decay_fits_statistics_are_their_closed_forms() {
             ("Gauss-Newton", ign, g.scale(2.0)),
         ] {
             assert!(out.findings.is_empty(), "{run}: information, {label}");
-            let info = ok(label, out.result);
+            let info = ok(label, out.result).matrix;
             assert_close_dense(&format!("{run}: information, {label}"), &m, &info, EXACT);
             // each eigenvector is one, with its largest component positive
             let (w, v) = sym_eigen(&info).expect("eigen");
@@ -908,7 +914,7 @@ fn the_bounded_fits_statistics_are_their_closed_forms() {
                 ["MemberHeld", "RowPins"],
                 "{run}: information, {label}"
             );
-            let info = ok(label, out.result);
+            let info = ok(label, out.result).matrix;
             let rff = full.select(&free, &free);
             let proj = z.mul(&z.t().mul(&rff).mul(&z)).mul(&z.t());
             let s_k = full.select(&held, &held).sub(
@@ -1328,27 +1334,50 @@ fn a_sub_blocks_information_conditions_on_the_held_members() {
     );
     let recorded = outside_engine(&recording, Relaxation::None);
     let x = pounce.converged().expect("converged").x.clone();
-    let fit = [0, 1, 14];
-    let groups: Vec<Vec<usize>> = vec![(2..14).collect()];
-    let info = |conv_info: stats::Outcome<Dense>| ok("information of a", conv_info.result);
-    let a = pounce
-        .with_converged(|c| {
-            Ok(info(stats::information(
+    // the information of `a` and its covariance both hold the bounds
+    // `conditioned_on` finds
+    fn info<E: BarrierIterate + ?Sized>(c: &ConvergedSolve<'_, E>, x: &[Number]) -> Dense {
+        let fit = [0, 1, 14];
+        let groups: Vec<Vec<usize>> = vec![(2..14).collect()];
+        let info = ok(
+            "information of a",
+            stats::information(
                 c,
                 declared(&fit, &groups),
                 Some(&[0]),
                 HessianForm::Lagrangian,
                 None,
-            )))
-        })
+            )
+            .result,
+        );
+        let cov = ok(
+            "covariance of a",
+            stats::covariance(
+                c,
+                declared(&fit, &groups),
+                SolveRecord {
+                    x,
+                    obj: objective("held", x),
+                    obj_sign: 1.0,
+                },
+                Some(&[0]),
+                None,
+                None,
+                HessianForm::Lagrangian,
+                None,
+            )
+            .result,
+        );
+        let rows = stats::conditioned_on(c, &[0]).expect("conditioned on");
+        assert_eq!(rows, [1], "a is conditional on k's bound");
+        assert_eq!(info.conditioned_on, rows, "the information");
+        assert_eq!(cov.conditioned_on, rows, "the covariance");
+        info.matrix
+    }
+    let a = pounce
+        .with_converged(|c| Ok(info(c, &x)))
         .expect("pounce converged");
-    let b = info(stats::information(
-        &ConvergedSolve::new(&recorded, 0.0, true),
-        declared(&fit, &groups),
-        Some(&[0]),
-        HessianForm::Lagrangian,
-        None,
-    ));
+    let b = info(&ConvergedSolve::new(&recorded, 0.0, true), &x);
     let (j, curv) = fit_derivatives(x[0], x[1], &x[2..14], &[0, 2]);
     let r = j.t().mul(&j).add(&curv).scale(2.0);
     let want = r.at(0, 0) - r.at(0, 1) * r.at(1, 0) / r.at(1, 1);
@@ -1525,8 +1554,11 @@ fn a_negative_variance_is_reported() {
     // the information is the reduced Hessian itself, with `u`'s entry the
     // curvature `−2.6e-7`. It is indefinite under the Lagrangian form and
     // positive semidefinite under Gauss-Newton, whose residuals ignore `u`
-    let info = |conv_info: stats::Outcome<Dense>| {
-        (conv_info.findings, ok("information", conv_info.result))
+    let info = |conv_info: stats::Outcome<stats::Information>| {
+        (
+            conv_info.findings,
+            ok("information", conv_info.result).matrix,
+        )
     };
     for h in [HessianForm::Lagrangian, HessianForm::GaussNewton] {
         let (findings, m) = pounce
@@ -1759,6 +1791,223 @@ fn what_an_engine_reports_is_checked() {
         .parametric_step_bounded(&PINS, &[0.05, 0.4], 16, None)
         .unwrap_err();
     assert!(format!("{e:?}").contains("primal bounds"), "{e:?}");
+}
+
+/// A buffer of the wrong length returns an error before anything reads
+/// past its end or pairs it with the wrong entries. The buffers are the
+/// base point and the perturbations of a step, the gradient and the column
+/// of the total derivative, and both buffers of the barrier residual.
+#[test]
+fn a_buffer_of_the_wrong_length_is_refused() {
+    fn shape(r: &Result<impl Debug, impl Debug>, what: &str) -> bool {
+        format!("{r:?}").contains(&format!("BadShape {{ what: \"{what}\""))
+    }
+    let s = solved(PARAMETRIC);
+    let runs = over_engines!(s, |conv, x| {
+        let o = StepOptions::default();
+        let functions = TnlpModel::new(model(PARAMETRIC));
+        let short = &x[..x.len() - 1];
+        let both = [0.05, 0.4];
+        let solution = |x: &[Number], deltas: &[Number]| {
+            step::solution(conv, &functions, x, &PINS, deltas, &o, true).result
+        };
+        let mut m = TnlpModel::new(model(PARAMETRIC));
+        let report = step::solution_report(conv, &mut m, short, &PINS, &both, &o, true).result;
+        let col = conv
+            .parametric_step(&[PINS[0]], &[1.0])
+            .expect("the column");
+        let grad = TnlpModel::new(model(PARAMETRIC))
+            .objective_gradient(&x)
+            .expect("the gradient");
+        let total =
+            |grad: &[Number], col: &[Number]| step::total_objective_derivative(conv, grad, col);
+        let dim = conv.engine().dim();
+        let residual = |point: usize, out: usize| {
+            conv.engine()
+                .barrier_residual(&vec![0.0; point], &mut vec![0.0; out])
+                .is_err()
+        };
+        [
+            (
+                "short base point",
+                shape(&solution(short, &both), "base point"),
+            ),
+            (
+                "one perturbation for two pins",
+                shape(&solution(&x, &both[..1]), "perturbations"),
+            ),
+            (
+                "short base point in the report",
+                shape(&report, "base point"),
+            ),
+            (
+                "short gradient",
+                shape(&total(&grad[1..], &col), "objective gradient"),
+            ),
+            (
+                "short column",
+                shape(&total(&grad, &col[1..]), "step column"),
+            ),
+            ("short residual point", residual(dim - 1, dim)),
+            ("short residual buffer", residual(dim, dim - 1)),
+            (
+                "the right lengths",
+                total(&grad, &col).is_ok() && !residual(dim, dim),
+            ),
+        ]
+    });
+    for (k, checks) in runs.into_iter().enumerate() {
+        for (label, holds) in checks {
+            assert!(holds, "{}: {label}", RUNS[k]);
+        }
+    }
+}
+
+/// What [`MalformedModel`] gets wrong.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Malformed {
+    VariableLower,
+    VariableUpper,
+    RowLower,
+    RowUpper,
+    /// one constraint value short at the base point
+    BaseConstraints,
+    /// one constraint value short at the moved point
+    StepConstraints,
+    JacobianRow,
+    JacobianColumn,
+    /// a NaN row at the moved point
+    NanAtTheStep,
+}
+
+/// The parametric model with one of its functions wrong.
+struct MalformedModel {
+    inner: TnlpModel,
+    fault: Malformed,
+    constraint_calls: usize,
+}
+
+impl ModelFunctions for MalformedModel {
+    fn variable_bounds(&self) -> (Vec<Number>, Vec<Number>) {
+        let (mut lo, mut hi) = self.inner.variable_bounds();
+        match self.fault {
+            Malformed::VariableLower => drop(lo.pop()),
+            Malformed::VariableUpper => drop(hi.pop()),
+            _ => {}
+        }
+        (lo, hi)
+    }
+
+    fn row_bounds(&self) -> (Vec<Number>, Vec<Number>) {
+        let (mut lo, mut hi) = self.inner.row_bounds();
+        match self.fault {
+            Malformed::RowLower => drop(lo.pop()),
+            Malformed::RowUpper => drop(hi.pop()),
+            _ => {}
+        }
+        (lo, hi)
+    }
+
+    // the report evaluates the base point first and the moved point second
+    fn constraints(&mut self, x: &[Number]) -> Result<Vec<Number>, String> {
+        let mut g = self.inner.constraints(x)?;
+        self.constraint_calls += 1;
+        match (self.fault, self.constraint_calls) {
+            (Malformed::BaseConstraints, 1) | (Malformed::StepConstraints, 2) => drop(g.pop()),
+            (Malformed::NanAtTheStep, 2) => g[0] = Number::NAN,
+            _ => {}
+        }
+        Ok(g)
+    }
+
+    fn jacobian(&mut self, x: &[Number]) -> Result<Vec<(usize, usize, Number)>, String> {
+        let mut j = self.inner.jacobian(x)?;
+        match self.fault {
+            Malformed::JacobianRow => j.push((self.inner.row_bounds().0.len(), 0, 1.0)),
+            Malformed::JacobianColumn => j.push((0, x.len(), 1.0)),
+            _ => {}
+        }
+        Ok(j)
+    }
+
+    fn objective_gradient(&mut self, x: &[Number]) -> Result<Vec<Number>, String> {
+        self.inner.objective_gradient(x)
+    }
+}
+
+/// A model whose bounds, constraint values or Jacobian do not match its
+/// own rows and variables makes the report return an error, and its
+/// variable bounds make the solution return one too. A row the model
+/// returns as NaN at the moved point makes the violation NaN rather than a
+/// number that reads as satisfied.
+#[test]
+fn a_malformed_model_is_refused_and_a_nan_row_is_reported() {
+    let s = solved(PARAMETRIC);
+    let runs = over_engines!(s, |conv, x| {
+        let o = StepOptions::default();
+        let deltas = [0.05, 0.4];
+        let malformed = |fault| MalformedModel {
+            inner: TnlpModel::new(model(PARAMETRIC)),
+            fault,
+            constraint_calls: 0,
+        };
+        let report = |fault| {
+            step::solution_report(conv, &mut malformed(fault), &x, &PINS, &deltas, &o, true).result
+        };
+        let refused = |fault, says: &str| format!("{:?}", report(fault)).contains(says);
+        let solution = |fault| {
+            format!(
+                "{:?}",
+                step::solution(conv, &malformed(fault), &x, &PINS, &deltas, &o, true).result
+            )
+        };
+        let violation = report(Malformed::NanAtTheStep).map(|r| r.violation);
+        [
+            (
+                "variable lower bounds in the solution",
+                solution(Malformed::VariableLower).contains("variable lower bounds"),
+            ),
+            (
+                "variable upper bounds in the solution",
+                solution(Malformed::VariableUpper).contains("variable upper bounds"),
+            ),
+            (
+                "variable lower bounds",
+                refused(Malformed::VariableLower, "variable lower bounds"),
+            ),
+            (
+                "variable upper bounds",
+                refused(Malformed::VariableUpper, "variable upper bounds"),
+            ),
+            (
+                "row lower bounds",
+                refused(Malformed::RowLower, "row lower bounds"),
+            ),
+            (
+                "row upper bounds",
+                refused(Malformed::RowUpper, "row upper bounds"),
+            ),
+            (
+                "constraints at the base point",
+                refused(Malformed::BaseConstraints, "constraint values for"),
+            ),
+            (
+                "constraints at the moved point",
+                refused(Malformed::StepConstraints, "constraint values for"),
+            ),
+            ("Jacobian row", refused(Malformed::JacobianRow, "outside")),
+            (
+                "Jacobian column",
+                refused(Malformed::JacobianColumn, "outside"),
+            ),
+            ("NaN row", matches!(violation, Ok(v) if v.is_nan())),
+        ]
+    });
+    for (k, checks) in runs.into_iter().enumerate() {
+        for (label, holds) in checks {
+            assert!(holds, "{}: {label}", RUNS[k]);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

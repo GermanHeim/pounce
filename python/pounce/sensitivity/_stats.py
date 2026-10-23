@@ -174,13 +174,8 @@ class Covariance(_ParamMatrix):
     def conditioned_on(self):
         """Strongly active variables OUTSIDE the block: the matrix is
         conditional on those bounds (roadmap item 3); empty when none.
-        Computed on first access (one backsolve per near-bound
-        candidate) and cached, so calls that never read it pay
-        nothing. Until first access the pending computation keeps the
-        sensitivity session, and so the held KKT factor, alive; read
-        it (or discard the result) to release them."""
-        if callable(self._conditioned):
-            self._conditioned = self._conditioned()
+        The call that returns the matrix finds them, at one backsolve
+        per near-bound candidate."""
         return self._conditioned
 
     def eigen(self):
@@ -231,13 +226,8 @@ class Information(_ParamMatrix):
     def conditioned_on(self):
         """Strongly active variables OUTSIDE the block: the matrix is
         conditional on those bounds (roadmap item 3); empty when none.
-        Computed on first access (one backsolve per near-bound
-        candidate) and cached, so calls that never read it pay
-        nothing. Until first access the pending computation keeps the
-        sensitivity session, and so the held KKT factor, alive; read
-        it (or discard the result) to release them."""
-        if callable(self._conditioned):
-            self._conditioned = self._conditioned()
+        The call that returns the matrix finds them, at one backsolve
+        per near-bound candidate."""
         return self._conditioned
 
     def eigen(self):
@@ -603,21 +593,17 @@ def _raise_error(session, err, who, params, hints, groups, n_data,
     raise AssertionError(f"unknown error {err!r}")
 
 
-def _conditioned_on(session, rows, who):
+def _conditioned_on(session, rows):
     """Strongly active variables outside the block, keyed like the
     block. Their Sigma stays in the held factor and drives the coupling
     through them to zero as mu falls, so the block's numbers are the
     values conditional on those bounds, not the marginal over them.
     Returned with the matrix rather than warned: it is a property of
     the answer, not a defect. `pounce_sens_core::stats::conditioned_on`
-    decides which they are."""
-    res = _pounce._sens_conditioned_on(session.solver,
-                                       [int(r) for r in rows])
-    if res["error"] is not None:
-        _raise_error(session, res["error"], who, [], DEFAULT_HINTS, {},
-                     None, None)
+    decides which they are, and covariance and information return them
+    as `conditioned_on`."""
     out = []
-    for idx in res["rows"]:
+    for idx in rows:
         v = session.var_key(idx)
         out.append(v if v is not None else session.var_names[idx])
     return tuple(out)
@@ -789,7 +775,7 @@ def covariance(session, params=None, rows=None, sigma_sq=None,
                else group_sigma)
     return Covariance(
         params, res_out["matrix"], sig_out,
-        lambda: _conditioned_on(session, rows, who))
+        _conditioned_on(session, res_out["conditioned_on"]))
 
 
 def information(session, params=None, rows=None, hessian="lagrangian",
@@ -869,4 +855,4 @@ def information(session, params=None, rows=None, hessian="lagrangian",
                      None, max_pdpert)
     return Information(
         params, res_out["matrix"],
-        lambda: _conditioned_on(session, rows, who))
+        _conditioned_on(session, res_out["conditioned_on"]))
