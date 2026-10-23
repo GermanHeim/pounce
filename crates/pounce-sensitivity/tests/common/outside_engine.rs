@@ -380,6 +380,19 @@ pub struct OutsideEngine {
     fault: Option<Fault>,
 }
 
+/// The order the engine keeps its variables and rows in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    /// The model's order, which is pounce's: its blocks and the model's
+    /// indices then agree position by position, so a calculation that read
+    /// a block position as a model index would still be right.
+    ModelOrder,
+    /// Every block in the reverse of the model's order. Only the maps the
+    /// engine reports relate the two, so an answer in model indices that
+    /// moves with the layout is a map read wrong.
+    Reversed,
+}
+
 /// A report the engine gets wrong on purpose, so a test can check that the
 /// calculations check what an engine reports rather than trusting it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -419,6 +432,26 @@ impl OutsideEngine {
         declared: &Bounds,
         relaxed: &Bounds,
         obj_factor: Number,
+    ) -> Self {
+        Self::with_layout(
+            model,
+            reported,
+            declared,
+            relaxed,
+            obj_factor,
+            Layout::ModelOrder,
+        )
+    }
+
+    /// [`Self::with_objective_factor`] with the engine's blocks in the
+    /// order `layout` gives.
+    pub fn with_layout(
+        model: Rc<RefCell<dyn TNLP>>,
+        reported: &Reported,
+        declared: &Bounds,
+        relaxed: &Bounds,
+        obj_factor: Number,
+        layout: Layout,
     ) -> Self {
         let mut reported = reported.clone();
         for v in reported
@@ -476,15 +509,20 @@ impl OutsideEngine {
             (info.n as usize, info.m as usize, base, jac, hess)
         };
 
-        let free: Vec<usize> = (0..n_full)
+        let mut free: Vec<usize> = (0..n_full)
             .filter(|&i| declared.x_l[i] != declared.x_u[i])
             .collect();
-        let c_rows: Vec<usize> = (0..m)
+        let mut c_rows: Vec<usize> = (0..m)
             .filter(|&j| declared.g_l[j] == declared.g_u[j])
             .collect();
-        let d_rows: Vec<usize> = (0..m)
+        let mut d_rows: Vec<usize> = (0..m)
             .filter(|&j| declared.g_l[j] != declared.g_u[j])
             .collect();
+        if layout == Layout::Reversed {
+            free.reverse();
+            c_rows.reverse();
+            d_rows.reverse();
+        }
         let mut full_g_to_d = vec![None; m];
         for (k, &j) in d_rows.iter().enumerate() {
             full_g_to_d[j] = Some(k);
@@ -862,6 +900,12 @@ impl OutsideEngine {
 
     pub fn converged(&self) -> &[Number] {
         &self.base
+    }
+
+    /// The converged primal point over the model's variables, in the
+    /// model's order whatever the engine's layout.
+    pub fn model_x(&self) -> Vec<Number> {
+        self.full_x(&self.base)
     }
 
     pub fn mu(&self) -> Number {
@@ -1602,6 +1646,23 @@ pub fn outside_engine<T: TNLP + 'static>(
     relaxation: Relaxation,
 ) -> OutsideEngine {
     outside_engine_minimizing(model, relaxation, 1.0)
+}
+
+/// [`outside_engine`] with its blocks in `layout`.
+pub fn outside_engine_with_layout<T: TNLP + 'static>(
+    model: &Rc<RefCell<RecordingTnlp<T>>>,
+    relaxation: Relaxation,
+    layout: Layout,
+) -> OutsideEngine {
+    let reported = model
+        .borrow()
+        .reported
+        .clone()
+        .expect("the solve reported a solution");
+    let declared = Bounds::declared(&mut *model.borrow_mut());
+    let relaxed = relaxation.apply(&declared);
+    let dyn_model: Rc<RefCell<dyn TNLP>> = model.clone();
+    OutsideEngine::with_layout(dyn_model, &reported, &declared, &relaxed, 1.0, layout)
 }
 
 /// [`outside_engine`] for an engine that minimized `obj_factor·f`.

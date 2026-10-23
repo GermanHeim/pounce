@@ -87,7 +87,8 @@ changes.
   return each warning condition as a finding and each failure as a typed
   error. `pounce-py` exposes them, and the Python front ends keep their
   signatures and raise the warnings and exceptions they always raised, with
-  the same messages in the same order. `SensSession.mult_entry` reads the
+  the same messages, in the same order except where "Changed" below says
+  otherwise. `SensSession.mult_entry` reads the
   strictly-active gate from `step::multiplier_row`, and
   `total_objective_derivative` contracts through
   `step::total_objective_derivative`. Notebooks 26, 31 and 36 print the same
@@ -140,6 +141,17 @@ changes.
   ran, rather than on first access. A call takes one back-solve per
   near-bound variable outside the block whether or not the caller reads them,
   and a result no longer keeps the session and its factor alive.
+- Over an engine that does not report its inertia correction
+  (`BarrierIterate::kkt_perturbations` returning `None`), `max_pdpert` now
+  refuses with `BadOptions` rather than passing as if the correction were
+  zero, and `step::SolutionReport::perturbations` is an
+  `Option<[Number; 4]>` that is `None` there rather than four zeros. The
+  Python `SolutionReport.perturbations` is `None` in the same case. pounce
+  always reports its correction, so nothing changes over its own solve.
+- The `pounce-py` sensitivity bindings raise `ValueError` for a pin that does
+  not fit the core's index type, for a Jacobian structure entry that is not
+  a non-negative whole number, and for a Jacobian whose rows, columns and
+  values differ in count, rather than wrapping, saturating or truncating.
 ### Fixed
 - **A convex QCQP whose ball sits far from the origin now solves on the
   conic path (gh #1041).** `min x s.t. (x − 1000)² ≤ 1` under

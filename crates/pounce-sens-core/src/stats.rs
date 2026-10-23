@@ -887,7 +887,8 @@ fn group_jacobians<E: BarrierIterate + ?Sized>(
 /// that is rank-deficient gets the homoscedastic Lagrangian marginal
 /// `2 σ² M` without the membership handling.
 ///
-/// `max_pdpert` refuses when the factor carries a larger inertia correction.
+/// `max_pdpert` refuses when the factor carries a larger inertia correction,
+/// or when the engine does not report its correction at all.
 #[allow(clippy::too_many_arguments)]
 pub fn covariance<E: BarrierIterate + ?Sized>(
     conv: &ConvergedSolve<'_, E>,

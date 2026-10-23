@@ -188,8 +188,10 @@ pub fn check_margins(
 }
 
 /// Refuses when the factor carries more inertia correction than
-/// `max_pdpert`. An engine that does not report its correction is taken
-/// to carry none.
+/// `max_pdpert`. An engine that does not report its correction is
+/// refused too: the cap cannot be checked against a correction nobody
+/// knows, and passing it would answer "within the cap" for a factor that
+/// may have been regularized by any amount.
 pub fn refuse_on_pdpert<E: BarrierIterate + ?Sized>(
     conv: &ConvergedSolve<'_, E>,
     max_pdpert: Option<Number>,
@@ -197,7 +199,12 @@ pub fn refuse_on_pdpert<E: BarrierIterate + ?Sized>(
     let Some(limit) = max_pdpert else {
         return Ok(());
     };
-    let p = conv.kkt_perturbations().unwrap_or([0.0; 4]);
+    let Some(p) = conv.kkt_perturbations() else {
+        return Err(StepError::Solver(SolverError::BadOptions(format!(
+            "max_pdpert = {limit:e} needs the factor's inertia correction, \
+             and this engine does not report it"
+        ))));
+    };
     let (refuse, worst) = pdpert_verdict(&p, limit);
     if refuse {
         return Err(StepError::Perturbed {
@@ -610,8 +617,13 @@ pub const NO_BOUND: Number = 1e19;
 /// scored, at a fraction below one, by the same predicate and tolerance
 /// that fill the report's crossings. `on_bound` carries the classification
 /// per side, and a distance test scaled by `√μ` rules on the coordinates
-/// the classifier declined to. A step component below the roundoff of its
-/// coordinate takes no part.
+/// the classifier declined to. The remaining gap is `O(μ)` at a strongly
+/// active bound and `O(√μ)` at a weakly active one, against `O(1)` room in
+/// the interior, and the threshold was measured four orders of magnitude
+/// clear of the interior case. It is capped at `1e-2` because it applies
+/// relative to the coordinate's own magnitude, and a loose `μ` at
+/// termination would otherwise widen it without limit. A step component
+/// below the roundoff of its coordinate takes no part.
 ///
 /// `tol` is the crossing tolerance per entry, and `None` is
 /// `1e-9 · max(1, |base + step|)`. `mu` NaN means no classification, and
@@ -715,9 +727,10 @@ pub struct SolutionReport {
     /// each: the entries the cheap classifier called ambiguous, variables
     /// first. Empty when the refinement was not asked for.
     pub refined_entries: Vec<BoundTarget>,
-    /// The held factor's inertia correction, zeros when the engine reports
-    /// none.
-    pub perturbations: [Number; 4],
+    /// The held factor's inertia correction, `None` when the engine does
+    /// not report it. `None` is not "exact": an engine that does not
+    /// report may still have perturbed its factor.
+    pub perturbations: Option<[Number; 4]>,
     /// Whether the solve ran with relaxed bounds.
     pub bounds_relaxed: bool,
     /// What the corrector's iterations did, when it ran.
@@ -974,7 +987,7 @@ fn report_inner<E: BarrierIterate + ?Sized>(
         row_status,
         refined,
         refined_entries,
-        perturbations: conv.kkt_perturbations().unwrap_or([0.0; 4]),
+        perturbations: conv.kkt_perturbations(),
         bounds_relaxed,
         corrector,
         refine_stop,

@@ -52,7 +52,8 @@ mod common;
 use common::compare::RATIO_RTOL;
 use common::model_functions::TnlpModel;
 use common::outside_engine::{
-    Bounds, Fault, OutsideEngine, Relaxation, outside_engine, recorded_solve,
+    Bounds, Fault, Layout, OutsideEngine, Relaxation, outside_engine, outside_engine_with_layout,
+    recorded_solve,
 };
 use common::sol_file::{SolFile, ipopt_final_mu, ipopt_objective_scaling};
 
@@ -62,7 +63,15 @@ const PARAMETRIC: &str = "parametric";
 
 /// The runs each comparison names, in the order [`over_engines`] returns
 /// them.
-const RUNS: [&str; 3] = ["pounce", "pounce's iterate, outside engine", "Ipopt"];
+const RUNS: [&str; ENGINES] = [
+    "pounce",
+    "pounce's iterate, outside engine",
+    "Ipopt",
+    "pounce's iterate, outside engine, blocks reversed",
+];
+
+/// How many runs [`over_engines`] makes.
+const ENGINES: usize = 4;
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -88,6 +97,10 @@ struct Solved {
     pounce: Solver,
     recorded: OutsideEngine,
     ipopt: OutsideEngine,
+    /// pounce's iterate again, with every block in the reverse of the
+    /// model's order, so the maps are all that relates engine positions to
+    /// model indices.
+    reversed: OutsideEngine,
 }
 
 fn solved(stem: &'static str) -> Solved {
@@ -105,6 +118,7 @@ fn solved(stem: &'static str) -> Solved {
         "{stem}: pounce's solve: {st:?}"
     );
     let recorded = outside_engine(&recording, Relaxation::None);
+    let reversed = outside_engine_with_layout(&recording, Relaxation::None, Layout::Reversed);
 
     let out = read_fixture(&format!("{stem}.ipopt.txt"));
     let mu = ipopt_final_mu(&out).expect("Ipopt printed its barrier parameter");
@@ -120,6 +134,7 @@ fn solved(stem: &'static str) -> Solved {
         pounce,
         recorded,
         ipopt,
+        reversed,
     }
 }
 
@@ -145,7 +160,12 @@ macro_rules! over_engines {
             let $conv = &ConvergedSolve::new(&s.ipopt, 0.0, true);
             $body
         };
-        [a, b, c]
+        let d = {
+            let $x: Vec<Number> = s.reversed.model_x();
+            let $conv = &ConvergedSolve::new(&s.reversed, 0.0, true);
+            $body
+        };
+        [a, b, c, d]
     }};
 }
 
@@ -193,8 +213,47 @@ fn kinds<T: Debug>(findings: &[T]) -> Vec<String> {
         .collect()
 }
 
+/// `v` over the factor's `x` block, put in the model's variable order by
+/// the maps the engine reports. A parametric step comes back in the
+/// engine's own order, which is the model's only when the layouts agree.
+fn in_model_order<E: BarrierIterate + ?Sized>(
+    conv: &ConvergedSolve<'_, E>,
+    v: &[Number],
+) -> Vec<Number> {
+    let maps = conv.engine().model_maps().expect("maps");
+    let mut out = vec![0.0; maps.n_full_x];
+    for (k, &i) in maps.var_x_to_full_x.iter().enumerate() {
+        out[i] = v[k];
+    }
+    out
+}
+
+/// The model equality row whose multiplier sits at KKT row `r`, for a
+/// row [`step::multiplier_row`] returns in the engine's own layout.
+fn model_row_of<E: BarrierIterate + ?Sized>(conv: &ConvergedSolve<'_, E>, r: usize) -> usize {
+    let at = r - conv.engine().offsets()[2];
+    let maps = conv.engine().model_maps().expect("maps");
+    maps.full_g_to_c
+        .iter()
+        .position(|&c| c == Some(at))
+        .expect("a multiplier row of an equality")
+}
+
+/// [`step::multiplier_row`] for model rows `0..3`, with each row found
+/// put back as the model row it belongs to.
+fn multiplier_rows<E: BarrierIterate + ?Sized>(conv: &ConvergedSolve<'_, E>) -> Vec<String> {
+    (0..3)
+        .map(
+            |g| match step::multiplier_row(conv, g).expect("multiplier row") {
+                Ok(r) => format!("Ok(row {})", model_row_of(conv, r)),
+                Err(e) => format!("Err({e:?})"),
+            },
+        )
+        .collect()
+}
+
 /// Each run's results against pounce's, by `cmp`.
-fn against_pounce<T>(what: &str, runs: &[T; 3], cmp: impl Fn(&str, &T, &T)) {
+fn against_pounce<T>(what: &str, runs: &[T; ENGINES], cmp: impl Fn(&str, &T, &T)) {
     for (k, r) in runs.iter().enumerate().skip(1) {
         cmp(&format!("{what}, {}", RUNS[k]), &runs[0], r);
     }
@@ -223,7 +282,11 @@ fn objective(stem: &str, x: &[Number]) -> Number {
 
 type CovRun = (Vec<String>, Result<stats::Covariance, String>);
 
-fn covariance_runs(s: &Solved, known: Option<&[Number]>, hessian: HessianForm) -> [CovRun; 3] {
+fn covariance_runs(
+    s: &Solved,
+    known: Option<&[Number]>,
+    hessian: HessianForm,
+) -> [CovRun; ENGINES] {
     let (fit, groups) = declarations(s.stem);
     over_engines!(s, |conv, x| {
         let decl = Declarations {
@@ -266,7 +329,11 @@ fn same_covariance(label: &str, a: &CovRun, b: &CovRun, tol: Number) {
 
 type InfoRun = (Vec<String>, Result<stats::Information, String>);
 
-fn information_runs(s: &Solved, block: Option<&[usize]>, hessian: HessianForm) -> [InfoRun; 3] {
+fn information_runs(
+    s: &Solved,
+    block: Option<&[usize]>,
+    hessian: HessianForm,
+) -> [InfoRun; ENGINES] {
     let (fit, groups) = declarations(s.stem);
     over_engines!(s, |conv, _x| {
         let decl = Declarations {
@@ -400,7 +467,7 @@ fn the_solution_estimates_over_each_engine_are_pounces() {
                     degeneracy,
                     ..StepOptions::default()
                 };
-                let runs: [StepRun; 3] = over_engines!(s, |conv, x| {
+                let runs: [StepRun; ENGINES] = over_engines!(s, |conv, x| {
                     let model = TnlpModel::new(model(PARAMETRIC));
                     let out = step::solution(conv, &model, &x, &PINS, &deltas, &o, true);
                     (
@@ -530,16 +597,7 @@ fn the_active_set_changes_over_each_engine_are_pounces() {
 #[test]
 fn the_jacobian_over_each_engine_is_pounces() {
     let s = solved(PARAMETRIC);
-    let rows = over_engines!(s, |conv, _x| {
-        (0..3)
-            .map(|g| {
-                format!(
-                    "{:?}",
-                    step::multiplier_row(conv, g).expect("multiplier row")
-                )
-            })
-            .collect::<Vec<_>>()
-    });
+    let rows = over_engines!(s, |conv, _x| multiplier_rows(conv));
     against_pounce("multiplier rows", &rows, |l, a, b| assert_eq!(a, b, "{l}"));
     for (k, pin) in PINS.iter().enumerate() {
         let cols = over_engines!(s, |conv, x| {
@@ -548,7 +606,7 @@ fn the_jacobian_over_each_engine_is_pounces() {
                 .objective_gradient(&x)
                 .expect("the gradient");
             let total = step::total_objective_derivative(conv, &grad, &col).expect("df/dp");
-            (col, total)
+            (in_model_order(conv, &col), total)
         });
         against_pounce(&format!("column {k}"), &cols, |l, a, b| {
             assert_close(&format!("{l}: dx/dp"), &a.0, &b.0, STEPS);
@@ -956,15 +1014,21 @@ fn the_steps_answer_what_they_are_defined_as() {
         let sol = |deltas: &[Number], o: &StepOptions, clamp| {
             step::solution(conv, &functions, &x, &PINS, deltas, o, clamp)
         };
-        let plain = conv.parametric_step(&PINS, &down).expect("step");
-        let released = conv
-            .parametric_step_release_all(&PINS, &down)
-            .expect("step")
-            .0;
-        let decided = conv
-            .parametric_step_directional(&PINS, &down, 16)
-            .expect("step")
-            .0;
+        let plain = in_model_order(conv, &conv.parametric_step(&PINS, &down).expect("step"));
+        let released = in_model_order(
+            conv,
+            &conv
+                .parametric_step_release_all(&PINS, &down)
+                .expect("step")
+                .0,
+        );
+        let decided = in_model_order(
+            conv,
+            &conv
+                .parametric_step_directional(&PINS, &down, 16)
+                .expect("step")
+                .0,
+        );
         let mut m = TnlpModel::new(model(PARAMETRIC));
         let report = step::solution_report(
             conv,
@@ -980,18 +1044,11 @@ fn the_steps_answer_what_they_are_defined_as() {
             },
             true,
         );
-        let o_row = conv.engine().offsets()[2];
-        let mult: Vec<String> = (0..3)
-            .map(|g| {
-                format!(
-                    "{:?}",
-                    step::multiplier_row(conv, g).expect("multiplier row")
-                )
-            })
-            .collect();
+        let mult = multiplier_rows(conv);
         let col = conv
             .parametric_step(&[PINS[0]], &[1.0])
             .expect("the column");
+        let col_model = in_model_order(conv, &col);
         let grad = TnlpModel::new(model(PARAMETRIC))
             .objective_gradient(&x)
             .expect("gradient");
@@ -1022,7 +1079,10 @@ fn the_steps_answer_what_they_are_defined_as() {
                 ),
                 sol(&[0.0, 0.8], &o(Mode::Path, Degeneracy::Directional), true),
             ],
-            conv.parametric_step(&PINS, &[0.0, 0.8]).expect("step"),
+            in_model_order(
+                conv,
+                &conv.parametric_step(&PINS, &[0.0, 0.8]).expect("step"),
+            ),
             report,
             step::active_set_changes(
                 conv,
@@ -1030,7 +1090,7 @@ fn the_steps_answer_what_they_are_defined_as() {
                 &[0.0, 0.8],
                 &o(Mode::Linear, Degeneracy::Directional),
             ),
-            (o_row, mult, col, grad, total),
+            (mult, col_model, grad, total),
         )
     });
     for (k, (x, linear, bounded, dx_cap, report, changes, jac)) in runs.into_iter().enumerate() {
@@ -1138,12 +1198,12 @@ fn the_steps_answer_what_they_are_defined_as() {
             "{run}: x1 leaves its upper bound and cap reaches its limit"
         );
 
-        let (o_row, mult, col, grad, total) = jac;
+        let (mult, col, grad, total) = jac;
         assert_eq!(
             mult,
             [
-                format!("Ok({o_row})"),
-                format!("Ok({})", o_row + 1),
+                "Ok(row 0)".to_string(),
+                "Ok(row 1)".to_string(),
                 "Err(NotStrictlyActive(0))".to_string()
             ],
             "{run}: the pins' rows, and cap inactive"
@@ -1654,7 +1714,7 @@ fn a_crossing_is_measured_from_the_bound_it_crosses() {
             ..StepOptions::default()
         };
         let rep = step::solution_report(conv, &mut functions, &x, &PINS, &deltas, &o, true);
-        let dx = conv.parametric_step(&PINS, &deltas).expect("step");
+        let dx = in_model_order(conv, &conv.parametric_step(&PINS, &deltas).expect("step"));
         (x[0] + dx[0], ok("report", rep.result).crossed)
     });
     for (k, (x1, crossed)) in runs.into_iter().enumerate() {
@@ -2071,5 +2131,49 @@ fn ipopt_still_produces_the_committed_results() {
             }
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// An engine that does not report its inertia correction is not one that
+/// applied none. `max_pdpert` cannot be checked against a correction
+/// nobody knows, so it refuses there rather than passing, and the report
+/// says the correction is unknown rather than zero. pounce reports its
+/// correction, so its run takes the cap and reports four numbers.
+#[test]
+fn an_unreported_inertia_correction_is_neither_zero_nor_within_the_cap() {
+    let s = solved(PARAMETRIC);
+    let runs = over_engines!(s, |conv, x| {
+        let reports = conv.kkt_perturbations().is_some();
+        let capped = StepOptions {
+            max_pdpert: Some(1.0),
+            ..StepOptions::default()
+        };
+        let deltas = [0.05, 0.4];
+        let functions = TnlpModel::new(model(PARAMETRIC));
+        let step = format!(
+            "{:?}",
+            step::solution(conv, &functions, &x, &PINS, &deltas, &capped, true).result
+        );
+        let mut functions = TnlpModel::new(model(PARAMETRIC));
+        let o = StepOptions::default();
+        let report = step::solution_report(conv, &mut functions, &x, &PINS, &deltas, &o, true)
+            .result
+            .expect("an uncapped report");
+        (reports, step, report.perturbations)
+    });
+    for (k, (reports, step, perturbations)) in runs.into_iter().enumerate() {
+        let l = RUNS[k];
+        assert_eq!(perturbations.is_some(), reports, "{l}: report");
+        if reports {
+            assert!(
+                step.starts_with("Ok"),
+                "{l}: a reported zero correction is within the cap: {step}"
+            );
+        } else {
+            assert!(
+                step.contains("max_pdpert") && step.contains("does not report"),
+                "{l}: the cap is refused, not passed: {step}"
+            );
+        }
     }
 }

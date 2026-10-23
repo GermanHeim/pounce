@@ -345,6 +345,13 @@ pub fn rank_deficient(a: &Dense) -> Result<bool, String> {
 /// Whether a symmetric matrix has a genuinely negative eigenvalue, at a
 /// tolerance relative to its own scale: the smallest eigenvalue below
 /// `-1e-10 · max(1, max |a_ij|)`.
+///
+/// The scale is the largest entry, not each parameter's own, so unlike
+/// [`rank_deficient`] this is not invariant to the parameters' units: a
+/// parameter whose entries are small beside the block's largest can carry
+/// a negative eigenvalue under the tolerance. This is the rule `_stats.py`
+/// applied, ported unchanged; a negative variance on the diagonal is
+/// reported separately whatever its size.
 pub fn indefinite(a: &Dense) -> Result<bool, String> {
     if a.rows == 0 {
         return Ok(false);

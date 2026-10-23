@@ -20,29 +20,37 @@
 //! Two consumers exist in tree. `pounce-sensitivity` implements the trait over
 //! the NLP filter-IPM's KKT factor (`PdSensBacksolver`); `pounce-convex`
 //! implements it over the convex active-set KKT. Neither depends on the other,
-//! and this crate depends on neither — it needs only `pounce-common` and
-//! `pounce-linalg`.
+//! and this crate depends on neither. It needs `pounce-common` and
+//! `pounce-linalg`, `pounce-qp` and `pounce-feral` for the reduced QP the
+//! directional derivative solves, and `faer` for the dense algebra of the
+//! statistics.
 //!
 //! # Barrier iterates
 //!
-//! Two parts of the NLP arm need more of the engine than a back-solve: the
-//! corrector, which iterates on the barrier KKT system against an operator
-//! assembled at the predicted point, and the activity classification, which
-//! reads the bound multipliers, slacks and barrier diagonal of the converged
-//! point. Both are written against a second trait,
-//! [`barrier::BarrierIterate`], which an engine implements beside
+//! Most of the NLP arm needs more of the engine than a back-solve: it reads
+//! the interior-point iterate itself. That part is written against a second
+//! trait, [`barrier::BarrierIterate`], which an engine implements beside
 //! `SensBacksolver`:
 //!
 //! * [`corrector`]: Newton iterations on the barrier system from a
 //!   parametric step.
 //! * [`activity`]: the per-bound classification, and its refinement by the
 //!   reduced curvature.
+//! * [`converged`]: [`converged::ConvergedSolve`], every calculation over a
+//!   converged factor: the parametric steps in each mode and degeneracy
+//!   treatment, the reduced Hessian, and the maps between the model and
+//!   the engine's blocks.
+//! * [`stats`]: the covariance and information matrix of a fit.
+//! * [`step`]: the solution estimate at perturbed parameters and the report
+//!   of what its step does at the bounds.
+//! * [`model`] and [`dense`]: the model callbacks a step report evaluates,
+//!   and the dense algebra of the statistics.
 //!
 //! `pounce-sensitivity` implements `BarrierIterate` over pounce's own
 //! converged iterate. An interior-point engine outside pounce, such as Ipopt,
 //! implements it from its own final iterate, its own model callbacks and its
-//! own factorization of the KKT matrix, and gets the same two analyses over
-//! its result.
+//! own factorization of the KKT matrix, and gets the same calculations over
+//! its result through `ConvergedSolve::new`.
 //!
 //! # Provenance
 //!

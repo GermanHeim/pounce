@@ -78,8 +78,11 @@ The port follows the upstream sIPOPT contrib at
 | `src/p_calculator.rs` — `PCalculator` trait  | [`SensPCalculator.hpp`](../../ref/Ipopt/contrib/sIPOPT/src/SensPCalculator.hpp) (lines 17–133) |
 | `src/backsolver.rs` — `SensBacksolver` trait | [`SensBacksolver.hpp`](../../ref/Ipopt/contrib/sIPOPT/src/SensBacksolver.hpp)                |
 
-Every public item in this crate documents the upstream symbol it mirrors,
-with line numbers when they're stable.
+Every public item ported from sIPOPT documents the upstream symbol it
+mirrors, with line numbers when they're stable. `barrier`, `converged`,
+`stats`, `step`, `model` and `dense` are not ports: they hold pounce's own
+calculations, moved here from `pounce-sensitivity` and the Python front end,
+and say so inline where one follows sIPOPT.
 
 ## License
 

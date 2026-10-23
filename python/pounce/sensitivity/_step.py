@@ -446,11 +446,12 @@ class SolutionReport:
         classified, variables first: the entries the cheap classifier
         called "ambiguous", at one back-solve each. `refined` holds the
         ones whose class changed. Empty when `refine_activity=False`.
-    perturbations : list
+    perturbations : list or None
         The held factor's inertia-correction perturbations. Any
         non-zero entry means the factor is regularized, so the step is
         taken against a modified matrix and differs from the exact
-        active-set answer by that much.
+        active-set answer by that much. None when the engine does not
+        report them, which is not the same as all zero.
     corrector : dict or None
         What `corrector_iter` iterations did, None when none were run.
         Holds the back-solves spent under `iterations`, the residual
@@ -511,7 +512,9 @@ class SolutionReport:
         n = len(self.crossed) + len(self.crossed_rows)
         where = f", first {self.first_kind} {self.first}" if self.first else ""
         flags = "".join([
-            ", regularized" if any(self.perturbations) else "",
+            ", regularized" if self.perturbations and any(self.perturbations)
+            else ", perturbations unreported" if self.perturbations is None
+            else "",
             ", bounds relaxed" if self.bounds_relaxed else "",
             f", refined {len(self.refined)}" if self.refined else "",
         ])
@@ -751,7 +754,8 @@ def solution_report(session, pin_rows, deltas, max_iter=None,
         crossed=crossed, crossed_rows=crossed_rows,
         violation=float(res["violation"]), mu=float(res["mu"]),
         activity=activity, row_activity=row_status,
-        perturbations=[float(v) for v in res["perturbations"]],
+        perturbations=(None if res["perturbations"] is None
+                       else [float(v) for v in res["perturbations"]]),
         bounds_relaxed=bounds_relaxed, corrector=res["corrector"],
         refine_stop=res["refine_stop"], refined=refined,
         refined_entries=refined_entries,

@@ -345,7 +345,16 @@ pub fn assert_same_activity_within(
 /// is infinite, and an engine's factorization returns zero or a roundoff-sized
 /// number of either sign. Past this both engines say the same thing, and the
 /// value, its sign and the ratio it divides to zero are roundoff.
-const DETERMINED: Number = 1e12;
+///
+/// The curvature has units, so the cutoff is a gap between two measured
+/// populations rather than a dimensionless constant. Over the 113 entries
+/// the suite compares, the genuine curvatures reach `1.8e10` (on
+/// `cross_engine_scaled`) and the determined ones start at `1.1e30` (the
+/// `coupled` leg at row scale `1e-3`). The cutoff sits at their geometric
+/// middle, ten orders from each. A fixture whose genuine curvature passes
+/// `1e20` would be compared on its status alone; re-measure before adding
+/// one in small units.
+const DETERMINED: Number = 1e20;
 
 /// One reduced report's entries against the other's.
 #[allow(clippy::too_many_arguments)]

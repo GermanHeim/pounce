@@ -399,9 +399,18 @@ impl ModelFunctions for PyModel<'_> {
         let r = (|| -> PyResult<Vec<(usize, usize, Number)>> {
             let st = self.nl.call_method0("jacobian_structure")?;
             let (rows, cols): (Bound<'_, PyAny>, Bound<'_, PyAny>) = st.extract()?;
-            let rows: Vec<usize> = floats(&rows)?.iter().map(|&v| v as usize).collect();
-            let cols: Vec<usize> = floats(&cols)?.iter().map(|&v| v as usize).collect();
+            let rows = indices("Jacobian rows", &floats(&rows)?)?;
+            let cols = indices("Jacobian columns", &floats(&cols)?)?;
             let vals = floats(&self.nl.call_method1("jacobian", (self.array(x),))?)?;
+            if rows.len() != cols.len() || vals.len() != rows.len() {
+                return Err(PyValueError::new_err(format!(
+                    "the Jacobian has {} rows, {} columns and {} values; they must \
+                     be one per entry",
+                    rows.len(),
+                    cols.len(),
+                    vals.len()
+                )));
+            }
             Ok(rows
                 .into_iter()
                 .zip(cols)
@@ -498,8 +507,31 @@ fn findings_list(py: Python<'_>, fs: &[StepFinding]) -> PyResult<Vec<PyObject>> 
     fs.iter().map(|f| step_finding(py, f)).collect()
 }
 
-fn pins_of(pins: &[i64]) -> Vec<Index> {
-    pins.iter().map(|&p| p as Index).collect()
+/// Entries of a sparsity structure as indices, refusing anything that is
+/// not a non-negative whole number rather than saturating it to one.
+fn indices(what: &str, v: &[Number]) -> PyResult<Vec<usize>> {
+    v.iter()
+        .map(|&e| {
+            if e >= 0.0 && e.fract() == 0.0 && e <= usize::MAX as Number {
+                Ok(e as usize)
+            } else {
+                Err(PyValueError::new_err(format!(
+                    "{what}: {e} is not an index"
+                )))
+            }
+        })
+        .collect()
+}
+
+/// The pins as the core's index type, refusing one that does not fit
+/// rather than wrapping it onto another row.
+fn pins_of(pins: &[i64]) -> PyResult<Vec<Index>> {
+    pins.iter()
+        .map(|&p| {
+            Index::try_from(p)
+                .map_err(|_| PyValueError::new_err(format!("pin {p} is not a row index")))
+        })
+        .collect()
 }
 
 /// `pounce_sens_core::step::solution` over the solver's held factor.
@@ -533,7 +565,7 @@ pub fn _sens_solution<'py>(
     )?;
     let model = PyModel::new(nl)?;
     let x = floats(base_x)?;
-    let pins = pins_of(&pins);
+    let pins = pins_of(&pins)?;
     let out =
         solver.with_converged(|c| Ok(step::solution(c, &model, &x, &pins, &deltas, &o, clamp)))?;
     let d = PyDict::new_bound(py);
@@ -586,7 +618,7 @@ pub fn _sens_solution_report<'py>(
     )?;
     let mut model = PyModel::new(nl)?;
     let x = floats(base_x)?;
-    let pins = pins_of(&pins);
+    let pins = pins_of(&pins)?;
     let out = solver.with_converged(|c| {
         Ok(step::solution_report(
             c,
@@ -620,7 +652,7 @@ pub fn _sens_solution_report<'py>(
             d.set_item("refined", refined)?;
             let entries: Vec<PyObject> = r.refined_entries.iter().map(|t| target(py, t)).collect();
             d.set_item("refined_entries", entries)?;
-            d.set_item("perturbations", r.perturbations.to_vec())?;
+            d.set_item("perturbations", r.perturbations.map(|p| p.to_vec()))?;
             d.set_item("bounds_relaxed", r.bounds_relaxed)?;
             match &r.corrector {
                 Some(c) => d.set_item("corrector", corrector_dict(py, c)?)?,
@@ -658,7 +690,7 @@ pub fn _sens_active_set_changes<'py>(
         None,
         max_pdpert,
     )?;
-    let pins = pins_of(&pins);
+    let pins = pins_of(&pins)?;
     let out = solver.with_converged(|c| Ok(step::active_set_changes(c, &pins, &deltas, &o)))?;
     let d = PyDict::new_bound(py);
     d.set_item("findings", findings_list(py, &out.findings)?)?;
