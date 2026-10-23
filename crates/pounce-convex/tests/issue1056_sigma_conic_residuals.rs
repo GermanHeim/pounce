@@ -59,13 +59,9 @@ fn a_cost_scaled_ball_solves_at_every_scale() {
             "g = {g:e}: obj {} vs {f_star}",
             sol.obj
         );
-        for i in 0..2 {
-            let xs = -2.0 * c[i] / cn;
-            assert!(
-                (sol.x[i] - xs).abs() < 1e-6,
-                "g = {g:e}: x[{i}] = {} vs {xs}",
-                sol.x[i]
-            );
+        for (i, (xi, ci)) in sol.x.iter().zip(c).enumerate() {
+            let xs = -2.0 * ci / cn;
+            assert!((xi - xs).abs() < 1e-6, "g = {g:e}: x[{i}] = {xi} vs {xs}");
         }
         // Feasible, not merely close in objective: at `1e18` the old answer
         // read 22% *below* `f*`, which no point of the ball can.
