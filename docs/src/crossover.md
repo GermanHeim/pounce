@@ -383,12 +383,30 @@ offers the *unconverged* iterate to the same bridge:
   waits until the error is ten times smaller, or another stall window has
   passed, and at most `ipm_sqp_handover_max_attempts` are made.
 
-On the CLI fixture corpus it is accepted, at the interior method's answer,
-on `bound_active_qp` (6 → 4 interior iterations), `airport` (15 → 13) and
-`csfi2` (35 → 30), and correctly declined on `hs13_bigstart`, `deb7` and
-`dallass`, which then finish exactly as without it. `app.handover_report()`
-(Rust) says how many attempts were made, at which iteration one was
-accepted, and the crossover report of the last one.
+Swept over the CLI fixture corpus at the defaults (both legs, 234
+fixture-legs), against the same binary with it off: 73 finish in fewer
+interior-point iterations, 3 report more, 158 are unchanged, and no status gets
+worse. The three that report more are models whose plain solve is re-run by the
+quality audit (`csfi2`: 35 + 21 iterations; the sweep records the last solve
+only) and finish in one solve with the handover (30). Two move from
+`Solved_To_Acceptable_Level` to `Solve_Succeeded` (`mu_fallback_point_floor`,
+55 → 5 iterations). Every objective that moves goes *down* — the handover lands
+on the declared bounds rather than `O(μ)` inside them, and on nonconvex models
+it sometimes reaches a better point (`mpcc_worse_local_solution`: −13.0 →
+−84.3) — except `jit1`, where it is `4e-6` higher, because the interior method
+solved the problem with its bounds widened by `bound_relax_factor` and the
+handover solves the problem as declared. `app.handover_report()` (Rust) says
+how many attempts were made, at which iteration one was accepted, and the
+crossover report of the last one.
+
+An accepted point is also put through the interior method's own
+negative-curvature escape before it is certified, exactly as its convergence
+exit does: the SQP's one-step path has no curvature test, and without the
+escape the handover ended at the stationary point the interior method leaves
+on `nonconvex_qp`, `nonconvex_qp_ineq` and `nonconvex_two_escapes`. And each
+attempt may spend at most the interior-point time used so far (at least one
+second), within the solve's own budget — on `deb7` an unbounded attempt ran the
+full-SQP fallback for minutes against a 114-iteration interior solve.
 
 What it does not change is the cost of the QP itself. An attempt is one
 active-set QP over the whole model warm-started from the identified set, so it
