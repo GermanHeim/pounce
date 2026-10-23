@@ -306,20 +306,13 @@ impl QpOptions {
     /// needs the Hessian-modification path first; that is gh #856, not this
     /// change.
     ///
-    /// Schur-complement updates are **on** here (gh#1054). The refactor path
-    /// rebuilds and factors the whole active-set KKT on every working-set
-    /// change, so a QP that has to activate a few thousand bounds pays a few
-    /// thousand sparse factorizations — the cold first QP of a
-    /// 15 000-variable collocation model did not finish in 30 minutes. The
-    /// Schur path pays one resolve per change and a refactor every
-    /// `max_schur_updates_before_refactor`. It stayed opt-in on the SQP while
-    /// a drop could skip inertia control on an indefinite Hessian; drops on a
-    /// non-PSD Hessian now refactor (see `solve_general_schur`).
+    /// Schur-complement updates stay off in this base; the SQP driver turns
+    /// them on per solve for large subproblems unless the caller chose
+    /// (`SqpOptions::qp_schur_min_dim`, gh#1054).
     #[must_use]
     pub fn sqp_subproblem() -> Self {
         Self {
             certify_second_order: false,
-            use_schur_updates: true,
             ..Self::default()
         }
     }

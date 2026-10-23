@@ -4089,6 +4089,10 @@ impl IpoptApplication {
         let report = Rc::new(RefCell::new(crate::handover::HandoverReport::default()));
         let working = Rc::new(RefCell::new(None));
         let (report_out, working_out) = (Rc::clone(&report), Rc::clone(&working));
+        let (wall0, cpu0) = (
+            pounce_common::utils::wallclock_time(),
+            pounce_common::utils::cpu_time(),
+        );
         alg.handover = Some(Box::new(move |curr, iter, err, mu| {
             if !trigger.should_try(iter, err) {
                 return None;
@@ -4098,10 +4102,27 @@ impl IpoptApplication {
                 primal_tol: crate::handover::identification_primal_tol(xopts.primal_tol, mu),
                 ..xopts.clone()
             };
-            // The solve's own budget, as crossover gets it: the handover is
-            // part of this solve, not a fresh one.
+            // An attempt may spend at most what the interior method has
+            // spent so far (floor 1 s), and never past the solve's own
+            // budget. Without a cap a declined attempt is unbounded: on
+            // `deb7` (813 variables) one ran the crossover fallback for
+            // minutes, against a 114-iteration interior solve. With it, a
+            // declined attempt costs at most a doubling — the right scale
+            // for a bet on shortening the tail.
+            let (wall_left, cpu_left) = data
+                .borrow()
+                .deadline
+                .as_ref()
+                .map_or((Number::INFINITY, Number::INFINITY), |d| {
+                    (d.remaining_wall(), d.remaining_cpu())
+                });
+            let spent_wall = (pounce_common::utils::wallclock_time() - wall0).max(1.0);
+            let spent_cpu = (pounce_common::utils::cpu_time() - cpu0).max(1.0);
             let sqp_opts = crate::sqp::SqpOptions {
-                deadline: data.borrow().deadline.clone(),
+                deadline: Some(pounce_common::timing::Deadline::new(
+                    spent_wall.min(wall_left),
+                    spent_cpu.min(cpu_left),
+                )),
                 ..snapshot.sqp.clone()
             };
             // Declared bounds, for the reason `maybe_crossover` gives.
@@ -4242,7 +4263,19 @@ impl IpoptApplication {
         // describes this solve and not a previous one — the same reason
         // `crossover_report` is reset here rather than only written on
         // the accept path.
-        alg.data.borrow_mut().curr_from_crossover = false;
+        //
+        // Except when the in-solve handover installed the iterate (gh#1054):
+        // then the flag was set during *this* solve and is still true of the
+        // point in `curr` — clearing it here mislabelled the handover's
+        // declared-frame point as an interior one, and its complementarity
+        // was reported in the relaxed frame (`0.1` on `jit1`).
+        let handover_point = self
+            .handover_report
+            .as_ref()
+            .is_some_and(|h| h.accepted_at_iter.is_some());
+        if !handover_point {
+            alg.data.borrow_mut().curr_from_crossover = false;
+        }
         let xopts = self.crossover_options();
         if !xopts.enabled {
             return;
@@ -7025,11 +7058,24 @@ impl IpoptApplication {
                 // point the never-regress gate accepted on the declared-bound
                 // residuals, so this cannot dress up a worse iterate — the
                 // measurement it replaces is the artifact.
-                if let Some(report) = self.crossover_report.as_ref()
-                    && report.accepted()
-                    && report.compl_after.is_finite()
-                {
-                    let compl_declared = report.compl_after;
+                // The same holds for a point the in-solve handover installed
+                // (gh#1054) while it is still the iterate being reported —
+                // `curr_from_crossover` is cleared if the interior method
+                // moved on from it.
+                let declared_compl = self
+                    .crossover_report
+                    .as_ref()
+                    .filter(|r| r.accepted())
+                    .or_else(|| {
+                        self.handover_report
+                            .as_ref()
+                            .filter(|_| alg.data.borrow().curr_from_crossover)
+                            .and_then(|h| h.last.as_ref())
+                            .filter(|r| r.accepted())
+                    })
+                    .map(|r| r.compl_after)
+                    .filter(|c| c.is_finite());
+                if let Some(compl_declared) = declared_compl {
                     stats.final_compl = compl_declared;
                     stats.final_kkt_error =
                         cq.curr_nlp_error_with_complementarity(compl_declared, 0.0);
@@ -9715,6 +9761,12 @@ fn apply_sqp_options(options: &OptionsList, opts: &mut crate::sqp::SqpOptions) {
             opts.lbfgs_max_history = v as u32;
         }
     }
+    // An explicit `sqp_qp_use_schur_updates` is the caller's choice and goes
+    // to the QP options as given (`apply_qp_subproblem_options`); only an
+    // unset one is left to the size rule.
+    if let Ok((_, true)) = options.get_string_value("sqp_qp_use_schur_updates", "") {
+        opts.qp_schur_min_dim = None;
+    }
     if let Ok((v, true)) = options.get_integer_value("sqp_dense_hessian_max_n", "") {
         opts.dense_hessian_max_n = usize::try_from(v).unwrap_or(0);
     }
@@ -10702,6 +10754,29 @@ mod tests {
     /// unreachable and the documented knobs were unusable. This is the guard
     /// that class of omission needs — it fails both if a key stops being
     /// registered and if a newly-read key is never registered at all.
+    #[test]
+    fn issue_1054_schur_updates_follow_size_unless_set() {
+        let mut app = IpoptApplication::new();
+        app.initialize().unwrap();
+        app.initialize_with_options_str("algorithm active-set-sqp\n")
+            .unwrap();
+        assert_eq!(
+            app.algorithm_builder_snapshot().sqp.qp_schur_min_dim,
+            Some(crate::sqp::options::DEFAULT_QP_SCHUR_MIN_DIM)
+        );
+        for v in ["yes", "no"] {
+            let mut app = IpoptApplication::new();
+            app.initialize().unwrap();
+            app.initialize_with_options_str(&format!(
+                "algorithm active-set-sqp\nsqp_qp_use_schur_updates {v}\n"
+            ))
+            .unwrap();
+            let snap = app.algorithm_builder_snapshot();
+            assert_eq!(snap.sqp.qp_schur_min_dim, None, "{v}: explicit wins");
+            assert_eq!(snap.sqp_qp.use_schur_updates, v == "yes");
+        }
+    }
+
     #[test]
     fn application_sqp_qp_subproblem_options_are_registered_and_propagate() {
         use pounce_qp::AntiCyclingChoice;

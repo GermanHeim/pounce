@@ -2884,6 +2884,21 @@ impl IpoptAlgorithm {
                 // Same frame marker crossover sets: the point sits on the
                 // declared bounds, not inside the relaxed ones (gh#654).
                 d.curr_from_crossover = true;
+                drop(d);
+                // The handed-over point is a first-order KKT point, which a
+                // saddle of a nonconvex model also is — and the SQP's step-3
+                // path certifies it without any curvature test. The interior
+                // method's own success exit runs the gh #797 escape first;
+                // this one does too, so the handover cannot report a point
+                // the interior method would have left (measured: on
+                // `nonconvex_qp` / `nonconvex_qp_ineq` / `nonconvex_two_escapes`
+                // it otherwise ended at the stationary point the IPM
+                // escapes, objective `1` against `≈ 0`).
+                if self.try_neg_curv_escape(iter_count) {
+                    // The iterate is the interior method's again.
+                    self.data.borrow_mut().curr_from_crossover = false;
+                    return IterateOutcome::Continue;
+                }
                 return IterateOutcome::Terminate(SolverReturn::Success);
             }
         }

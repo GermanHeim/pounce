@@ -59,6 +59,9 @@ impl SqpHessianSource {
     }
 }
 
+/// Default for [`SqpOptions::qp_schur_min_dim`].
+pub const DEFAULT_QP_SCHUR_MIN_DIM: usize = 5000;
+
 #[derive(Debug, Clone)]
 pub struct SqpOptions {
     pub globalization: SqpGlobalization,
@@ -116,6 +119,21 @@ pub struct SqpOptions {
     /// changes from before gh#1054. Default 1000.
     pub dense_hessian_max_n: usize,
 
+    /// Size from which the step QP uses Schur-complement updates
+    /// (gh#1054): when `Some(d)`, each solve sets
+    /// `QpOptions::use_schur_updates` to `n + m ≥ d`; `None` leaves the QP
+    /// options as given. The driver reads `sqp_qp_use_schur_updates` only
+    /// when it is set explicitly, and then passes `None` here.
+    ///
+    /// Why size: the refactor path pays a full sparse factorization per
+    /// working-set change, which is what made the cold first QP of a
+    /// 15 000-variable model run for 30 minutes, while on small models the
+    /// two paths cost the same and the Schur path is the less robust one
+    /// (measured on the CLI fixture corpus under `algorithm=active-set-sqp`).
+    /// See `docs/src/active-set-sqp.md` for the Maros-Mészáros comparison
+    /// behind the default.
+    pub qp_schur_min_dim: Option<usize>,
+
     /// Solve-wide time budget (`max_wall_time` / `max_cpu_time`), the
     /// same [`Deadline`] the interior-point arm checks. `None` means
     /// unlimited and is the default for a directly constructed driver.
@@ -144,6 +162,7 @@ impl Default for SqpOptions {
             print_level: 0,
             lbfgs_max_history: 6,
             dense_hessian_max_n: 1000,
+            qp_schur_min_dim: Some(DEFAULT_QP_SCHUR_MIN_DIM),
             deadline: None,
         }
     }
