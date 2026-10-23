@@ -10832,9 +10832,10 @@ mod tests {
         assert!((qp.feas_tol - defaults.feas_tol).abs() < 1e-20);
         assert!((qp.opt_tol - defaults.opt_tol).abs() < 1e-20);
         assert_eq!(qp.anti_cycling, defaults.anti_cycling);
-        // Default stays OFF, and that is a measured choice: enabling it breaks
-        // 9 of the 46 Maros-Meszaros instances the default path solves
-        // correctly. Do not flip this without re-running that comparison.
+        // Off in the base QP options: the SQP driver turns it on per solve
+        // from `n + m >= 500` (gh#1054; measured on Maros-Meszaros, see the
+        // option text). Do not move that threshold without re-running the
+        // comparison.
         assert!(!qp.use_schur_updates);
         assert_eq!(
             qp.max_schur_updates_before_refactor,

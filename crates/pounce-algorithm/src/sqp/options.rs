@@ -60,7 +60,7 @@ impl SqpHessianSource {
 }
 
 /// Default for [`SqpOptions::qp_schur_min_dim`].
-pub const DEFAULT_QP_SCHUR_MIN_DIM: usize = 5000;
+pub const DEFAULT_QP_SCHUR_MIN_DIM: usize = 500;
 
 #[derive(Debug, Clone)]
 pub struct SqpOptions {

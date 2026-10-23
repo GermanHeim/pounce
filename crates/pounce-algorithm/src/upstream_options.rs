@@ -911,14 +911,18 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
          ordering and MC64 matching), which measured 32% of runtime on \
          Q25FV47. \
          \
-         Default false, and that is a measured choice rather than an \
-         oversight. On Maros-Meszaros instances the update path is 28-88x \
-         faster where it works (Q25FV47: 19.7s -> 0.5s), but it is currently \
-         less robust: of the 46 instances the default path solves correctly, \
-         enabling updates breaks 9 (InternalError, TimeOut, or a wrong \
-         objective), and total wall over that set rises 107s -> 251s because \
-         of the new timeouts. Treat it as opt-in for warm-started workloads \
-         where the speedup dominates, not as a general accelerator.",
+         Unset (the registered default \"no\" is not read as a choice), the \
+         SQP driver decides per solve: updates on when the step QP has n + m \
+         >= 500, off below (gh#1054). Measured on all 138 Maros-Meszaros \
+         problems through algorithm=active-set-sqp with a 60 s budget: updates \
+         on solve 79 against 57, lose one (QPCBLEND, n + m < 500), change no \
+         objective where both solve, and are faster in every size band but the \
+         largest; at n + m in [500, 2000) they solve 19 against 8. Below 500 \
+         the CLI fixture corpus is where they lost (eigena2, \
+         qcqp_ball_cost_1e22), so small QPs keep the refactor path. An earlier \
+         measurement (9 of 46 instances broken) predates the rank repair of \
+         the Schur reset and no longer reproduces. Set explicitly, yes or no \
+         applies at every size.",
     )?;
     r.add_lower_bounded_integer_option(
         "sqp_qp_max_schur_updates_before_refactor",

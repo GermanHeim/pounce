@@ -194,7 +194,7 @@ only on the SQP path.
 | `sqp_qp_anti_cycling`                       | `expand` | `expand` (Harris two-pass), `bland`, or `none`               |
 | `sqp_qp_certify_second_order`               | `no`     | check second-order optimality before certifying the QP       |
 | `sqp_qp_use_homotopy`                       | `no`     | trace the parametric homotopy on a cold QP solve             |
-| `sqp_qp_use_schur_updates`                  | `no`     | absorb working-set changes as rank-2 Schur updates           |
+| `sqp_qp_use_schur_updates`                  | by size  | absorb working-set changes as rank-2 Schur updates; unset, on when `n + m ≥ 500` |
 | `sqp_qp_max_schur_updates_before_refactor`  | `50`     | updates to absorb before refactoring (Schur path only)       |
 
 Three of these are worth more than a table row.
@@ -233,14 +233,28 @@ active-set KKT and factors it from scratch — algorithmically identical,
 but every working-set change repeats the full symbolic analysis, which
 measured 32% of runtime on Q25FV47.
 
-Its default of `no` is a measured choice, not an oversight. On
-Maros-Meszaros the update path is 28–88× faster where it works
-(Q25FV47: 19.7 s → 0.5 s), but it is less robust: of the 46 instances
-the default path solves correctly, enabling updates breaks 9
-(`InternalError`, `TimeOut`, or a wrong objective), and total wall over
-that set rises 107 s → 251 s on the new timeouts. Treat it as opt-in for
-warm-started workloads where the speedup dominates, not as a general
-accelerator.
+Left unset, it follows the size of the step QP: on when `n + m ≥ 500`,
+off below (gh#1054). Measured on all 138 Maros-Mészáros problems through
+`algorithm=active-set-sqp`, each with `max_wall_time=60`:
+
+| `n + m`        | problems | solved, off | solved, on | wall where both solve (off → on) |
+| -------------- | -------- | ----------- | ---------- | -------------------------------- |
+| < 500          | 44       | 40          | 43         | 63 s → 26 s                      |
+| 500 – 2 000    | 36       | 8           | 19         | 93 s → 43 s                      |
+| 2 000 – 5 000  | 20       | 3           | 4          | 26 s → 20 s                      |
+| 5 000 – 20 000 | 13       | 1           | 4          | 39 s → 0.6 s                     |
+| ≥ 20 000       | 25       | 5           | 9          | 3.7 s → 10.4 s                   |
+
+No objective differs where both solve, and one problem is lost (`QPCBLEND`,
+below 500). The refactor path pays a full sparse factorization, symbolic
+analysis included, per working-set change, which is what made the cold first
+QP of a 15 000-variable model run for 30 minutes. Below 500 the two cost
+about the same, and that is where the Schur path loses on the CLI fixture
+corpus (`eigena2`, `qcqp_ball_cost_1e22` under `algorithm=active-set-sqp`), so
+small QPs keep the refactor path. An earlier measurement — updates breaking 9
+of the 46 instances the refactor path solved — predates the rank repair of
+the Schur reset and no longer reproduces. Set explicitly, `yes` or `no`
+applies at every size.
 
 **`sqp_qp_use_homotopy`** changes the cold-start path: the solve starts
 from the box-only relaxation (all general rows dropped, which the box
