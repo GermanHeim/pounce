@@ -50,6 +50,40 @@ changes.
   and `compl_inf_tol` in user units on the model as declared; gradient scaling
   can shrink a row's violation by orders of magnitude (a violation of 1 read
   `3.3e-7` on `hs13_bigstart`).
+- **A convex QCQP with a large cost vector now solves on the conic path
+  (gh #1056).** `qcqp_ball` with its cost scaled to `(g, g)` ended
+  `Numerical failure` on the conic arm from `g = 1e15`, and across
+  `1e16 … 1e19` it ended `Maximum iterations exceeded` at a point outside
+  the feasible ball — which `solver_selection=auto` reported as is, since an
+  iteration limit does not trigger the NLP fallback. It now returns `Optimal`
+  at `−2√2·g` in 10 iterations at every scale tried (`1e8 … 1e300`). The
+  `σ` cost normalization solved the scaled problem correctly but then judged
+  the answer with orthant residuals, which read a second-order block row by
+  row (the pounce#209 mistake) and so rejected every normalized optimum on a
+  QCQP. The verdict and the fallback ranking now measure each cone block as
+  a cone; LP and QP solves are judged exactly as before.
+  An *anisotropic* cost (`(1e22, 1)`, and `(g, 1)` from `1e16` up) still
+  failed: the normalized point was within `1e-10` of `x*`, but row `x₁` sits
+  22 orders below the cost scale, so its residuals cannot resolve and the
+  per-row guards rejected it, after which a cone program had nothing left
+  but the failing un-normalized re-solve. The cone cascade now returns the
+  closest claimed optimum, as the orthant one already did, and its
+  forward-error check reads each second-order block's stiffness as the
+  inverse NT block `W⁻²` instead of declining. PSD programs keep the
+  historical behaviour.
+- **A convex quadratic constraint with a large constant now solves on the
+  conic path, in the CLI and in Python's router (gh #1056).**
+  `x₀² + x₁² ≤ 1e20` was emitted as the rotated cone `(s+1, s−1, 2x)` with
+  `s = 1e20`, and in doubles `1e20 ± 1` are the same number, so the declared
+  cone was empty: the CLI ended `Numerical failure`, and Python's
+  `solver_selection="socp"` returned a false *primal-infeasible* certificate.
+  Well before that the imbalance cost: an active ball of radius `1e4` already
+  failed, and an inactive one took ~150 iterations at `1e6`. The two factors
+  are now balanced, `(s/κ + κ, s/κ − κ)` with `κ` the power of two nearest
+  `√|b|` (unchanged when `|b| ≤ 1`), and the constraint multiplier is mapped
+  back as `(z₀ + z₁)/κ`. Every radius from `1e2` to `1e100` now solves; on the
+  active `R = 1e20` ball the conic arm returns `−5e10` and `λ = 2.5e-10`
+  where the NLP path itself stops at `Search Direction is becoming Too Small`.
 - **A convex QCQP whose ball sits far from the origin now solves on the
   conic path (gh #1041).** `min x s.t. (x − 1000)² ≤ 1` under
   `solver_selection=socp` (and Python's `minimize(..., solver_selection="auto")`)
