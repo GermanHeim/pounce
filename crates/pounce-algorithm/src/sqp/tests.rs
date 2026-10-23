@@ -1543,3 +1543,96 @@ fn sqp_reports_qp_working_set_changes_and_warm_start_removes_them() {
     );
     assert!(hot.n_qp_working_set_changes < cold.n_qp_working_set_changes);
 }
+
+// ─────────────────────────────────────────────────────────────────
+// gh#1054: `max_wall_time` / `max_cpu_time` reach the SQP arm.
+// ─────────────────────────────────────────────────────────────────
+
+fn sqp_with_deadline(deadline: pounce_common::timing::Deadline) -> SqpAlgorithm {
+    let qp_solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let opts = SqpOptions {
+        max_iter: 100,
+        deadline: Some(deadline),
+        ..SqpOptions::default()
+    };
+    SqpAlgorithm::new(qp_solver, opts)
+}
+
+#[test]
+fn issue_1054_spent_wall_budget_stops_the_sqp_before_its_first_qp() {
+    let mut alg = sqp_with_deadline(pounce_common::timing::Deadline::new(0.0, 1e20));
+    let res = alg.optimize(&mut NonlinearEqNlp).unwrap();
+    assert_eq!(res.status, SqpStatus::WallTimeExceeded);
+    assert_eq!(res.n_iter, 0);
+    assert_eq!(
+        res.n_qp_solves, 0,
+        "the budget is checked before the step QP"
+    );
+}
+
+#[test]
+fn issue_1054_spent_cpu_budget_is_reported_as_cpu() {
+    let mut alg = sqp_with_deadline(pounce_common::timing::Deadline::new(1e20, 0.0));
+    let res = alg.optimize(&mut NonlinearEqNlp).unwrap();
+    assert_eq!(res.status, SqpStatus::CpuTimeExceeded);
+}
+
+#[test]
+fn issue_1054_unlimited_default_budget_changes_nothing() {
+    // `1e20` is the registered default for both options and lies outside
+    // `Duration`'s range: the conversion to a QP `time_limit` must clamp it,
+    // not panic, and the solve must reach the same optimum as with no
+    // deadline at all.
+    let mut alg = sqp_with_deadline(pounce_common::timing::Deadline::new(1e20, 1e20));
+    let res = alg.optimize(&mut NonlinearEqNlp).unwrap();
+    assert_eq!(res.status, SqpStatus::Optimal);
+    let scale = 2.0 / 13.0_f64.sqrt();
+    assert!((res.x[0] - 3.0 * scale).abs() < 1e-6);
+    assert!((res.x[1] - 2.0 * scale).abs() < 1e-6);
+}
+
+#[test]
+fn issue_1054_deadline_remaining_picks_the_tighter_budget() {
+    use crate::sqp::sqp_alg::deadline_remaining;
+    use pounce_common::timing::{Deadline, DeadlineKind};
+    let (left, kind) = deadline_remaining(&Deadline::new(0.0, 1e20));
+    assert_eq!(
+        (left, kind),
+        (std::time::Duration::ZERO, DeadlineKind::Wall)
+    );
+    let (left, kind) = deadline_remaining(&Deadline::new(1e20, 0.0));
+    assert_eq!((left, kind), (std::time::Duration::ZERO, DeadlineKind::Cpu));
+    let (left, _) = deadline_remaining(&Deadline::new(1e20, 1e20));
+    assert!(left.as_secs() > 1_000_000_000, "unlimited stays unlimited");
+}
+
+#[test]
+fn issue_1054_crossover_declines_on_a_spent_budget_and_keeps_the_interior_point() {
+    use crate::crossover::{CrossoverDecline, CrossoverOptions, CrossoverSeed};
+    let sqp_opts = SqpOptions {
+        deadline: Some(pounce_common::timing::Deadline::new(0.0, 1e20)),
+        ..SqpOptions::default()
+    };
+    let seed = CrossoverSeed {
+        x: vec![1.0, 1.0],
+        lambda_g: vec![0.0],
+        lambda_x: vec![0.0, 0.0],
+    };
+    let mut nlp = NonlinearEqNlp;
+    let (report, accepted) = crate::crossover::run(
+        &mut nlp,
+        &seed,
+        &CrossoverOptions {
+            enabled: true,
+            ..CrossoverOptions::default()
+        },
+        &sqp_opts,
+        &QpOptions::sqp_subproblem(),
+        || Box::new(pounce_feral::FeralSolverInterface::new()),
+        |_| panic!("no full active-set run once the budget is gone"),
+    );
+    assert!(accepted.is_none());
+    assert_eq!(report.declined, Some(CrossoverDecline::TimeLimit));
+    assert_eq!(report.n_qp_solves, 0);
+}

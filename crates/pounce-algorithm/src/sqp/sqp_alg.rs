@@ -659,6 +659,38 @@ impl SqpAlgorithm {
                 });
             }
 
+            // Time budget (gh#1054). Tested after the convergence check, so
+            // an iterate that is already optimal is reported as such however
+            // late it arrived, and before the step QP, which is where an
+            // active-set solve at scale spends its time.
+            if let Some(kind) = self.opts.deadline.as_ref().and_then(|d| d.exceeded()) {
+                self.iterates = Some(iter.clone());
+                return Ok(SqpResult {
+                    x: iter.x,
+                    lambda_g: iter.lambda_g,
+                    lambda_x: iter.lambda_x,
+                    obj: f_curr,
+                    status: kind.into(),
+                    n_iter: outer,
+                    n_qp_solves,
+                    n_qp_working_set_changes,
+                    final_stationarity,
+                    final_constr_viol,
+                    working_set: iter.working,
+                });
+            }
+            // What is left of it, handed to every step QP this iteration as
+            // its `time_limit`, so one subproblem cannot outlive the solve.
+            // `qp_budget` remembers which budget set the limit, so a QP that
+            // stops on it is reported as that budget and not as the
+            // subproblem's own iteration limit.
+            let qp_budget = self.opts.deadline.as_ref().map(deadline_remaining);
+            let qp_time_limit = match (qp_budget, self.qp_opts.time_limit) {
+                (Some((left, _)), Some(own)) => Some(left.min(own)),
+                (Some((left, _)), None) => Some(left),
+                (None, own) => own,
+            };
+
             let qp_data = SqpQpData::build(
                 &iter.x,
                 &grad_f,
@@ -711,6 +743,7 @@ impl SqpAlgorithm {
                 .map(|v| v.abs())
                 .fold(0.0, f64::max);
             let base = self.qp_opts.clone();
+            self.qp_opts.time_limit = qp_time_limit;
             let scale = g_inf.max(b_inf).clamp(1.0, SCALE_MAX);
             if scale > 1.0 {
                 self.qp_opts.opt_tol = base.opt_tol * scale;
@@ -969,19 +1002,22 @@ impl SqpAlgorithm {
                     // user, and merging them hid the dominant Maros-Mészáros
                     // failure mode behind a step-size verdict. See
                     // `SqpStatus::QpIterationLimit`.
-                    // `TimeLimit` rides with `MaxIter`: it is the same kind of
-                    // outcome (a budget ran out, no claim about the problem),
-                    // and it is the closest honest report `SqpStatus` can make
-                    // today. Nothing here reaches it yet — the SQP never sets
-                    // `QpOptions::time_limit` on a step subproblem, so the
-                    // active-set solver has no deadline to cross — but leaving
-                    // the arm unhandled would make the first caller that does
-                    // set one land in `QpStepFailed`, i.e. "the step broke
-                    // down", which would be false.
-                    let status = if matches!(sol.status, QpStatus::MaxIter | QpStatus::TimeLimit) {
-                        SqpStatus::QpIterationLimit
-                    } else {
-                        SqpStatus::QpStepFailed
+                    // `TimeLimit` is the solve's own `max_wall_time` /
+                    // `max_cpu_time` when the deadline set the QP's limit
+                    // (gh#1054), and is reported as that. A limit the caller
+                    // put on the subproblem directly rides with `MaxIter`: a
+                    // budget ran out, no claim about the problem.
+                    let status = match sol.status {
+                        QpStatus::TimeLimit => match qp_budget {
+                            Some((left, budget))
+                                if self.qp_opts.time_limit.is_none_or(|own| left <= own) =>
+                            {
+                                budget.into()
+                            }
+                            _ => SqpStatus::QpIterationLimit,
+                        },
+                        QpStatus::MaxIter => SqpStatus::QpIterationLimit,
+                        _ => SqpStatus::QpStepFailed,
                     };
                     return Ok(SqpResult {
                         x: iter.x,
@@ -1085,7 +1121,11 @@ impl SqpAlgorithm {
             let mut soc_working: Option<WorkingSet> = None;
             let ls = {
                 let qp_solver = &mut self.qp_solver;
-                let qp_opts = &self.qp_opts;
+                let soc_opts = QpOptions {
+                    time_limit: qp_time_limit,
+                    ..self.qp_opts.clone()
+                };
+                let qp_opts = &soc_opts;
                 let qp_data_ref = &qp_data;
                 let c_curr_ref = &c_vals;
                 let a_p_ref = &a_p;
@@ -1871,6 +1911,36 @@ fn negative_curvature_at_kkt_point(
         *di = (0..n_dof).map(|k| z[k * n + i] * evec[k]).sum();
     }
     Some(d)
+}
+
+/// What is left of `deadline`, as the wall-clock duration a step QP can take
+/// as its `time_limit`, with the budget that set it (gh#1054).
+///
+/// The QP reads only a wall clock, so the CPU half is converted one-for-one:
+/// a busy solve accrues CPU time at about the wall rate, so its remaining CPU
+/// seconds are the best wall estimate the QP can be given. The tighter of the
+/// two wins.
+pub(crate) fn deadline_remaining(
+    deadline: &pounce_common::timing::Deadline,
+) -> (std::time::Duration, pounce_common::timing::DeadlineKind) {
+    use pounce_common::timing::DeadlineKind;
+    let wall = deadline.remaining_wall();
+    let cpu = deadline.remaining_cpu();
+    let (left, kind) = if cpu < wall {
+        (cpu, DeadlineKind::Cpu)
+    } else {
+        (wall, DeadlineKind::Wall)
+    };
+    // `from_secs_f64` panics on a negative, non-finite or out-of-range
+    // argument, and the registered "unlimited" default is `1e20` s, past
+    // `Duration`'s range. A century is unlimited for this purpose.
+    const UNLIMITED_S: Number = 3.2e9;
+    let left = if left.is_finite() {
+        left.clamp(0.0, UNLIMITED_S)
+    } else {
+        UNLIMITED_S
+    };
+    (std::time::Duration::from_secs_f64(left), kind)
 }
 
 pub(crate) fn check_kkt(

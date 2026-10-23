@@ -3409,6 +3409,11 @@ impl IpoptApplication {
 
         let mut builder = self.algorithm_builder_snapshot();
         builder.algorithm = crate::alg_builder::AlgorithmChoice::ActiveSetSqp;
+        // `max_wall_time` / `max_cpu_time` on this arm (gh#1054). They were
+        // registered, documented as solve-wide, and read only by the
+        // interior-point convergence check, so an active-set solve stuck in
+        // its first QP ran until something outside POUNCE killed it.
+        builder.sqp.deadline = Some(self.solve_deadline());
         // Prefer a caller-installed factory, exactly as `optimize_constrained`
         // does, so an embedder that plugs its own backend gets it on both
         // arms. `take()` matches the IPM's one-shot semantics rather than
@@ -3756,6 +3761,16 @@ impl IpoptApplication {
                 ApplicationReturnStatus::UserRequestedStop,
                 pounce_nlp::SolverReturn::UserRequestedStop,
             ),
+            // gh#1054: the same verdicts the interior-point arm's
+            // convergence check gives on the same budgets.
+            crate::sqp::SqpStatus::WallTimeExceeded => (
+                ApplicationReturnStatus::MaximumWallTimeExceeded,
+                pounce_nlp::SolverReturn::WallTimeExceeded,
+            ),
+            crate::sqp::SqpStatus::CpuTimeExceeded => (
+                ApplicationReturnStatus::MaximumCpuTimeExceeded,
+                pounce_nlp::SolverReturn::CpuTimeExceeded,
+            ),
         };
 
         // Same gate as the IPM path: an infeasible-subproblem exit is a
@@ -4003,6 +4018,17 @@ impl IpoptApplication {
     /// Build a *copy* of the algorithm builder configured per the
     /// current options. The SQP path uses this so it gets a
     /// fresh builder without mutating the application's state.
+    /// A [`pounce_common::timing::Deadline`] for `max_wall_time` /
+    /// `max_cpu_time`, starting now.
+    fn solve_deadline(&self) -> pounce_common::timing::Deadline {
+        let read = |name: &str| {
+            self.options
+                .get_numeric_value(name, "")
+                .map_or(1e6, |(v, _)| v)
+        };
+        pounce_common::timing::Deadline::new(read("max_wall_time"), read("max_cpu_time"))
+    }
+
     /// Read the `crossover*` option family into a [`CrossoverOptions`].
     fn crossover_options(&self) -> crate::crossover::CrossoverOptions {
         let mut o = crate::crossover::CrossoverOptions::default();
@@ -4079,7 +4105,17 @@ impl IpoptApplication {
         };
 
         let snapshot = self.algorithm_builder_snapshot();
-        let sqp_opts = snapshot.sqp.clone();
+        let mut sqp_opts = snapshot.sqp.clone();
+        // The interior-point phase's own deadline, not a fresh one:
+        // crossover is part of the same solve, so it spends what the IPM
+        // left of `max_wall_time` / `max_cpu_time` (gh#1054). Before this it
+        // had no budget at all and could outlive the solve's by any amount.
+        sqp_opts.deadline = alg
+            .data
+            .borrow()
+            .deadline
+            .clone()
+            .or_else(|| Some(self.solve_deadline()));
         let qp_opts = snapshot.sqp_qp.clone();
         // Declared bounds, not the live relaxed ones: crossover's whole claim
         // is that the returned point sits *on* the constraints the user

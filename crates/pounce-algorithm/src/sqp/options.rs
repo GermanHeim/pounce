@@ -4,6 +4,7 @@
 //! through `pounce_qp::QpOptions` (which `SqpAlgorithm` owns).
 
 use pounce_common::Number;
+use pounce_common::timing::Deadline;
 
 /// Choice of SQP globalization strategy. Defaults to filter
 /// (Fletcher-Leyffer 2002) per the design note §4.1; l1-elastic
@@ -81,6 +82,16 @@ pub struct SqpOptions {
     /// `limited_memory_max_history` default of 6 (Nocedal-Wright
     /// recommends 3–20). Ignored for `Exact` and `DampedBfgs`.
     pub lbfgs_max_history: u32,
+
+    /// Solve-wide time budget (`max_wall_time` / `max_cpu_time`), the
+    /// same [`Deadline`] the interior-point arm checks. `None` means
+    /// unlimited and is the default for a directly constructed driver.
+    ///
+    /// A shared handle rather than two durations, because the SQP is not
+    /// always the first thing a solve runs: crossover hands it the
+    /// interior-point phase's own deadline, and a duration measured from
+    /// `optimize` would grant it a fresh budget (gh#1054).
+    pub deadline: Option<Deadline>,
 }
 
 impl Default for SqpOptions {
@@ -99,6 +110,7 @@ impl Default for SqpOptions {
             bt_min_alpha: 1e-12,
             print_level: 0,
             lbfgs_max_history: 6,
+            deadline: None,
         }
     }
 }
