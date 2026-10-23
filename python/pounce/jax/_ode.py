@@ -29,7 +29,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from ..bvp import _core
-from ..bvp._solve import _make_spline, ift_solve_transpose
+from ..bvp._solve import _make_spline, ift_solve_transpose_lanes
 from ..ode._solve import mesh_initial_guess
 
 
@@ -154,15 +154,12 @@ def odeint(fun, y0, t, theta=None, *, tol=1e-8):
         return np.asarray(z_star, dtype=np.float64)
 
     def _host_btran(z_star_np, p_np, v_np):
-        z_star_np = np.asarray(z_star_np, np.float64)
-        p_np = np.asarray(p_np, np.float64)
-        v_np = np.asarray(v_np, np.float64)
-        if z_star_np.ndim == 2:
-            z_star_np = z_star_np[0]
-        if p_np.ndim == 2:
-            p_np = p_np[0]
-        nfun, nbc, _ = _np_callables(p_np)
-        return ift_solve_transpose(nfun, nbc, t_np, n, m, 0, z_star_np, v_np)
+        # broadcast_all lanes may carry distinct primals (an outer vmap over
+        # parameters), not just distinct cotangents; see gh#1049.
+        return ift_solve_transpose_lanes(
+            lambda pl: _np_callables(np.asarray(pl, np.float64))[:2],
+            t_np, n, m, 0, z_star_np, p_np, v_np, 1,
+        )
 
     N = n * m
 

@@ -19,6 +19,13 @@ changes.
   the constraint. The reformulation now completes the square first, in both
   the CLI and the Python router. Python's `auto` also now re-solves a conic
   `numerical_failure` on the NLP path, matching the CLI.
+- **`jax.vmap` of a `pounce.jax.odeint` / `solve_bvp` gradient over distinct
+  parameters now returns each lane's own gradient (gh #1049).**
+  `jax.vmap(jax.grad(f))(ks)` back-solved every lane against the first
+  lane's collocation Jacobian, because the `broadcast_all` IFT callback
+  collapsed the batch to lane 0 — correct only for `jax.jacobian` at one
+  primal. Lanes are now grouped by primal: each distinct problem is factored
+  once, and the fixed-primal `jacrev` case keeps its single multi-RHS solve.
 
 ## [0.13.0] - 2026-10-22
 

@@ -72,7 +72,7 @@ def _make_newton_vjp(fun, bc, x, n, m, k, uses_p, z0, tol, theta_ndim):
     import numpy as np
     from ..bvp._jac import CollocationJacobian
     from ..bvp._newton import newton_solve
-    from ..bvp._solve import ift_solve_transpose
+    from ..bvp._solve import ift_solve_transpose_lanes
 
     x_np = np.asarray(x, dtype=np.float64)
     z0_np = np.asarray(z0, dtype=np.float64)
@@ -101,19 +101,13 @@ def _make_newton_vjp(fun, bc, x, n, m, k, uses_p, z0, tol, theta_ndim):
         return np.asarray(z_star, dtype=np.float64)
 
     def _host_btran(z_star_np, theta_np, v_np):
-        # Under vmap_method="broadcast_all" (jax.jacobian / batched VJP), all
-        # inputs arrive with a leading batch axis. ``z_star`` / ``theta`` are
-        # identical across the batch (the primal is fixed), so collapse them;
-        # ``v`` carries the distinct cotangents (one factorization, multi-RHS).
-        v_np = np.asarray(v_np, np.float64)
-        z_star_np = np.asarray(z_star_np, np.float64)
-        theta_np = np.asarray(theta_np)
-        if z_star_np.ndim == 2:
-            z_star_np = z_star_np[0]
-        if theta_np.ndim == theta_ndim + 1:
-            theta_np = theta_np[0]
-        nfun, nbc = _np_normalized(theta_np)
-        return ift_solve_transpose(nfun, nbc, x_np, n, m, k, z_star_np, v_np)
+        # Under vmap_method="broadcast_all" every operand gains the same
+        # leading batch axes. Lanes may share one primal (jax.jacobian) or
+        # carry distinct ones (an outer vmap over theta), so the helper groups
+        # them by primal rather than collapsing to lane 0 (gh#1049).
+        return ift_solve_transpose_lanes(
+            _np_normalized, x_np, n, m, k, z_star_np, theta_np, v_np, theta_ndim,
+        )
 
     N = n * m + k
 
@@ -135,8 +129,9 @@ def _make_newton_vjp(fun, bc, x, n, m, k, uses_p, z0, tol, theta_ndim):
         z_star, theta = res
         # jax.jacobian vmaps the VJP over output basis vectors, which vmaps
         # this callback. vmap_method="broadcast_all" hands the whole cotangent
-        # batch to one callback invocation, so R_z is factored once and the
-        # back-solves run as a single multi-RHS solve_transpose_many.
+        # batch to one callback invocation, so R_z is factored once per
+        # distinct primal and the back-solves run as multi-RHS
+        # solve_transpose_many.
         u = jax.pure_callback(
             _host_btran, jax.ShapeDtypeStruct((N,), jnp.float64),
             z_star, theta, v, vmap_method="broadcast_all",
