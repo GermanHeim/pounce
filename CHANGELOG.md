@@ -31,6 +31,19 @@ changes.
   forward-error check reads each second-order block's stiffness as the
   inverse NT block `W⁻²` instead of declining. PSD programs keep the
   historical behaviour.
+- **A convex quadratic constraint with a large constant now solves on the
+  conic path, in the CLI and in Python's router (gh #1056).**
+  `x₀² + x₁² ≤ 1e20` was emitted as the rotated cone `(s+1, s−1, 2x)` with
+  `s = 1e20`, and in doubles `1e20 ± 1` are the same number, so the declared
+  cone was empty: the CLI ended `Numerical failure`, and Python's
+  `solver_selection="socp"` returned a false *primal-infeasible* certificate.
+  Well before that the imbalance cost: an active ball of radius `1e4` already
+  failed, and an inactive one took ~150 iterations at `1e6`. The two factors
+  are now balanced, `(s/κ + κ, s/κ − κ)` with `κ` the power of two nearest
+  `√|b|` (unchanged when `|b| ≤ 1`), and the constraint multiplier is mapped
+  back as `(z₀ + z₁)/κ`. Every radius from `1e2` to `1e100` now solves; on the
+  active `R = 1e20` ball the conic arm returns `−5e10` and `λ = 2.5e-10`
+  where the NLP path itself stops at `Search Direction is becoming Too Small`.
 - **A convex QCQP whose ball sits far from the origin now solves on the
   conic path (gh #1041).** `min x s.t. (x − 1000)² ≤ 1` under
   `solver_selection=socp` (and Python's `minimize(..., solver_selection="auto")`)

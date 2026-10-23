@@ -22,16 +22,22 @@
 //! did reject one a cone program had no rung left but the un-normalized
 //! re-solve. `cost_scaled_balls_now_solve_on_the_conic_arm` pins both.
 //!
-//! The contract now runs on `qcqp_ball_rhs_1e20.nl`: `qcqp_ball` with the
-//! ball's right-hand side raised from `4` to `1e20`, so the ball (radius
-//! `1e10`) is inactive and the optimum is the box corner `(−10, −10)`, `−70`.
-//! The NLP path returns `−69.999999995`; the conic arm ends `Numerical
-//! failure` at 13 iterations with `obj ≈ −2.16` (the same at `1e16` and
-//! `1e24`). It never reaches `σ` — the cost is `(3, 4)` — so it is a
-//! conditioning limit of the cone row itself, independent of the machinery
-//! that retired the last two witnesses. If the conic solver learns it, the
-//! explicit-`socp` test below fails and this file needs a new witness again —
-//! which is the point: the fallback must never sit untested.
+//! The next witness, `qcqp_ball_rhs_1e20.nl` (the ball's right-hand side at
+//! `1e20`, inactive inside the box, optimum `−70`), went the same way within
+//! gh #1056: the rotated cone was emitted as `(s+1, s−1, …)`, and `1e20 ± 1`
+//! round to the same double, so the declared cone was empty. Balanced, it
+//! solves; `retired_witnesses_now_solve_on_the_conic_arm` pins all three.
+//!
+//! The contract now runs on `qcqp_ball_cost_1e22.nl` under `qp_hsde=no`. That
+//! option selects the conic arm's *direct* driver, which has no cost
+//! normalization — `σ` lives in the HSDE driver only — and it degrades from a
+//! cost of `3e6` and ends `Numerical failure` from `3e8` (185 iterations
+//! here). The NLP path does not read `qp_hsde`, so the rerouted solve returns
+//! `−2√2·1e22` exactly as before. Four witnesses in, the lesson is that a
+//! fixture-only witness is retired by every fix to the arm it exercises; this
+//! one is a documented limit of an opt-out driver, and if that driver learns
+//! cost scaling the explicit-`socp` test below fails and this file needs a new
+//! witness again — which is the point: the fallback must never sit untested.
 //!
 //! Extreme *constraint* magnitudes (a `1e300` row) were tried first and
 //! rejected: the conic arm fails on them too, but the NLP re-solve either ends
@@ -65,8 +71,12 @@ fn fixture(name: &str) -> PathBuf {
     p
 }
 
+/// The witness: the cost-scaled ball on the direct conic driver (see the
+/// module doc). `qp_hsde=no` goes first so a test's own arguments follow it.
 fn run(args: &[&str]) -> (String, String, Option<i32>) {
-    run_on("qcqp_ball_rhs_1e20.nl", args)
+    let mut all = vec!["qp_hsde=no"];
+    all.extend_from_slice(args);
+    run_on("qcqp_ball_cost_1e22.nl", &all)
 }
 
 fn run_on(name: &str, args: &[&str]) -> (String, String, Option<i32>) {
@@ -200,17 +210,22 @@ fn airport_now_solves_on_the_conic_arm() {
     );
 }
 
-/// gh #1056: the two previous witnesses — `qcqp_ball` with cost
-/// `(1e22, 1e22)` and with cost `(1e22, 1)` — are solved by the conic arm
-/// itself: `Optimal` at `−2‖c‖` under an explicit `socp`, and with no reroute
-/// under `auto`. Before, the first ended `Numerical failure` (and across
-/// `1e16 … 1e19` `IterationLimit`, which `auto` cannot rescue), and the second
-/// `Numerical failure` at 159 iterations.
+/// gh #1056: the three previous witnesses are solved by the conic arm itself
+/// — `Optimal` at the known optimum under an explicit `socp`, and with no
+/// reroute under `auto` — and so is the *active* huge ball (no box, radius
+/// `1e10`, optimum `−5e10`), which failed on the conic arm from radius `1e4`
+/// up and which the NLP path cannot solve at all (`Search Direction is
+/// becoming Too Small`). Before: the isotropic cost ball ended `Numerical
+/// failure` (and across `1e16 … 1e19` `IterationLimit`, which `auto` cannot
+/// rescue), the anisotropic one `Numerical failure` at 159 iterations, and the
+/// inactive huge ball `Numerical failure` at 13.
 #[test]
-fn cost_scaled_balls_now_solve_on_the_conic_arm() {
+fn retired_witnesses_now_solve_on_the_conic_arm() {
     for (name, f_star) in [
         ("qcqp_ball_cost_1e22.nl", -2.0 * 2.0_f64.sqrt() * 1e22),
         ("qcqp_ball_cost_1e22_by_1.nl", -2e22),
+        ("qcqp_ball_rhs_1e20.nl", -70.0),
+        ("qcqp_ball_rhs_1e20_active.nl", -5e10),
     ] {
         let (stdout, stderr, code) = run_on(name, &["solver_selection=socp"]);
         assert_eq!(
@@ -220,7 +235,7 @@ fn cost_scaled_balls_now_solve_on_the_conic_arm() {
         );
         assert!(
             stdout.contains("conic IPM, pounce-convex): Optimal Solution Found."),
-            "{name}: the conic arm must certify the cost-scaled ball; stdout=\n{stdout}"
+            "{name}: the conic arm must certify it; stdout=\n{stdout}"
         );
         let obj: f64 = stdout
             .split("obj=")
