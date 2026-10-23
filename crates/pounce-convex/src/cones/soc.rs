@@ -83,6 +83,43 @@ impl SecondOrderCone {
         (eta, w_bar)
     }
 
+    /// The block's barrier stiffness `Σ = W⁻²` at `(s, z)`, as the `(η, w̄)`
+    /// that [`Self::apply_stiffness`] takes — the second-order analogue of the
+    /// orthant's `zᵢ/sᵢ`, which is what the `σ` path's forward-error estimate
+    /// needs (gh #1056). `None` where the pair implies nothing usable: either
+    /// point not strictly inside the cone (`det ≤ 0` or a non-positive first
+    /// coordinate, which a converged active block reaches by rounding), or a
+    /// non-finite scaling. Same contract as the orthant's `barrier_ratio`:
+    /// the caller declines on `None`, it never substitutes a zero.
+    pub(crate) fn stiffness(s: &[f64], z: &[f64]) -> Option<(f64, Vec<f64>)> {
+        if s.is_empty() || !(s[0] > 0.0 && z[0] > 0.0) {
+            return None;
+        }
+        if !(Self::det(s) > 0.0 && Self::det(z) > 0.0) {
+            return None;
+        }
+        let (eta, w_bar) = Self::nt_scaling(s, z);
+        (eta.is_finite() && eta > 0.0 && w_bar.iter().all(|w| w.is_finite()))
+            .then_some((eta, w_bar))
+    }
+
+    /// Apply `W⁻² = η⁻²(2 (Jw̄)(Jw̄)ᵀ − J)`, the inverse of the block
+    /// [`Self::kkt_block`] assembles (`W̄⁻¹ = J W̄ J` for `det(w̄) = 1`).
+    pub(crate) fn apply_stiffness(eta: f64, w_bar: &[f64], v: &[f64], out: &mut [f64]) {
+        let inv2 = 1.0 / (eta * eta);
+        // (Jw̄)ᵀv = w̄₀v₀ − Σ w̄ₖvₖ.
+        let jwv: f64 = w_bar[0] * v[0]
+            - w_bar[1..]
+                .iter()
+                .zip(&v[1..])
+                .map(|(w, x)| w * x)
+                .sum::<f64>();
+        out[0] = inv2 * (2.0 * w_bar[0] * jwv - v[0]);
+        for k in 1..w_bar.len() {
+            out[k] = inv2 * (-2.0 * w_bar[k] * jwv + v[k]);
+        }
+    }
+
     /// Apply the scaling block `W² = η²(2 w̄ w̄ᵀ − J)` to a vector — the
     /// matrix-free form of the dense block returned by [`Self::kkt_block`],
     /// used in `recover_ds` so the recovered slack step is *exactly*
@@ -415,6 +452,39 @@ mod tests {
                 assert!((w2[i][j] - want).abs() < 1e-9, "W²[{i}][{j}]={}", w2[i][j]);
             }
         }
+    }
+
+    /// gh #1056: `apply_stiffness` is the inverse of the assembled `W²`, so
+    /// `W⁻²·(W²·v) = v`, and on `W² z = s` it maps `s` back to `z`.
+    #[test]
+    fn stiffness_inverts_the_nt_block() {
+        let c = SecondOrderCone::new(4);
+        let s = [3.0, 1.0, -0.5, 0.5];
+        let z = [2.0, -0.3, 0.8, 0.1];
+        let w2 = dense(&c.kkt_block(&s, &z), 4);
+        let (eta, w_bar) = SecondOrderCone::stiffness(&s, &z).expect("interior pair");
+        let v = [0.7, -1.1, 0.2, 2.5];
+        let w2v: Vec<f64> = (0..4)
+            .map(|i| (0..4).map(|j| w2[i][j] * v[j]).sum())
+            .collect();
+        let mut back = [0.0; 4];
+        SecondOrderCone::apply_stiffness(eta, &w_bar, &w2v, &mut back);
+        for k in 0..4 {
+            assert!(
+                (back[k] - v[k]).abs() < 1e-12,
+                "k={k}: {} vs {}",
+                back[k],
+                v[k]
+            );
+        }
+        let mut zz = [0.0; 4];
+        SecondOrderCone::apply_stiffness(eta, &w_bar, &s, &mut zz);
+        for k in 0..4 {
+            assert!((zz[k] - z[k]).abs() < 1e-12, "k={k}: {} vs {}", zz[k], z[k]);
+        }
+        // Not strictly interior: no stiffness, never a made-up one.
+        assert!(SecondOrderCone::stiffness(&[1.0, 1.0, 0.0, 0.0], &z).is_none());
+        assert!(SecondOrderCone::stiffness(&s, &[-1.0, 0.0, 0.0, 0.0]).is_none());
     }
 
     #[test]
