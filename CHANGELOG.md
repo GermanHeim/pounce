@@ -19,6 +19,37 @@ changes.
   the constraint. The reformulation now completes the square first, in both
   the CLI and the Python router. Python's `auto` also now re-solves a conic
   `numerical_failure` on the NLP path, matching the CLI.
+- **`jax.vmap` of a `pounce.jax.odeint` / `solve_bvp` gradient over distinct
+  parameters now returns each lane's own gradient (gh #1049).**
+  `jax.vmap(jax.grad(f))(ks)` back-solved every lane against the first
+  lane's collocation Jacobian, because the `broadcast_all` IFT callback
+  collapsed the batch to lane 0 — correct only for `jax.jacobian` at one
+  primal. Lanes are now grouped by primal: each distinct problem is factored
+  once, and the fixed-primal `jacrev` case keeps its single multi-RHS solve.
+  The same lane-0 read sat in `JaxProblem`'s factor-reuse back-solve
+  (reached from `solve_with_warm(factor_reuse=True)`), latent only because
+  that forward cannot yet be vmapped; it now groups lanes by solver id, and
+  the stacked-factor callbacks raise on mixed ids instead of reading lane 0.
+- **`pounce.jax.solve_with_warm` and `JaxProblem.solve_with_warm` compose
+  with `jax.vmap`** (one host solve per lane), including `vmap(grad)` and
+  `vmap(jacrev)`; they raised `NotImplementedError` before (gh #1049).
+- **`pounce.jax.solve_bvp`, `odeint` and `daeint` work under `jax.jit` when
+  the mesh or initial guess is traced** — built with `jnp.*` inside the
+  jitted function, passed as a jitted argument, or vmapped (gh #1049). They
+  read the mesh as NumPy at trace time and raised
+  `TracerArrayConversionError`; `solve_bvp(method="ipm")` leaked the traced
+  mesh into its host callback. The mesh is now a callback operand and is
+  differentiable: `jax.grad` w.r.t. `x` / `t` returns the implicit-function
+  derivative of the collocation solution w.r.t. the node positions.
+- **`solve_bvp(method="ipm")` accepts a pytree `theta`**, as its docstring
+  said; it crashed inside the host callback (gh #1049). `pounce.jax.solve`
+  / `solve_with_warm` take an array `p` only and now say so with a
+  `TypeError` instead of a shape error from inside a callback.
+- **JAX sparsity detection recognises `one_minus_square` and `log2`.**
+  Newer JAX writes `tanh`'s derivative as `one_minus_square` and lowers
+  `jnp.log2` to `log2`; the jaxpr analysis did not know either, so any model
+  through `tanh` (including `jax.nn.gelu`) or `log2` silently fell back to
+  probing for its pattern. `lt_to` / `le_to` join `eq_to` as zero-derivative.
 - **Second-order-cone solves no longer stall next to an active cone
   (gh #1050).** A 4-variable SOCP with a PSD objective ran `solve_socp` to
   its 200-iteration cap (`kkt_error 3e-2`) where Clarabel takes 7; it now
