@@ -9,7 +9,47 @@ changes.
 
 ## [Unreleased]
 
+### Added
+- **`ipm_sqp_handover`: the interior-point method can hand its iterate to the
+  active-set SQP before convergence (gh #1054).** Once the overall NLP error
+  reaches `ipm_sqp_handover_tol` (default `1e-4`), or has not halved in
+  `ipm_sqp_handover_stall_iter` iterations, the active set is identified from
+  the multipliers against the slacks and the SQP finishes from there. A point
+  is accepted only if it meets the stopping tolerances in user units and
+  passes the interior method's negative-curvature check; otherwise the
+  interior iteration continues unchanged. Off by default. Over the CLI
+  fixture corpus it shortens 73 of 234 solves and worsens no status. See
+  `docs/src/crossover.md`.
+- **The active-set SQP scales to large quasi-Newton models (gh #1054).** Above
+  `sqp_dense_hessian_max_n` (default 1000) variables, `sqp_hessian=lbfgs` is
+  handed to the step QP in a lifted low-rank form that keeps it sparse, and
+  `hessian_approximation=limited-memory` selects it there instead of the dense
+  damped BFGS. A 20 000-variable model solves in seconds; the dense matrix
+  alone would have been 1.6 GB.
+
+### Changed
+- **Active-set SQP step QPs use Schur-complement updates when `n + m ≥ 500`**
+  unless `sqp_qp_use_schur_updates` is set (gh #1054). On all 138
+  Maros-Mészáros problems through `algorithm=active-set-sqp` the update path
+  solves 79 against 57, with no objective changed. Small models keep the
+  refactor path, where the two cost the same.
+- **The SQP step-QP iteration budget scales with the problem** (`10·(n + m)`,
+  between 200 and 200 000) unless `sqp_qp_max_iter` is set, as the direct
+  convex active-set driver's already did. The flat 200 made a cold first QP
+  with thousands of active bounds report `Maximum_Iterations_Exceeded`.
+
 ### Fixed
+- **`max_wall_time` and `max_cpu_time` now bound `algorithm=active-set-sqp`
+  and crossover (gh #1054).** Neither was read on those paths, so a stalled
+  QP ran until killed from outside. The SQP stops with
+  `Maximum_WallTime_Exceeded` / `Maximum_CpuTime_Exceeded`, each QP gets what
+  is left of the budget, and crossover declines and keeps the interior
+  solution.
+- **Crossover no longer accepts a point that is feasible only in scaled
+  units (gh #1054).** It now also requires `constr_viol_tol`, `dual_inf_tol`
+  and `compl_inf_tol` in user units on the model as declared; gradient scaling
+  can shrink a row's violation by orders of magnitude (a violation of 1 read
+  `3.3e-7` on `hs13_bigstart`).
 - **A convex QCQP whose ball sits far from the origin now solves on the
   conic path (gh #1041).** `min x s.t. (x − 1000)² ≤ 1` under
   `solver_selection=socp` (and Python's `minimize(..., solver_selection="auto")`)
