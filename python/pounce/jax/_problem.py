@@ -3908,8 +3908,12 @@ def _pure_callback_warm_solve(jp: JaxProblem, p, x0, lam_warm, zL_warm, zU_warm)
             np.int64(info["solver_id"]),
         )
 
+    # ``sequential``: under ``jax.vmap`` each element is its own host solve
+    # with its own held factor (and id); the factor-reuse backward groups
+    # its rows by that id (:func:`_kkt_backsolve_pure_callback`).
     return jax.pure_callback(
         host_call, result_shapes, p, x0, lam_warm, zL_warm, zU_warm,
+        vmap_method="sequential",
     )
 
 

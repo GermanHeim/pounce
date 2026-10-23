@@ -30,6 +30,26 @@ changes.
   (reached from `solve_with_warm(factor_reuse=True)`), latent only because
   that forward cannot yet be vmapped; it now groups lanes by solver id, and
   the stacked-factor callbacks raise on mixed ids instead of reading lane 0.
+- **`pounce.jax.solve_with_warm` and `JaxProblem.solve_with_warm` compose
+  with `jax.vmap`** (one host solve per lane), including `vmap(grad)` and
+  `vmap(jacrev)`; they raised `NotImplementedError` before (gh #1049).
+- **`pounce.jax.solve_bvp`, `odeint` and `daeint` work under `jax.jit` when
+  the mesh or initial guess is traced** — built with `jnp.*` inside the
+  jitted function, passed as a jitted argument, or vmapped (gh #1049). They
+  read the mesh as NumPy at trace time and raised
+  `TracerArrayConversionError`; `solve_bvp(method="ipm")` leaked the traced
+  mesh into its host callback. The mesh is now a callback operand and is
+  differentiable: `jax.grad` w.r.t. `x` / `t` returns the implicit-function
+  derivative of the collocation solution w.r.t. the node positions.
+- **`solve_bvp(method="ipm")` accepts a pytree `theta`**, as its docstring
+  said; it crashed inside the host callback (gh #1049). `pounce.jax.solve`
+  / `solve_with_warm` take an array `p` only and now say so with a
+  `TypeError` instead of a shape error from inside a callback.
+- **JAX sparsity detection recognises `one_minus_square` and `log2`.**
+  Newer JAX writes `tanh`'s derivative as `one_minus_square` and lowers
+  `jnp.log2` to `log2`; the jaxpr analysis did not know either, so any model
+  through `tanh` (including `jax.nn.gelu`) or `log2` silently fell back to
+  probing for its pattern. `lt_to` / `le_to` join `eq_to` as zero-derivative.
 
 ## [0.13.0] - 2026-10-22
 
