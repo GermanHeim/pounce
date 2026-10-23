@@ -26,6 +26,10 @@ changes.
   collapsed the batch to lane 0 — correct only for `jax.jacobian` at one
   primal. Lanes are now grouped by primal: each distinct problem is factored
   once, and the fixed-primal `jacrev` case keeps its single multi-RHS solve.
+  The same lane-0 read sat in `JaxProblem`'s factor-reuse back-solve
+  (reached from `solve_with_warm(factor_reuse=True)`), latent only because
+  that forward cannot yet be vmapped; it now groups lanes by solver id, and
+  the stacked-factor callbacks raise on mixed ids instead of reading lane 0.
 
 ## [0.13.0] - 2026-10-22
 
