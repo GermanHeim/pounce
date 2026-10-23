@@ -22,6 +22,15 @@ changes.
   row (the pounce#209 mistake) and so rejected every normalized optimum on a
   QCQP. The verdict and the fallback ranking now measure each cone block as
   a cone; LP and QP solves are judged exactly as before.
+  An *anisotropic* cost (`(1e22, 1)`, and `(g, 1)` from `1e16` up) still
+  failed: the normalized point was within `1e-10` of `x*`, but row `x₁` sits
+  22 orders below the cost scale, so its residuals cannot resolve and the
+  per-row guards rejected it, after which a cone program had nothing left
+  but the failing un-normalized re-solve. The cone cascade now returns the
+  closest claimed optimum, as the orthant one already did, and its
+  forward-error check reads each second-order block's stiffness as the
+  inverse NT block `W⁻²` instead of declining. PSD programs keep the
+  historical behaviour.
 - **A convex QCQP whose ball sits far from the origin now solves on the
   conic path (gh #1041).** `min x s.t. (x − 1000)² ≤ 1` under
   `solver_selection=socp` (and Python's `minimize(..., solver_selection="auto")`)
