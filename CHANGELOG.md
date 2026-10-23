@@ -50,6 +50,17 @@ changes.
   `jnp.log2` to `log2`; the jaxpr analysis did not know either, so any model
   through `tanh` (including `jax.nn.gelu`) or `log2` silently fell back to
   probing for its pattern. `lt_to` / `le_to` join `eq_to` as zero-derivative.
+- **Second-order-cone solves no longer stall next to an active cone
+  (gh #1050).** A 4-variable SOCP with a PSD objective ran `solve_socp` to
+  its 200-iteration cap (`kkt_error 3e-2`) where Clarabel takes 7; it now
+  solves in 9. The SOC Mehrotra corrector formed its second-order term in
+  unscaled space, which is not invariant under the cone's automorphisms and
+  is badly mis-sized near an active boundary; it is now formed in the
+  Nesterov–Todd-scaled space, as Clarabel, ECOS and CVXOPT do. On 600 random
+  instances of the issue's shape, failures fall from 8 to 0 and the median
+  iteration count from 13 to 9; every convex-QCQP fixture takes fewer
+  iterations at an unchanged objective, and `airport` now solves on the conic
+  arm instead of falling back to the NLP path.
 
 ## [0.13.0] - 2026-10-22
 
