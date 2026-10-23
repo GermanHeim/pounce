@@ -9,6 +9,133 @@ changes.
 
 ## [Unreleased]
 
+### Added
+- **The corrector and the activity classification run over an interior-point
+  result pounce did not compute.** Both now live in `pounce-sens-core`,
+  written against a second trait, `pounce_sens_core::barrier::BarrierIterate`,
+  which an engine implements beside `SensBacksolver`. It reports the block
+  layout of the compound iterate `(x, s, y_c, y_d, z_l, z_u, v_l, v_u)`, the
+  converged point and the barrier level it sits on, the factor that converts
+  the natural frame to the engine's, the barrier KKT residual at a point, the
+  Newton operator at a predicted point (`corrector_operator`), and the
+  converged quantities the classification reads (`activity_data`).
+  `PdSensBacksolver` implements it from `IpoptData` with the code it ran
+  before, so every result over pounce's own solve is unchanged. The
+  sensitivity suite, the `parametric_cpp` golden output against sIPOPT
+  3.14.19, and `pounce_sens`'s `_sens_sol` output all pass as they were. An
+  engine outside pounce implements the trait from its own final iterate, its
+  own model callbacks and its own factorization of the KKT matrix, and calls
+  `pounce_sens_core::corrector::correct` and
+  `pounce_sens_core::activity::{compute, reduced_activity,
+  reduced_row_activity}` over it.
+
+  The barrier level an engine reports is the level of the complementarity
+  products of the multipliers and slacks it reports, in its own frame. The
+  classification's ratios do not depend on that frame, but its band edges are
+  set by the barrier level, so an engine gets pounce's classification when it
+  reports in the frame its own iteration ran in. For Ipopt that means the
+  multipliers of the `.sol` times the objective scaling factor Ipopt prints,
+  with the barrier parameter it prints.
+
+  The tests include such an engine (`tests/common/outside_engine.rs`), built
+  only from what a solve reports to its caller: the primal point, one
+  multiplier per row and the variable-bound multipliers. It fills in the
+  inequality slacks and their bound multipliers, which a report does not
+  carry, and factors the eight-block Newton matrix with a dense LU and
+  iterative refinement. Every existing corrector and classification test has a
+  second run that builds this engine from the solution pounce returned and
+  asserts the same corrector report, the same classification and the same
+  corrected point, with two exceptions. A limited-memory solve has a
+  quasi-Newton matrix a report does not carry, so that test checks that both
+  corrections reach the required accuracy. Where pounce's gh#737 ceiling caps
+  a barrier diagonal, the outside engine, which needs no cap, reaches a
+  different and more accurate point, so `issue_828_capped_bound_multipliers`
+  and `corrector_ceiling` check that it lands at least as close to the
+  re-solved truth. At `a = 1e-4` in the first, pounce lands `1.55e-4` from it
+  and the outside engine `1e-10`, and in the second `1.048e-2` and `1.356e-3`.
+  A cross-engine test runs both analyses over Ipopt 3.13.2's result on two
+  committed models, one of which Ipopt scales by `100/6180` (MA57, read back
+  from the `.sol`), and compares them with pounce's own run on the same model.
+  The statuses and flags of the classification agree exactly. The corrected
+  points agree to `2.2e-16` where both corrections reach roundoff, and to
+  `3.0e-8` where the corrector stops above it.
+
+- **Every calculation `Solver` makes over its converged factor runs over any
+  engine, and so do the statistics and the steps of `pounce.sensitivity`.**
+  `pounce_sens_core::converged::ConvergedSolve` holds an engine that
+  implements `SensBacksolver` and `BarrierIterate`, and its methods compute
+  the parametric steps in each mode and degeneracy treatment, the corrector,
+  the classification, the reduced Hessian, the KKT solves and the maps between
+  the model's indices and the engine's blocks. `Solver` is a wrapper over it,
+  and `Solver::with_converged` passes one to a caller's closure.
+  `BarrierIterate` gains the methods these read: `model_maps`, `scaling`,
+  `primal_bounds`, `kkt_perturbations` (by default `None`, which the
+  calculations read as no inertia correction) and `released_operator` (by
+  default one `solve_released` call per solve).
+
+  `pounce_sens_core::stats` (the covariance, the information matrix, the
+  correlation and the bounds a block is conditioned on) and
+  `pounce_sens_core::step` (the solution estimate, the solution report, the
+  active-set changes along a path step, the multiplier row of a model row and
+  the total derivative of the objective) are the numerics of
+  `pounce.sensitivity`'s `covariance`, `information`, `solution`,
+  `solution_report` and `active_set_changes`, ported to Rust. `faer` takes the
+  place of NumPy in `pounce_sens_core::dense`: the inverse and the solve fail
+  on an exactly zero pivot as LAPACK's do, the rank and the null space use
+  NumPy's tolerance, and the symmetric eigendecomposition reads the lower
+  triangle and makes each eigenvector's largest component positive. The ports
+  return each warning condition as a finding and each failure as a typed
+  error. `pounce-py` exposes them, and the Python front ends keep their
+  signatures and raise the warnings and exceptions they always raised, with
+  the same messages in the same order. `SensSession.mult_entry` reads the
+  strictly-active gate from `step::multiplier_row`, and
+  `total_objective_derivative` contracts through
+  `step::total_objective_derivative`. Notebooks 26, 31 and 36 print the same
+  output as before, apart from the wall times they report.
+
+  `tests/notebook_calcs_over_engines.rs` runs every calculation of notebooks
+  26, 31 and 36 over pounce's solve, over the test engine built from what
+  pounce's solve returned, and over the test engine built from Ipopt 3.13.2's
+  `.sol`, on three committed models. Everything discrete agrees exactly. The
+  statistics agree with pounce's to `2.4e-8` and the steps to `4.1e-12`. The
+  exception is the information of a parameter held at its bound, which agrees
+  to `5.3e-5` over both engines. It is a reduced curvature, computed as a
+  difference against a barrier diagonal of `3.0e7` that cancels eight digits.
+  The same file checks every run against the closed forms of the two fits, to
+  `4.3e-8`, and checks each step against its definition. Five more models
+  reach cases the notebooks do not, among them a parameter with curvature
+  below the noise scale, a negative variance and a weakly active inequality
+  row. The test engine can report malformed maps, scaling or bounds, and the
+  calculations refuse each.
+  `pyomo-pounce/tests/test_covariance_messages.py` pins the names of the
+  residual groups in the reported variance and in errors, and the wording of
+  the warnings callers filter on.
+
+- `SolutionReport.refined_entries` lists every entry the report classified
+  again with the reduced curvature, one back-solve each, which are the
+  entries the cheap classifier called ambiguous. `refined` lists the ones
+  whose class changed.
+
+- `SensBacksolver::solve_many` has a default that solves one right-hand side
+  at a time. `PdSensBacksolver` routes it to its batched back-solve.
+
+### Changed
+- `pounce_sensitivity::corrector` is `pounce_sens_core::corrector`, re-exported,
+  and its errors are `CorrectorError`, which `Solver::correct_step` maps to the
+  same `SolverError` variants and messages as before. The classification types
+  and functions are re-exported from `pounce_sensitivity::activity`, so
+  `pounce_sensitivity::activity::WEAKLY_ACTIVE` and its siblings keep their
+  paths. `ReducedActivityError` and `ReducedRowActivityError` are public and
+  gain a `Data` variant for an engine that cannot supply consistent data.
+- `corrector::run` refuses a step or a converged iterate whose length is not
+  the KKT system's. `Solver::correct_step` already refused a short step, so this
+  changes nothing over pounce's own solve.
+- `pounce_sensitivity::index` is `pounce_sens_core::index`, re-exported.
+  `SolverError` and `BARRIER_SIGN` are defined in `pounce_sens_core::converged`
+  and re-exported from `pounce_sensitivity::solver`.
+- `covariance` with a per-group `sigma_sq` that misses a group raises before
+  the classification's warnings rather than after them.
+
 ## [0.13.0] - 2026-10-22
 
 ### Added
