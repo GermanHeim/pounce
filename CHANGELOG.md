@@ -135,6 +135,16 @@ changes.
   and re-exported from `pounce_sensitivity::solver`.
 - `covariance` with a per-group `sigma_sq` that misses a group raises before
   the classification's warnings rather than after them.
+### Fixed
+- **A convex QCQP whose ball sits far from the origin now solves on the
+  conic path (gh #1041).** `min x s.t. (x − 1000)² ≤ 1` under
+  `solver_selection=socp` (and Python's `minimize(..., solver_selection="auto")`)
+  stopped at the infeasible `x ≈ 1003.41` and exited 1; it now returns
+  `x* = 999`. Each quadratic constraint was put into its second-order cone
+  uncentred, so the cone carried two ~10⁶-sized terms whose difference *is*
+  the constraint. The reformulation now completes the square first, in both
+  the CLI and the Python router. Python's `auto` also now re-solves a conic
+  `numerical_failure` on the NLP path, matching the CLI.
 
 ## [0.13.0] - 2026-10-22
 

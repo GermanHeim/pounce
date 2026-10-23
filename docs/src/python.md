@@ -788,7 +788,7 @@ choice — mirroring the CLI option of the same name:
 | `solver_selection=…` | Behavior |
 |---|---|
 | `"nlp"` | **Default.** Skip routing entirely; always use the NLP solver — no probe overhead. |
-| `"auto"` | Probe-and-validate; route provable LP/convex-QP to `solve_qp`, a convex QCQP to `solve_socp`, else NLP. |
+| `"auto"` | Probe-and-validate; route provable LP/convex-QP to `solve_qp`, a convex QCQP to `solve_socp`, else NLP. A conic solve that ends in `numerical_failure` is re-solved on the NLP path with a `RuntimeWarning`, as the CLI's `auto` does (`"socp"` keeps the conic verdict). |
 | `"lp-ipm"` | Force the convex solver; raise `ValueError` if the problem is not detected as an LP. |
 | `"qp-ipm"` | Force the convex solver; raise `ValueError` if it is not detected as a convex LP/QP. |
 | `"socp"` | Force the conic solver; raise `ValueError` if it is not detected as a convex QCQP. |

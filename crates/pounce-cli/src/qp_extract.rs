@@ -558,6 +558,13 @@ struct SocBlock {
 /// standard SOC: writing `s = −(aᵀx + b_eff)`, the cone slack
 /// `(s+1, s−1, √2·Fx)` lies in the second-order cone iff `‖Fx‖² ≤ 2s`, i.e.
 /// iff the original constraint holds.
+///
+/// The cone is **centred** first (gh #1041): the part of `a` in the range of
+/// `Fᵀ` is absorbed by completing the square, `Fᵀw = a_∥`, so the constraint
+/// becomes `½‖Fx + w‖² + a_⊥ᵀx + (b_eff − ½‖w‖²) ≤ 0` and the cone slack is
+/// `(s+1, s−1, √2·(Fx + w))` with `s = −(a_⊥ᵀx + b_eff − ½‖w‖²)`. See
+/// [`centre_soc`] for why the uncentred form fails on a ball far from the
+/// origin.
 pub fn extract_socp_with_map(
     prob: &NlProblem,
     relax: BoundRelax,
@@ -693,27 +700,29 @@ pub fn extract_socp_with_map(
     for blk in soc_blocks {
         let r = blk.f_rows.len();
         let dim = r + 2;
+        // Complete the square: `a = Fᵀw + a_⊥`, `b = b_eff − ½‖w‖²`.
+        let (a_perp, w) = centre_soc(&blk.f_rows, &blk.a);
+        let b_c = blk.b_eff - 0.5 * w.iter().map(|v| v * v).sum::<f64>();
         let row0 = next_row(&h);
-        // s0 = (1 − b_eff) − aᵀx  →  G row = a, h = 1 − b_eff.
-        for &(var, coef) in &blk.a {
+        // s0 = (1 − b) − a_⊥ᵀx  →  G row = a_⊥, h = 1 − b.
+        for &(var, coef) in &a_perp {
             g.push(Triplet::new(row0, var, coef));
         }
-        h.push(1.0 - blk.b_eff);
+        h.push(1.0 - b_c);
         let row1 = next_row(&h);
-        // s1 = −(1 + b_eff) − aᵀx  →  G row = a, h = −(1 + b_eff).
-        for &(var, coef) in &blk.a {
+        // s1 = −(1 + b) − a_⊥ᵀx  →  G row = a_⊥, h = −(1 + b).
+        for &(var, coef) in &a_perp {
             g.push(Triplet::new(row1, var, coef));
         }
-        h.push(-(1.0 + blk.b_eff));
-        // s_{2+k} = √2·(Fx)_k  →  G row = −√2·F_k, h = 0. `f` is indexed by
-        // position within the row's support, so scatter back through it.
+        h.push(-(1.0 + b_c));
+        // s_{2+k} = √2·(Fx + w)_k  →  G row = −√2·F_k, h = √2·w_k.
         let sqrt2 = std::f64::consts::SQRT_2;
-        for f in &blk.f_rows {
+        for (f, &wk) in blk.f_rows.iter().zip(&w) {
             let gr = next_row(&h);
             for &(var, fv) in f {
                 g.push(Triplet::new(gr, var, -sqrt2 * fv));
             }
-            h.push(0.0);
+            h.push(sqrt2 * wk);
         }
         cones.push(ConeSpec::SecondOrder(dim));
         con_map[blk.con_idx] = ConSocpMap::Quad {
@@ -770,6 +779,138 @@ pub fn recover_socp_duals(
             ConSocpMap::Quad { z_row0, z_row1 } => sign * (z[*z_row0] + z[*z_row1]),
         })
         .collect()
+}
+
+/// Split a quadratic row's linear part `a` into `Fᵀw + a_⊥` (gh #1041),
+/// returning `(a_⊥, w)` with `w` indexed like `f_rows`.
+///
+/// Without this the rotated cone carries `‖Fx‖²` and `2s = −2(aᵀx + b_eff)`
+/// as two separate, huge quantities whose *difference* is the constraint: on
+/// `(x − 1000)² ≤ 1` both are ~2·10⁶ at the optimum while the ball's radius is
+/// 1, so the cone is pinned to its boundary to six digits and the conic IPM
+/// stalls at an infeasible point (x ≈ 1003.4). Centred, the same row is
+/// `(2, 0, 2(x − 1000))` — the explicit SOC `pounce.solve_socp` solves
+/// exactly. The cancellation still happens, but once, in the scalar
+/// `b_eff − ½‖w‖²`, not inside every iterate.
+///
+/// `w` is the least-squares solution of `Fᵀw = a` (normal equations
+/// `FFᵀw = Fa`, positive definite because the factor rows are linearly
+/// independent by construction). A diagonal factor — one variable per row —
+/// takes the closed form `w_k = a_i / f_k` and leaves `a_⊥` exactly zero on
+/// the factored variables. Otherwise a residual entry at roundoff level of the
+/// two terms it is the difference of is set to zero, so a ball whose centre
+/// is in range does not keep a spurious `1e-16`-scale linear term.
+fn centre_soc(f_rows: &[Vec<(usize, f64)>], a: &[(usize, f64)]) -> (Vec<(usize, f64)>, Vec<f64>) {
+    use std::collections::BTreeMap;
+    let r = f_rows.len();
+    if r == 0 {
+        return (a.to_vec(), Vec::new());
+    }
+    let a_map: BTreeMap<usize, f64> = a.iter().copied().collect();
+    let a_at = |var: usize| a_map.get(&var).copied().unwrap_or(0.0);
+
+    let diagonal = f_rows.iter().all(|f| f.len() == 1) && {
+        let mut vars: Vec<usize> = f_rows.iter().map(|f| f[0].0).collect();
+        vars.sort_unstable();
+        vars.windows(2).all(|p| p[0] != p[1])
+    };
+    if diagonal {
+        let w: Vec<f64> = f_rows.iter().map(|f| a_at(f[0].0) / f[0].1).collect();
+        let covered: std::collections::BTreeSet<usize> = f_rows.iter().map(|f| f[0].0).collect();
+        let a_perp = a
+            .iter()
+            .copied()
+            .filter(|(v, _)| !covered.contains(v))
+            .collect();
+        return (a_perp, w);
+    }
+
+    // Normal equations `M w = F a`, `M = F Fᵀ` (r×r, SPD).
+    let dense_rows: Vec<BTreeMap<usize, f64>> =
+        f_rows.iter().map(|f| f.iter().copied().collect()).collect();
+    let dot = |x: &BTreeMap<usize, f64>, y: &[(usize, f64)]| -> f64 {
+        y.iter()
+            .map(|(v, c)| c * x.get(v).copied().unwrap_or(0.0))
+            .sum()
+    };
+    let mut m = vec![0.0; r * r];
+    for i in 0..r {
+        for j in 0..=i {
+            let v = dot(&dense_rows[i], &f_rows[j]);
+            m[i * r + j] = v;
+            m[j * r + i] = v;
+        }
+    }
+    let mut w: Vec<f64> = f_rows
+        .iter()
+        .map(|f| f.iter().map(|&(v, c)| c * a_at(v)).sum())
+        .collect();
+    // Cholesky M = L Lᵀ in place (lower triangle), then two triangular solves.
+    for j in 0..r {
+        let diag = m[j * r + j];
+        let mut d = diag;
+        for k in 0..j {
+            d -= m[j * r + k] * m[j * r + k];
+        }
+        // A dependent row's pivot is the difference of `diag` and what the
+        // earlier rows explain of it, so it lands at roundoff of `diag` —
+        // often just *above* zero — not at zero. Testing `d <= 0` alone let
+        // that through and solved with a pivot of pure noise.
+        if d.is_nan() || d <= 16.0 * f64::EPSILON * diag {
+            // Numerically rank-deficient factor: leave the cone uncentred,
+            // which is exactly the pre-gh#1041 reformulation. Traced, because
+            // an offset ball that lands here is back to the conditioning
+            // gh#1041 fixed and would otherwise fail with no clue why.
+            tracing::debug!(
+                target: "pounce::socp",
+                rank = r, pivot = j, value = d,
+                "centre_soc: FFᵀ not positive definite; SOC block left uncentred"
+            );
+            return (a.to_vec(), vec![0.0; r]);
+        }
+        let d = d.sqrt();
+        m[j * r + j] = d;
+        for i in (j + 1)..r {
+            let mut v = m[i * r + j];
+            for k in 0..j {
+                v -= m[i * r + k] * m[j * r + k];
+            }
+            m[i * r + j] = v / d;
+        }
+    }
+    for i in 0..r {
+        for k in 0..i {
+            w[i] -= m[i * r + k] * w[k];
+        }
+        w[i] /= m[i * r + i];
+    }
+    for i in (0..r).rev() {
+        for k in (i + 1)..r {
+            w[i] -= m[k * r + i] * w[k];
+        }
+        w[i] /= m[i * r + i];
+    }
+
+    // a_⊥ = a − Fᵀw over the union of a's and F's supports.
+    let mut ftw: BTreeMap<usize, f64> = BTreeMap::new();
+    for (f, &wk) in f_rows.iter().zip(&w) {
+        for &(v, c) in f {
+            *ftw.entry(v).or_insert(0.0) += c * wk;
+        }
+    }
+    let mut vars: Vec<usize> = a_map.keys().chain(ftw.keys()).copied().collect();
+    vars.sort_unstable();
+    vars.dedup();
+    let a_perp = vars
+        .into_iter()
+        .filter_map(|v| {
+            let (av, fv) = (a_at(v), ftw.get(&v).copied().unwrap_or(0.0));
+            let res = av - fv;
+            let roundoff = 16.0 * f64::EPSILON * av.abs().max(fv.abs());
+            (res.abs() > roundoff).then_some((v, res))
+        })
+        .collect();
+    (a_perp, w)
 }
 
 /// Factor one quadratic row's Hessian `Q` into sparse rows `f_k` (in the
@@ -1498,6 +1639,71 @@ mod tests {
             "the surviving row is √1e-20, got {}",
             rows[1][1]
         );
+    }
+
+    /// gh #1041: `centre_soc` must split `a` into `Fᵀw + a_⊥` exactly, on
+    /// both of its branches — the diagonal closed form and the normal
+    /// equations — and leave `a_⊥` zero where `a` is in range.
+    #[test]
+    fn centre_soc_splits_a_into_range_and_complement() {
+        let check = |f_rows: &[Vec<(usize, f64)>], a: &[(usize, f64)], n: usize| {
+            let (a_perp, w) = centre_soc(f_rows, a);
+            let mut back = vec![0.0; n];
+            for (f, wk) in f_rows.iter().zip(&w) {
+                for &(v, c) in f {
+                    back[v] += c * wk;
+                }
+            }
+            for &(v, c) in &a_perp {
+                back[v] += c;
+            }
+            let mut want = vec![0.0; n];
+            for &(v, c) in a {
+                want[v] += c;
+            }
+            for i in 0..n {
+                assert!(
+                    (back[i] - want[i]).abs() <= 1e-9 * want[i].abs().max(1.0),
+                    "Fᵀw + a_⊥ ≠ a at {i}: {back:?} vs {want:?}"
+                );
+            }
+            a_perp
+        };
+        // Diagonal: (x0 − 1000)² + (x1 − 5)² with a linear term in x2.
+        let s2 = std::f64::consts::SQRT_2;
+        let a_perp = check(
+            &[vec![(0, s2)], vec![(1, s2)]],
+            &[(0, -2000.0), (1, -10.0), (2, 3.0)],
+            3,
+        );
+        assert_eq!(a_perp, vec![(2, 3.0)], "in-range part must leave exactly");
+        // Coupled: Q = [[8, −4], [−4, 8]] (from (x+y)² + 3(x−y)², doubled),
+        // a = Q·(1000, 1000) − e₂ so the residual is the x2 term only.
+        let f = psd_outer_factor(vec![8.0, -4.0, -4.0, 8.0], 2)
+            .into_iter()
+            .map(|r| {
+                r.into_iter()
+                    .enumerate()
+                    .filter(|&(_, v)| v != 0.0)
+                    .collect()
+            })
+            .collect::<Vec<Vec<(usize, f64)>>>();
+        let a_perp = check(&f, &[(0, -4000.0), (1, -4000.0), (2, -1.0)], 3);
+        assert_eq!(a_perp, vec![(2, -1.0)], "roundoff in range must be dropped");
+    }
+
+    /// The fallback branch of `centre_soc`: factor rows that are linearly
+    /// dependent make `FFᵀ` singular, and the block must come back exactly
+    /// uncentred (`a_⊥ = a`, `w = 0`). Before the pivot test was relative,
+    /// this case's second pivot came out at roundoff *above* zero and the
+    /// solve returned `w = (48, −2048)` from a pivot of pure noise.
+    #[test]
+    fn centre_soc_falls_back_to_uncentred_on_a_singular_gram() {
+        let row = vec![(0, 1.0), (1, 1.0)];
+        let a = [(0, -2000.0), (1, -2000.0)];
+        let (a_perp, w) = centre_soc(&[row.clone(), row], &a);
+        assert_eq!(a_perp, a.to_vec());
+        assert_eq!(w, vec![0.0, 0.0]);
     }
 
     /// min (x0)^2 + (x1)^2 s.t. x0 + x1 = 2, no var bounds → (1,1), f*=2.
