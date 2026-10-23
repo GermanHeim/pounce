@@ -26,12 +26,37 @@ pub enum SqpGlobalization {
 /// - `Lbfgs`: limited-memory BFGS with a circular `(s, y)` buffer
 ///   of `lbfgs_max_history` pairs (Nocedal-Wright §7.2; Byrd-
 ///   Nocedal-Schnabel 1994). See [`crate::sqp::lbfgs::LBfgs`].
+/// - `QuasiNewtonAuto`: what `hessian_approximation=limited-memory`
+///   selects — `DampedBfgs` up to [`SqpOptions::dense_hessian_max_n`]
+///   variables, `Lbfgs` above it, decided per solve from the problem's
+///   `n` (gh#1054). The dense update is the more robust of the two on
+///   small models (issue #358) but needs `n²` storage and makes every QP
+///   factorization dense, which a 15 000-variable model cannot afford.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SqpHessianSource {
     #[default]
     Exact,
     DampedBfgs,
     Lbfgs,
+    QuasiNewtonAuto,
+}
+
+impl SqpHessianSource {
+    /// The concrete source a solve of `n` variables uses: resolves
+    /// `QuasiNewtonAuto`, passes every other source through.
+    pub fn resolve(self, n: usize, dense_hessian_max_n: usize) -> Self {
+        match self {
+            Self::QuasiNewtonAuto if n <= dense_hessian_max_n => Self::DampedBfgs,
+            Self::QuasiNewtonAuto => Self::Lbfgs,
+            other => other,
+        }
+    }
+
+    /// Whether this source approximates the Hessian (and is therefore
+    /// positive definite by construction) rather than evaluating it.
+    pub fn is_quasi_newton(self) -> bool {
+        !matches!(self, Self::Exact)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +108,14 @@ pub struct SqpOptions {
     /// recommends 3–20). Ignored for `Exact` and `DampedBfgs`.
     pub lbfgs_max_history: u32,
 
+    /// Largest `n` at which a quasi-Newton Hessian is handed to the QP as a
+    /// dense matrix (`sqp_dense_hessian_max_n`). Above it, `Lbfgs` poses the
+    /// QP in its lifted low-rank form
+    /// ([`crate::sqp::SqpQpData::build_low_rank`]) and `QuasiNewtonAuto`
+    /// resolves to `Lbfgs` rather than `DampedBfgs`. At or below it nothing
+    /// changes from before gh#1054. Default 1000.
+    pub dense_hessian_max_n: usize,
+
     /// Solve-wide time budget (`max_wall_time` / `max_cpu_time`), the
     /// same [`Deadline`] the interior-point arm checks. `None` means
     /// unlimited and is the default for a directly constructed driver.
@@ -110,6 +143,7 @@ impl Default for SqpOptions {
             bt_min_alpha: 1e-12,
             print_level: 0,
             lbfgs_max_history: 6,
+            dense_hessian_max_n: 1000,
             deadline: None,
         }
     }

@@ -649,6 +649,13 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
         6,
         "Limited-memory BFGS keeps a circular buffer of the most-recent (s, y) curvature pairs; this option caps that buffer length. Mirrors upstream's \"limited_memory_max_history\". Only consulted when \"algorithm\" is \"active-set-sqp\" and \"sqp_hessian\" is \"lbfgs\".",
     )?;
+    r.add_lower_bounded_integer_option(
+        "sqp_dense_hessian_max_n",
+        "Largest problem size at which the SQP hands a quasi-Newton Hessian to its QP as a dense matrix.",
+        0,
+        1000,
+        "Active-set SQP only, and only for quasi-Newton Hessians. A BFGS matrix is dense, so as a QP Hessian it costs n^2 storage and makes every factorization of the step QP dense; at n = 15 000 the first QP of a collocation model did not finish in 30 minutes (gh#1054). Above this size, \"sqp_hessian=lbfgs\" poses the step QP in a lifted low-rank form instead -- one extra variable and one equality row per stored term, w_i = v_i^T p -- which keeps the QP sparse and computes the same step; and \"hessian_approximation=limited-memory\" (which the Python frontend and the CasADi plugin set when no exact Hessian exists) selects that limited-memory update instead of the dense damped BFGS it selects at or below this size. An explicit \"sqp_hessian=damped-bfgs\" is always dense. Default 1000.",
+    )?;
     // ----- Crossover (`crossover*`) -----
     //
     // Post-convergence purification of the interior-point iterate onto an
@@ -713,6 +720,61 @@ pub fn register_all_upstream_options(r: &RegisteredOptions) -> Result<(), Solver
          Should exceed the barrier parameter at termination, since the \
          fraction-to-boundary rule leaves an active constraint slack by \
          O(mu). Only consulted when \"crossover\" is \"yes\".",
+    )?;
+    // ----- Interior-point → active-set handover (`ipm_sqp_handover*`) -----
+    //
+    // gh#1054. Crossover *before* convergence: the same bridge
+    // (`crate::crossover::run`), offered iterates the interior method has
+    // not finished with, so the SQP can take over the tail. Implemented in
+    // `crate::handover`; off by default, and moves no trajectory while off.
+    r.add_bool_option(
+        "ipm_sqp_handover",
+        "Hand the interior-point iterate to the active-set SQP before convergence.",
+        false,
+        "When yes, every interior-point iterate that has not yet converged is \
+         offered to the handover trigger (\"ipm_sqp_handover_tol\", \
+         \"ipm_sqp_handover_stall_iter\"). When it fires, the active set is \
+         identified from the multipliers against the slacks (primal tolerance \
+         max(\"crossover_primal_tol\", sqrt(mu))), one QP step is taken over \
+         it, and if that does not meet the stopping tolerances the full \
+         active-set SQP runs from that working set for up to \
+         \"crossover_max_iter\" iterations. A point that meets the tolerances \
+         ends the solve as Solve_Succeeded; anything else leaves the interior \
+         iteration exactly where it was, and it continues. Meant for models \
+         whose interior-point tail is long once the active set is settled \
+         (gh#1054: pseudospectral optimal control). Only on the interior-point \
+         path.",
+    )?;
+    r.add_lower_bounded_number_option(
+        "ipm_sqp_handover_tol",
+        "Overall NLP error at which the handover is attempted.",
+        0.0,
+        true,
+        1e-4,
+        "A loosened \"tol\": once the interior-point overall NLP error is at \
+         or below this, the handover is attempted. Only consulted when \
+         \"ipm_sqp_handover\" is yes.",
+    )?;
+    r.add_lower_bounded_integer_option(
+        "ipm_sqp_handover_stall_iter",
+        "Iterations without halving the NLP error after which the handover is attempted.",
+        0,
+        0,
+        "Attempt the handover once the best overall NLP error seen has not \
+         halved in this many iterations, whatever its value -- the oscillating \
+         tail gh#1054 describes. 0 disables the test. After a declined attempt \
+         the next one waits until the error is ten times smaller or another \
+         window has passed. Only consulted when \"ipm_sqp_handover\" is yes.",
+    )?;
+    r.add_lower_bounded_integer_option(
+        "ipm_sqp_handover_max_attempts",
+        "Maximum number of handover attempts per solve.",
+        0,
+        3,
+        "Each attempt costs at least one QP solve at the size of the model, and \
+         a declined one changes nothing, so this caps what a model whose active \
+         set never settles can spend on them. Only consulted when \
+         \"ipm_sqp_handover\" is yes.",
     )?;
     // ----- Inner QP-subproblem knobs (`sqp_qp_*`) -----
     //

@@ -1636,3 +1636,249 @@ fn issue_1054_crossover_declines_on_a_spent_budget_and_keeps_the_interior_point(
     assert_eq!(report.declined, Some(CrossoverDecline::TimeLimit));
     assert_eq!(report.n_qp_solves, 0);
 }
+
+// ─────────────────────────────────────────────────────────────────
+// gh#1054: L-BFGS in lifted low-rank form.
+// ─────────────────────────────────────────────────────────────────
+
+/// `min ½‖x − t‖² + ¼ Σ xᵢ⁴  s.t.  xᵢ − xᵢ₊₁ ≤ 0.5,  Σ xᵢ = n/2,  −1 ≤ xᵢ ≤ 0.8`
+/// — sparse, bounded, with a dense-coupling equality and a chain of
+/// inequalities, so both bounds and rows enter the working set.
+struct ChainNlp {
+    n: usize,
+}
+
+impl ChainNlp {
+    fn target(i: usize) -> f64 {
+        ((i * 7919) % 13) as f64 / 6.0 - 0.5
+    }
+}
+
+impl SqpProblemSpec for ChainNlp {
+    fn n(&self) -> usize {
+        self.n
+    }
+    fn m(&self) -> usize {
+        self.n
+    }
+    fn x_init(&self) -> Vec<f64> {
+        vec![0.0; self.n]
+    }
+    fn variable_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![-1.0; self.n], vec![0.8; self.n])
+    }
+    fn constraint_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        // Row 0 is the equality; rows 1.. the chain.
+        let mut bl = vec![NLP_LOWER_BOUND_INF; self.n];
+        let mut bu = vec![0.5; self.n];
+        bl[0] = self.n as f64 / 2.0 * 0.3;
+        bu[0] = bl[0];
+        (bl, bu)
+    }
+    fn eval_f(&mut self, x: &[f64]) -> f64 {
+        x.iter()
+            .enumerate()
+            .map(|(i, &v)| 0.5 * (v - Self::target(i)).powi(2) + 0.25 * v.powi(4))
+            .sum()
+    }
+    fn eval_grad_f(&mut self, x: &[f64]) -> Vec<f64> {
+        x.iter()
+            .enumerate()
+            .map(|(i, &v)| v - Self::target(i) + v.powi(3))
+            .collect()
+    }
+    fn eval_c(&mut self, x: &[f64]) -> Vec<f64> {
+        let mut c = vec![x.iter().sum::<f64>()];
+        c.extend((1..self.n).map(|i| x[i - 1] - x[i]));
+        c
+    }
+    fn eval_jac_c(&mut self, _x: &[f64]) -> Triplet {
+        let (mut irow, mut jcol, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        for j in 0..self.n {
+            irow.push(1);
+            jcol.push(j as Index + 1);
+            vals.push(1.0);
+        }
+        for i in 1..self.n {
+            irow.extend([i as Index + 1, i as Index + 1]);
+            jcol.extend([i as Index, i as Index + 1]);
+            vals.extend([1.0, -1.0]);
+        }
+        Triplet {
+            n_rows: self.n,
+            n_cols: self.n,
+            irow,
+            jcol,
+            vals,
+        }
+    }
+    fn eval_hess_lag(&mut self, x: &[f64], _lambda_g: &[f64]) -> Triplet {
+        Triplet {
+            n_rows: self.n,
+            n_cols: self.n,
+            irow: (1..=self.n as Index).collect(),
+            jcol: (1..=self.n as Index).collect(),
+            vals: x.iter().map(|v| 1.0 + 3.0 * v * v).collect(),
+        }
+    }
+}
+
+fn solve_chain(n: usize, hessian: SqpHessianSource, dense_max_n: usize) -> crate::sqp::SqpResult {
+    let qp_solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let opts = SqpOptions {
+        hessian,
+        dense_hessian_max_n: dense_max_n,
+        max_iter: 200,
+        ..SqpOptions::default()
+    };
+    SqpAlgorithm::new(qp_solver, opts)
+        .optimize(&mut ChainNlp { n })
+        .unwrap()
+}
+
+#[test]
+fn issue_1054_lifted_lbfgs_reaches_the_dense_lbfgs_answer() {
+    // Same update, same pairs: the lifted QP computes the same step as the
+    // dense one, so the two solves must land on the same point.
+    let dense = solve_chain(40, SqpHessianSource::Lbfgs, usize::MAX);
+    let lifted = solve_chain(40, SqpHessianSource::Lbfgs, 0);
+    assert_eq!(dense.status, SqpStatus::Optimal, "dense: {dense:?}");
+    assert_eq!(lifted.status, SqpStatus::Optimal, "lifted: {lifted:?}");
+    let exact = solve_chain(40, SqpHessianSource::Exact, usize::MAX);
+    assert_eq!(exact.status, SqpStatus::Optimal);
+    for i in 0..40 {
+        assert!(
+            (lifted.x[i] - exact.x[i]).abs() < 1e-5,
+            "x[{i}]: lifted {} vs exact {}",
+            lifted.x[i],
+            exact.x[i]
+        );
+        assert!((lifted.x[i] - dense.x[i]).abs() < 1e-5);
+    }
+    assert!((lifted.obj - exact.obj).abs() < 1e-8 * exact.obj.abs().max(1.0));
+    // The working set comes back in the NLP's dimensions, lift stripped.
+    let ws = lifted.working_set.expect("a QP was solved");
+    assert_eq!((ws.bounds.len(), ws.constraints.len()), (40, 40));
+}
+
+#[test]
+fn issue_1054_quasi_newton_auto_resolves_by_size() {
+    use SqpHessianSource::*;
+    assert_eq!(QuasiNewtonAuto.resolve(1000, 1000), DampedBfgs);
+    assert_eq!(QuasiNewtonAuto.resolve(1001, 1000), Lbfgs);
+    assert_eq!(
+        DampedBfgs.resolve(1_000_000, 1000),
+        DampedBfgs,
+        "explicit choice stands"
+    );
+    assert_eq!(Exact.resolve(1_000_000, 1000), Exact);
+}
+
+/// `min Σ ½(xᵢ − tᵢ)² + ¼ xᵢ⁴  s.t.  Σ xᵢ = n/10,  −1 ≤ xᵢ ≤ 0.8`, where
+/// only every 1000th target lies outside the box, started feasible: a few
+/// dozen working-set changes at any `n`, so the cost measured is the QP's
+/// size and not the length of a cold active-set walk.
+struct FewActiveNlp {
+    n: usize,
+}
+
+impl FewActiveNlp {
+    fn target(i: usize) -> f64 {
+        if i % 1000 == 7 {
+            1.5
+        } else {
+            0.1 + 0.05 * ((i % 7) as f64 - 3.0)
+        }
+    }
+}
+
+impl SqpProblemSpec for FewActiveNlp {
+    fn n(&self) -> usize {
+        self.n
+    }
+    fn m(&self) -> usize {
+        1
+    }
+    fn x_init(&self) -> Vec<f64> {
+        vec![0.1; self.n]
+    }
+    fn variable_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        (vec![-1.0; self.n], vec![0.8; self.n])
+    }
+    fn constraint_bounds(&self) -> (Vec<f64>, Vec<f64>) {
+        let c = self.n as f64 / 10.0;
+        (vec![c], vec![c])
+    }
+    fn eval_f(&mut self, x: &[f64]) -> f64 {
+        x.iter()
+            .enumerate()
+            .map(|(i, &v)| 0.5 * (v - Self::target(i)).powi(2) + 0.25 * v.powi(4))
+            .sum()
+    }
+    fn eval_grad_f(&mut self, x: &[f64]) -> Vec<f64> {
+        x.iter()
+            .enumerate()
+            .map(|(i, &v)| v - Self::target(i) + v.powi(3))
+            .collect()
+    }
+    fn eval_c(&mut self, x: &[f64]) -> Vec<f64> {
+        vec![x.iter().sum()]
+    }
+    fn eval_jac_c(&mut self, _x: &[f64]) -> Triplet {
+        Triplet {
+            n_rows: 1,
+            n_cols: self.n,
+            irow: vec![1; self.n],
+            jcol: (1..=self.n as Index).collect(),
+            vals: vec![1.0; self.n],
+        }
+    }
+    fn eval_hess_lag(&mut self, x: &[f64], _lambda_g: &[f64]) -> Triplet {
+        Triplet {
+            n_rows: self.n,
+            n_cols: self.n,
+            irow: (1..=self.n as Index).collect(),
+            jcol: (1..=self.n as Index).collect(),
+            vals: x.iter().map(|v| 1.0 + 3.0 * v * v).collect(),
+        }
+    }
+}
+
+#[test]
+fn issue_1054_quasi_newton_at_twenty_thousand_variables() {
+    // A dense BFGS matrix here is 2·10⁸ stored entries (1.6 GB as a
+    // triplet's values alone) and every QP factorization dense — before
+    // gh#1054 this is what `hessian_approximation=limited-memory` handed
+    // the QP at any size. `QuasiNewtonAuto` must route to the lifted form by
+    // itself, and the solve must then cost what a sparse QP costs.
+    let n = 20_000;
+    let qp_solver =
+        ParametricActiveSetSolver::new(Box::new(pounce_feral::FeralSolverInterface::new()));
+    let opts = SqpOptions {
+        hessian: SqpHessianSource::QuasiNewtonAuto,
+        max_iter: 200,
+        ..SqpOptions::default()
+    };
+    let t = std::time::Instant::now();
+    let res = SqpAlgorithm::new(qp_solver, opts)
+        .optimize(&mut FewActiveNlp { n })
+        .unwrap();
+    assert_eq!(
+        res.status,
+        SqpStatus::Optimal,
+        "{:?} after {} iters",
+        res.status,
+        res.n_iter
+    );
+    assert!(
+        t.elapsed() < std::time::Duration::from_secs(120),
+        "took {:?}",
+        t.elapsed()
+    );
+    assert!((res.x.iter().sum::<f64>() - n as f64 / 10.0).abs() < 1e-6);
+    // The out-of-box targets end on their upper bound.
+    for i in (7..n).step_by(1000) {
+        assert!((res.x[i] - 0.8).abs() < 1e-6, "x[{i}] = {}", res.x[i]);
+    }
+}

@@ -28,7 +28,7 @@ use crate::sqp::result::{SqpError, SqpResult, SqpStatus};
 use pounce_common::types::{NLP_LOWER_BOUND_INF, NLP_UPPER_BOUND_INF, Number};
 use pounce_linalg::triplet::GenTMatrix;
 use pounce_qp::{
-    HessianInertia, ParametricActiveSetSolver, QpOptions, QpProblem, QpSolver, QpStatus, WorkingSet,
+    HessianInertia, ParametricActiveSetSolver, QpOptions, QpSolver, QpStatus, WorkingSet,
 };
 
 /// Header for the `sqp_print_level >= 1` iteration table.
@@ -127,6 +127,9 @@ pub struct SqpAlgorithm {
     qp_solver: ParametricActiveSetSolver,
     qp_opts: QpOptions,
     opts: SqpOptions,
+    /// `opts.hessian` resolved for the current solve's `n` (see
+    /// [`SqpHessianSource::resolve`]); set at the top of every solve.
+    hessian: SqpHessianSource,
     iterates: Option<SqpIterates>,
     /// Filter for Fletcher-Leyffer globalization; reset at the
     /// top of each `optimize` call. Unused when
@@ -139,6 +142,7 @@ impl SqpAlgorithm {
         Self {
             qp_solver,
             qp_opts: QpOptions::sqp_subproblem(),
+            hessian: opts.hessian,
             opts,
             iterates: None,
             filter: SqpFilter::new(),
@@ -194,6 +198,21 @@ impl SqpAlgorithm {
     /// payload — each `optimize` call rebuilds its own Hessian
     /// approximation from scratch.
     pub fn optimize_with_warm_start<N: SqpProblemSpec>(
+        &mut self,
+        nlp: &mut N,
+        warm: Option<SqpIterates>,
+    ) -> Result<SqpResult, SqpError> {
+        // The step-QP iteration budget scales with the problem unless the
+        // caller set one (gh#1054). Restored afterwards, so a reused driver
+        // re-derives it for the next problem's size.
+        let saved = self.qp_opts.max_iter;
+        self.qp_opts.max_iter = step_qp_iter_budget(saved, nlp.n(), nlp.m());
+        let res = self.optimize_inner(nlp, warm);
+        self.qp_opts.max_iter = saved;
+        res
+    }
+
+    fn optimize_inner<N: SqpProblemSpec>(
         &mut self,
         nlp: &mut N,
         warm: Option<SqpIterates>,
@@ -288,13 +307,17 @@ impl SqpAlgorithm {
         // matrix is updated at the END of each iteration (after
         // we have x_new and the next ∇L), then queried at the
         // TOP of the next iteration to populate the QP Hessian.
-        let mut bfgs: Option<DampedBfgs> =
-            if matches!(self.opts.hessian, SqpHessianSource::DampedBfgs) {
-                Some(DampedBfgs::new(n))
-            } else {
-                None
-            };
-        let mut lbfgs: Option<LBfgs> = if matches!(self.opts.hessian, SqpHessianSource::Lbfgs) {
+        self.hessian = self.opts.hessian.resolve(n, self.opts.dense_hessian_max_n);
+        // L-BFGS above the dense ceiling goes to the QP in product form,
+        // lifted (gh#1054); below it, as the dense matrix it always was.
+        let lift_lbfgs =
+            self.hessian == SqpHessianSource::Lbfgs && n > self.opts.dense_hessian_max_n;
+        let mut bfgs: Option<DampedBfgs> = if matches!(self.hessian, SqpHessianSource::DampedBfgs) {
+            Some(DampedBfgs::new(n))
+        } else {
+            None
+        };
+        let mut lbfgs: Option<LBfgs> = if matches!(self.hessian, SqpHessianSource::Lbfgs) {
             Some(LBfgs::new(n, self.opts.lbfgs_max_history.max(1) as usize))
         } else {
             None
@@ -335,7 +358,7 @@ impl SqpAlgorithm {
         // the objective Hessian *is* the Lagrangian Hessian and the probe
         // is exact. Otherwise leave the identity seed alone and let the
         // rank-2 updates (which see the true `∇L`) do the work.
-        if let Some(b) = bfgs.as_mut() {
+        if bfgs.is_some() || lbfgs.is_some() {
             let g0 = nlp.eval_grad_f(&iter.x);
             let g_norm = g0.iter().map(|v| v * v).sum::<Number>().sqrt();
             if g_norm.is_finite() && g_norm > 0.0 {
@@ -375,7 +398,15 @@ impl SqpAlgorithm {
                         // numerically flat); `seed_scale` ignores it, leaving
                         // the identity seed rather than a meaningless or
                         // negative scale.
-                        b.seed_scale(s_y / s_s);
+                        // L-BFGS takes the same seed (gh#1054): it used to
+                        // start from `B = I` with no probe at all, which is
+                        // the #358 overshoot this block exists to prevent.
+                        if let Some(b) = bfgs.as_mut() {
+                            b.seed_scale(s_y / s_s);
+                        }
+                        if let Some(b) = lbfgs.as_mut() {
+                            b.seed_scale(s_y / s_s);
+                        }
                     }
                 }
             }
@@ -450,7 +481,8 @@ impl SqpAlgorithm {
                 }
             }
 
-            let hess_lag = match self.opts.hessian {
+            let mut low_rank = None;
+            let hess_lag = match self.hessian {
                 SqpHessianSource::Exact => nlp.eval_hess_lag(&iter.x, &iter.lambda_g),
                 SqpHessianSource::DampedBfgs => {
                     let bfgs = bfgs.as_mut().expect("DampedBfgs state initialized above");
@@ -468,7 +500,24 @@ impl SqpAlgorithm {
                     {
                         lb.update_sy(&s, &y);
                     }
-                    lb.as_triplet()
+                    if lift_lbfgs {
+                        low_rank = Some(lb.low_rank());
+                        // Never read: the step comes from `low_rank`, and the
+                        // only other consumer (the second-order check at a
+                        // KKT point) takes the exact Hessian on this source.
+                        Triplet {
+                            n_rows: n,
+                            n_cols: n,
+                            irow: Vec::new(),
+                            jcol: Vec::new(),
+                            vals: Vec::new(),
+                        }
+                    } else {
+                        lb.as_triplet()
+                    }
+                }
+                SqpHessianSource::QuasiNewtonAuto => {
+                    unreachable!("resolved at the top of the solve")
                 }
             };
 
@@ -600,7 +649,7 @@ impl SqpAlgorithm {
                 // The L-BFGS leg is not exotic coverage: the Python frontend
                 // and the CasADi plugin both select `limited-memory` on their
                 // own whenever no exact Lagrangian Hessian is available.
-                let exact_hess = if matches!(self.opts.hessian, SqpHessianSource::Exact) {
+                let exact_hess = if matches!(self.hessian, SqpHessianSource::Exact) {
                     None
                 } else {
                     Some(nlp.eval_hess_lag(&iter.x, &iter.lambda_g))
@@ -691,19 +740,23 @@ impl SqpAlgorithm {
                 (None, own) => own,
             };
 
-            let qp_data = SqpQpData::build(
-                &iter.x,
-                &grad_f,
-                &c_vals,
-                &bl_c,
-                &bu_c,
-                &xl,
-                &xu,
-                jac_c,
-                hess_lag,
-                self.hessian_inertia(),
-            );
-            let qp = qp_data.as_qp();
+            let qp_data = match low_rank.as_ref() {
+                Some(b) => SqpQpData::build_low_rank(
+                    &iter.x, &grad_f, &c_vals, &bl_c, &bu_c, &xl, &xu, jac_c, b,
+                ),
+                None => SqpQpData::build(
+                    &iter.x,
+                    &grad_f,
+                    &c_vals,
+                    &bl_c,
+                    &bu_c,
+                    &xl,
+                    &xu,
+                    jac_c,
+                    hess_lag,
+                    self.hessian_inertia(),
+                ),
+            };
 
             // Scale-relative inner-QP tolerances (issue #358 tail).
             //
@@ -736,12 +789,7 @@ impl SqpAlgorithm {
             // on any problem in the sweep.
             const SCALE_MAX: Number = 1e6;
             let g_inf = grad_f.iter().map(|v| v.abs()).fold(0.0, f64::max);
-            let b_inf = qp_data
-                .h
-                .values()
-                .iter()
-                .map(|v| v.abs())
-                .fold(0.0, f64::max);
+            let b_inf = qp_data.hess_inf;
             let base = self.qp_opts.clone();
             self.qp_opts.time_limit = qp_time_limit;
             let scale = g_inf.max(b_inf).clamp(1.0, SCALE_MAX);
@@ -785,10 +833,7 @@ impl SqpAlgorithm {
                 // The cold error is still propagated: if a clean start fails
                 // too, the failure is not about the working set and there is
                 // nothing further to try here.
-                match self
-                    .qp_solver
-                    .solve_with_working_set(&qp, prev_w, &self.qp_opts)
-                {
+                match solve_step_qp(&mut self.qp_solver, &qp_data, Some(prev_w), &self.qp_opts) {
                     Ok(v) => v,
                     Err(e) => {
                         tracing::debug!(target: "pounce::sqp",
@@ -796,11 +841,11 @@ impl SqpAlgorithm {
                              from cold, since the carried working set is what a \
                              cold start rebuilds (gh #855)");
                         n_qp_solves += 1;
-                        self.qp_solver.solve(&qp, None, &self.qp_opts)?
+                        solve_step_qp(&mut self.qp_solver, &qp_data, None, &self.qp_opts)?
                     }
                 }
             } else {
-                self.qp_solver.solve(&qp, None, &self.qp_opts)?
+                solve_step_qp(&mut self.qp_solver, &qp_data, None, &self.qp_opts)?
             };
             n_qp_solves += 1;
             n_qp_working_set_changes += sol.stats.n_working_set_changes;
@@ -817,7 +862,7 @@ impl SqpAlgorithm {
             // issue #349 that previously reported
             // `Search_Direction_Becomes_Too_Small`.
             if warm_started && matches!(sol.status, QpStatus::MaxIter | QpStatus::NumericalError) {
-                let cold = self.qp_solver.solve(&qp, None, &self.qp_opts)?;
+                let cold = solve_step_qp(&mut self.qp_solver, &qp_data, None, &self.qp_opts)?;
                 n_qp_solves += 1;
                 n_qp_working_set_changes += cold.stats.n_working_set_changes;
                 // `Unbounded` is accepted as well as `Optimal`, and it is
@@ -890,9 +935,7 @@ impl SqpAlgorithm {
                     b.as_triplet(),
                     self.hessian_inertia(),
                 );
-                let retry = self
-                    .qp_solver
-                    .solve(&qp_data.as_qp(), None, &self.qp_opts)?;
+                let retry = solve_step_qp(&mut self.qp_solver, &qp_data, None, &self.qp_opts)?;
                 n_qp_solves += 1;
                 n_qp_working_set_changes += retry.stats.n_working_set_changes;
                 // Same as the cold retry above (gh #855): an `Unbounded`
@@ -957,7 +1000,7 @@ impl SqpAlgorithm {
                         certify_recession_ray: false,
                         ..self.qp_opts.clone()
                     };
-                    let prox = self.qp_solver.solve(&qp_data.as_qp(), None, &prox_opts)?;
+                    let prox = solve_step_qp(&mut self.qp_solver, &qp_data, None, &prox_opts)?;
                     n_qp_solves += 1;
                     if prox.status == QpStatus::Optimal {
                         sol = prox;
@@ -1147,21 +1190,17 @@ impl SqpAlgorithm {
                             bu_soc[i] = qp_data_ref.bu[i] + delta;
                         }
                     }
-                    let qp_soc = QpProblem {
-                        n: qp_data_ref.n,
-                        m: qp_data_ref.m,
-                        h: &qp_data_ref.h,
-                        g: &qp_data_ref.g,
-                        a: &qp_data_ref.a,
-                        bl: &bl_soc,
-                        bu: &bu_soc,
-                        xl: &qp_data_ref.xl,
-                        xu: &qp_data_ref.xu,
-                        hessian_inertia: qp_data_ref.hessian_inertia,
-                    };
+                    // `bl` / `bu` carry the lifted rows (if any) past `mm`;
+                    // only the NLP's own rows are re-centred.
+                    let qp_soc = qp_data_ref.as_qp_with_row_bounds(&bl_soc, &bu_soc);
                     let sol_soc = qp_solver
-                        .solve_with_working_set(&qp_soc, sol_working, qp_opts)
+                        .solve_with_working_set(
+                            &qp_soc,
+                            &qp_data_ref.lift_working_set(sol_working),
+                            qp_opts,
+                        )
                         .ok()?;
+                    let sol_soc = qp_data_ref.unlift_solution(sol_soc);
                     *n_soc += 1;
                     if sol_soc.status == QpStatus::Optimal {
                         *soc_working_slot = Some(sol_soc.working);
@@ -1296,13 +1335,14 @@ impl SqpAlgorithm {
     }
 
     fn hessian_inertia(&self) -> HessianInertia {
-        match self.opts.hessian {
+        if self.hessian.is_quasi_newton() {
+            // Damped BFGS and L-BFGS are PSD by construction. (A lifted
+            // L-BFGS subproblem sets its own, see `build_low_rank`.)
+            HessianInertia::Psd
+        } else {
             // Exact ∇²L is indefinite on nonconvex NLPs; let the
             // QP solver's §4.5 inertia control handle it.
-            crate::sqp::SqpHessianSource::Exact => HessianInertia::Indefinite,
-            // Damped BFGS and L-BFGS are PSD by construction.
-            crate::sqp::SqpHessianSource::DampedBfgs => HessianInertia::Psd,
-            crate::sqp::SqpHessianSource::Lbfgs => HessianInertia::Psd,
+            HessianInertia::Indefinite
         }
     }
 }
@@ -1911,6 +1951,48 @@ fn negative_curvature_at_kkt_point(
         *di = (0..n_dof).map(|k| z[k * n + i] * evec[k]).sum();
     }
     Some(d)
+}
+
+/// Iteration budget for one step QP.
+///
+/// `pounce-qp`'s default is a flat 200, the interior-point budget, and the
+/// wrong shape for an active-set method, which needs about one iteration per
+/// working-set change: a cold first QP on a model with thousands of active
+/// bounds cannot finish inside it, and reports `QpIterationLimit` on a
+/// subproblem it was solving correctly. Scaled exactly as
+/// `pounce_convex::active_set` scales the direct driver's (10 per variable
+/// and row, floor 200, ceiling 200 000), and like there an explicitly set
+/// `sqp_qp_max_iter` — anything but the default — wins.
+fn step_qp_iter_budget(current: u32, n: usize, m: usize) -> u32 {
+    const DEFAULT_MAX_ITER: u32 = 200;
+    const PER_DIM: usize = 10;
+    if current != DEFAULT_MAX_ITER {
+        return current;
+    }
+    n.saturating_add(m)
+        .saturating_mul(PER_DIM)
+        .clamp(200, 200_000) as u32
+}
+
+/// Solve the step QP `data` poses, warm-started from `warm` (in the NLP's
+/// dimensions) when given, and return the solution in the NLP's dimensions.
+///
+/// The one place the lifted low-rank form (gh#1054) meets the solver: the
+/// working set goes in lifted and the solution comes out unlifted, so the
+/// rest of the loop never sees the extra variables. On an unlifted
+/// subproblem both maps are the identity.
+fn solve_step_qp(
+    solver: &mut ParametricActiveSetSolver,
+    data: &SqpQpData,
+    warm: Option<&WorkingSet>,
+    opts: &QpOptions,
+) -> Result<pounce_qp::QpSolution, pounce_qp::QpError> {
+    let qp = data.as_qp();
+    let sol = match warm {
+        Some(w) => solver.solve_with_working_set(&qp, &data.lift_working_set(w), opts)?,
+        None => solver.solve(&qp, None, opts)?,
+    };
+    Ok(data.unlift_solution(sol))
 }
 
 /// What is left of `deadline`, as the wall-clock duration a step QP can take

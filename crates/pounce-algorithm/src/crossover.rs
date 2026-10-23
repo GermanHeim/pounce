@@ -206,6 +206,13 @@ pub enum CrossoverDecline {
     /// A point was produced but it is not at least as good a KKT point as the
     /// interior iterate (see [`accepts`]).
     Regressed,
+    /// The point meets the SQP's tolerances in the scaled space but not the
+    /// user's `constr_viol_tol` / `dual_inf_tol` / `compl_inf_tol` on the
+    /// model as declared (gh#1054). Scaling can shrink a row's violation by
+    /// orders of magnitude, so a point can be a scaled KKT point and an
+    /// infeasible one at once; the interior-point verdict reads user units,
+    /// and so does this gate.
+    UserTolerances,
     /// The solve's `max_wall_time` / `max_cpu_time` ran out before
     /// crossover finished (gh#1054). The interior solution stands, as on
     /// every other decline: crossover refines a converged solve, so running
@@ -275,6 +282,15 @@ impl CrossoverReport {
             kkt_after: Number::NAN,
             compl_after: Number::NAN,
         }
+    }
+
+    /// This report, turned into a decline for `reason` after the fact,
+    /// keeping its counts and residuals — what the attempt cost and found
+    /// stays visible when a later gate refuses its point.
+    pub(crate) fn decline(mut self, reason: CrossoverDecline) -> Self {
+        self.phase = None;
+        self.declined = Some(reason);
+        self
     }
 
     /// Did crossover replace the interior iterate?
