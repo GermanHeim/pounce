@@ -13,12 +13,19 @@
 //! NT-scaled space made the conic arm solve `airport` outright (18
 //! iterations, the NLP's objective), which `airport_now_solves_on_the_conic_arm`
 //! pins. A fallback with no failing input is untested, so the contract below
-//! runs on `qcqp_overflow_row.nl` instead — `min x²` subject to `x² ≤ 4` and
-//! `1e300·x ≥ 1e300` (i.e. `x ≥ 1`). The conic arm fails on that row by
-//! floating-point overflow (`1e300²`), which is a property of the data, not
-//! of a corrector, so it should not evaporate the next time the conic solver
-//! improves. Only the *routing* is asserted: the NLP's answer on a row scaled
-//! by `1e300` is its own business (it reports `x ≈ 1.01`).
+//! runs on `qcqp_ball_cost_1e22.nl` instead — `qcqp_ball` with its cost vector
+//! scaled to `(1e22, 1e22)`: `min 1e22·(x₀ + x₁)` over `‖x‖ ≤ 2`, optimum
+//! `−2√2·1e22`. The conic arm ends `Numerical failure` there across the whole
+//! band `1e20 … 1e24`, while the NLP path returns the analytic optimum to
+//! twelve figures. That failure is a real conic-arm limitation, not a contrived
+//! one; if the conic solver learns this cost scale, the explicit-`socp` test
+//! below fails and this file needs a new witness again — which is the point:
+//! the fallback must never sit untested.
+//!
+//! Extreme *constraint* magnitudes (a `1e300` row) were tried first and
+//! rejected: the conic arm fails on them too, but the NLP re-solve either ends
+//! `Restoration Failed` or trips FERAL's debug NaN/Inf assertion, so they
+//! test the NLP path's limits rather than the routing.
 //!
 //! That is the same defect shape as gh #413: a specialized fast path displaced
 //! a general one, and when the fast path failed there was no fallback left.
@@ -48,7 +55,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn run(args: &[&str]) -> (String, String, Option<i32>) {
-    run_on("qcqp_overflow_row.nl", args)
+    run_on("qcqp_ball_cost_1e22.nl", args)
 }
 
 fn run_on(name: &str, args: &[&str]) -> (String, String, Option<i32>) {
@@ -82,7 +89,9 @@ fn unverified_conic_solve_is_re_solved_on_the_nlp_path() {
         "must report an optimum after falling back; stdout=\n{stdout}"
     );
     assert!(
-        !lower.contains("numerical failure") && !lower.contains("restoration"),
+        // Not bare "restoration": the NLP summary's "Number of restoration
+        // iterations" line is ordinary output.
+        !lower.contains("numerical failure") && !lower.contains("restoration failed"),
         "the conic failure must not be the reported verdict; stdout=\n{stdout}"
     );
 }
