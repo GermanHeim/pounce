@@ -3028,7 +3028,7 @@ fn normalized_optimum_is_genuine(
     // to `tol` in the caller's own coordinates is optimal by the definition the
     // caller was given, whatever `σ` was. Every well- and moderately-scaled
     // solve leaves here, paying one residual evaluation.
-    if sol.kkt_residuals(prob).kkt_error() <= tol {
+    if cone_residuals(prob, cone, sol).kkt_error() <= tol {
         return true;
     }
     // Relative arm, admissible only where the embedding's own relative stop
@@ -3038,7 +3038,7 @@ fn normalized_optimum_is_genuine(
     let cut = sigma_path_rel_tol(tol);
     let (rstat, dscale) = stationarity_rows(prob, sol);
     crate::hsde::relative_stop_permitted(gscale.max(pscale), tol)
-        && unscaled_relative_kkt(prob, sol) <= cut
+        && unscaled_relative_kkt(prob, Some(cone), sol) <= cut
         // ... and the same question asked one row at a time, because
         // `gscale` and `pscale` are aggregates and an aggregate cannot see a
         // flat direction (gh #846, gh #875). Strictly two further conjuncts:
@@ -3870,10 +3870,42 @@ fn sigma_verdict_after_crossover(
     }
 }
 
+/// The un-normalized KKT residuals of `sol`, each cone block measured as a
+/// cone (gh #1056).
+///
+/// [`QpSolution::kkt_residuals`] reads every inequality row as an orthant row,
+/// which on a second-order block is pounce#209: a converged SOC block has
+/// rows with `Gx > h` and `zᵢsᵢ ≠ 0` — only `s₀ ≥ ‖s₁‖` and the *block*
+/// product `⟨s, z⟩` are conditions. Asked that way, the `σ` verdict rejected
+/// every normalized optimum a QCQP produced, since its per-row
+/// "complementarity" is `O(‖z‖·‖s‖)` and `z` carries the full cost scale:
+/// on `qcqp_ball` with cost `(1e14, 1e14)` the certified point read
+/// `kkt_error ≈ 4.4e14`. The cascade then fell through to the un-normalized
+/// embedding, which is exactly the solve `σ` exists to avoid, and from a cost
+/// of `1e15` up that one fails — `IterationLimit` at an infeasible point, or
+/// `NumericalFailure`.
+///
+/// On a pure orthant this is the orthant measure itself, so every QP and LP
+/// that reaches the `σ` path is judged exactly as before.
+fn cone_residuals(prob: &QpProblem, cone: &CompositeCone, sol: &QpSolution) -> QpResiduals {
+    if cone.is_orthant() {
+        sol.kkt_residuals(prob)
+    } else {
+        sol.kkt_residuals_conic(prob, &cone.specs())
+    }
+}
+
 /// Each un-normalized KKT residual of `sol` over the natural magnitude of its
 /// own terms — the ratio both `σ`-path cuts are applied to.
-fn unscaled_relative_kkt(prob: &QpProblem, sol: &QpSolution) -> f64 {
-    let res = sol.kkt_residuals(prob);
+///
+/// `cone` is the product cone the inequality rows live in; `None` is the
+/// orthant, which is all the equilibrated-path caller ever sees. See
+/// [`cone_residuals`] for why a cone-carrying caller must pass it.
+fn unscaled_relative_kkt(prob: &QpProblem, cone: Option<&CompositeCone>, sol: &QpSolution) -> f64 {
+    let res = match cone {
+        Some(cone) => cone_residuals(prob, cone, sol),
+        None => sol.kkt_residuals(prob),
+    };
     let (gscale, pscale) = unscaled_residual_scales(prob, sol);
     (res.dual_infeasibility / gscale)
         .max(res.primal_infeasibility / pscale)
@@ -3918,7 +3950,7 @@ fn unscaled_residual_scales(prob: &QpProblem, sol: &QpSolution) -> (f64, f64) {
 ///   relative `1e-10` and an absolute residual just past `tol`; gating this
 ///   caller demotes it.
 fn normalized_optimum_is_genuine_relative(prob: &QpProblem, sol: &QpSolution) -> bool {
-    unscaled_relative_kkt(prob, sol) <= FALSE_OPTIMUM_REL_TOL
+    unscaled_relative_kkt(prob, None, sol) <= FALSE_OPTIMUM_REL_TOL
 }
 
 /// Solve `prob` the way `qp_hsde=no` would — the direct driver, Ruiz-
@@ -4038,7 +4070,7 @@ where
             }
             tracing::debug!(
                 sigma,
-                kkt_error = sol.kkt_residuals(prob).kkt_error(),
+                kkt_error = cone_residuals(prob, cone, &sol).kkt_error(),
                 "convex sigma: normalized optimum rejected, re-solving un-normalized"
             );
             let sol_scalars = crate::hsde_scalars::peek();
@@ -4142,16 +4174,16 @@ where
                 .enumerate()
                 .filter(|(_, c)| c.status == QpStatus::Optimal)
                 .min_by(|(_, a), (_, b)| {
-                    a.kkt_residuals(prob)
+                    cone_residuals(prob, cone, a)
                         .kkt_error()
-                        .total_cmp(&b.kkt_residuals(prob).kkt_error())
+                        .total_cmp(&cone_residuals(prob, cone, b).kkt_error())
                 })
                 .map_or(1, |(i, _)| i);
             // gh#990: the slot describes the candidate returned.
             crate::hsde_scalars::set([sol_scalars, plain_scalars, direct_scalars][pick]);
             tracing::debug!(
                 pick,
-                kkt_error = candidates[pick].kkt_residuals(prob).kkt_error(),
+                kkt_error = cone_residuals(prob, cone, &candidates[pick]).kkt_error(),
                 status = ?candidates[pick].status,
                 "convex sigma: nothing certified, returning the closest \
                  claimed optimum"

@@ -10,6 +10,18 @@ changes.
 ## [Unreleased]
 
 ### Fixed
+- **A convex QCQP with a large cost vector now solves on the conic path
+  (gh #1056).** `qcqp_ball` with its cost scaled to `(g, g)` ended
+  `Numerical failure` on the conic arm from `g = 1e15`, and across
+  `1e16 … 1e19` it ended `Maximum iterations exceeded` at a point outside
+  the feasible ball — which `solver_selection=auto` reported as is, since an
+  iteration limit does not trigger the NLP fallback. It now returns `Optimal`
+  at `−2√2·g` in 10 iterations at every scale tried (`1e8 … 1e300`). The
+  `σ` cost normalization solved the scaled problem correctly but then judged
+  the answer with orthant residuals, which read a second-order block row by
+  row (the pounce#209 mistake) and so rejected every normalized optimum on a
+  QCQP. The verdict and the fallback ranking now measure each cone block as
+  a cone; LP and QP solves are judged exactly as before.
 - **A convex QCQP whose ball sits far from the origin now solves on the
   conic path (gh #1041).** `min x s.t. (x − 1000)² ≤ 1` under
   `solver_selection=socp` (and Python's `minimize(..., solver_selection="auto")`)

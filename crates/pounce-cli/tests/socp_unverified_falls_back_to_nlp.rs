@@ -13,14 +13,23 @@
 //! NT-scaled space made the conic arm solve `airport` outright (18
 //! iterations, the NLP's objective), which `airport_now_solves_on_the_conic_arm`
 //! pins. A fallback with no failing input is untested, so the contract below
-//! runs on `qcqp_ball_cost_1e22.nl` instead — `qcqp_ball` with its cost vector
-//! scaled to `(1e22, 1e22)`: `min 1e22·(x₀ + x₁)` over `‖x‖ ≤ 2`, optimum
-//! `−2√2·1e22`. The conic arm ends `Numerical failure` there across the whole
-//! band `1e20 … 1e24`, while the NLP path returns the analytic optimum to
-//! twelve figures. That failure is a real conic-arm limitation, not a contrived
-//! one; if the conic solver learns this cost scale, the explicit-`socp` test
-//! below fails and this file needs a new witness again — which is the point:
-//! the fallback must never sit untested.
+//! moved to `qcqp_ball_cost_1e22.nl` — `qcqp_ball` with its cost vector scaled
+//! to `(1e22, 1e22)` — which the conic arm then failed across `1e15 … 1e24`.
+//!
+//! gh #1056 removed that one too: the `σ` cost normalization had been judging
+//! its conic answer with orthant residuals, rejecting every normalized optimum
+//! on an SOC block. `the_isotropic_cost_ball_now_solves_on_the_conic_arm` pins
+//! it. The contract now runs on `qcqp_ball_cost_1e22_by_1.nl`, the same ball
+//! with cost `(1e22, 1)`: `min 1e22·x₀ + x₁` over `‖x‖ ≤ 2`, optimum
+//! `−2·‖(1e22, 1)‖ = −2e22` (to every digit a double carries), which the NLP
+//! path returns to `1.4e-14`. On the conic arm the normalized solve is
+//! accurate only to about `σ·tol` *absolutely* (`kkt_error 3.7e12`), which is
+//! not small against row `x₁`'s own `c₁ = 1`, so the `σ` verdict rejects it;
+//! the un-normalized re-solve then ends `Numerical failure` (159 iterations),
+//! and a cone program has no third driver. That is a real conic-arm limitation, not a contrived
+//! one; if the conic solver learns this anisotropic cost, the explicit-`socp`
+//! test below fails and this file needs a new witness again — which is the
+//! point: the fallback must never sit untested.
 //!
 //! Extreme *constraint* magnitudes (a `1e300` row) were tried first and
 //! rejected: the conic arm fails on them too, but the NLP re-solve either ends
@@ -55,7 +64,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 fn run(args: &[&str]) -> (String, String, Option<i32>) {
-    run_on("qcqp_ball_cost_1e22.nl", args)
+    run_on("qcqp_ball_cost_1e22_by_1.nl", args)
 }
 
 fn run_on(name: &str, args: &[&str]) -> (String, String, Option<i32>) {
@@ -186,5 +195,38 @@ fn airport_now_solves_on_the_conic_arm() {
     assert!(
         !stderr.to_lowercase().contains("no verified kkt point"),
         "auto must not need the NLP fallback on airport any more; stderr=\n{stderr}"
+    );
+}
+
+/// gh #1056: the previous witness, `qcqp_ball` with cost `(1e22, 1e22)`, is
+/// solved by the conic arm itself — `Optimal` at `−2√2·1e22` under an explicit
+/// `socp`, and with no reroute under `auto`. Before the `σ` verdict read the
+/// cone's own residuals it ended `Numerical failure`, and across `1e16 … 1e19`
+/// it ended `IterationLimit`, which `auto` cannot rescue.
+#[test]
+fn the_isotropic_cost_ball_now_solves_on_the_conic_arm() {
+    let (stdout, stderr, code) = run_on("qcqp_ball_cost_1e22.nl", &["solver_selection=socp"]);
+    assert_eq!(code, Some(0), "stdout=\n{stdout}\nstderr=\n{stderr}");
+    assert!(
+        stdout.contains("conic IPM, pounce-convex): Optimal Solution Found."),
+        "the conic arm must certify the cost-scaled ball; stdout=\n{stdout}"
+    );
+    let obj: f64 = stdout
+        .split("obj=")
+        .nth(1)
+        .and_then(|t| t.split_whitespace().next())
+        .and_then(|t| t.parse().ok())
+        .unwrap_or_else(|| panic!("no obj= on the status line; stdout=\n{stdout}"));
+    let f_star = -2.0 * 2.0_f64.sqrt() * 1e22;
+    assert!(
+        ((obj - f_star) / f_star).abs() < 1e-8,
+        "objective {obj:e} vs {f_star:e}; stdout=\n{stdout}"
+    );
+
+    let (stdout, stderr, code) = run_on("qcqp_ball_cost_1e22.nl", &["solver_selection=auto"]);
+    assert_eq!(code, Some(0), "stdout=\n{stdout}\nstderr=\n{stderr}");
+    assert!(
+        !stderr.to_lowercase().contains("no verified kkt point"),
+        "auto must not need the NLP fallback on the cost-scaled ball; stderr=\n{stderr}"
     );
 }
