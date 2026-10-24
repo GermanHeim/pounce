@@ -10,10 +10,12 @@ changes.
 ## [Unreleased]
 
 ### Added
-- **Cooperative cancellation between local solves in `pounce-minima`.**
-  `LocalSolve::should_stop` (default `false`) is polled before solves, while
-  sampling, during MLSL clustering and start filtering, and before the
-  optional dual-recovery solve.
+- **Cooperative cancellation hook for `pounce-minima` local solvers.**
+  `LocalSolve::should_stop` (default `false`) lets a local solver cancel the
+  search before a solve, while sampling, during MLSL clustering and start
+  filtering, and before the optional dual-recovery solve, keeping the minima
+  accepted so far. `IpoptLocalSolve` exposes it through
+  `IpoptLocalSolve::with_time_limit(Duration)`.
 
 - **The corrector and the activity classification run over an interior-point
   result pounce did not compute.** Both now live in `pounce-sens-core`,

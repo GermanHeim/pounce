@@ -35,6 +35,7 @@ use pounce_nlp::tnlp::{
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::time::Duration;
 
 /// An unconstrained two-variable model on a box, from plain functions.
 struct Box2 {
@@ -481,6 +482,16 @@ fn cancellation_stops_a_large_mlsl_sample_batch() {
 }
 
 #[test]
+fn ipopt_local_solve_zero_time_limit_cancels_before_any_solve() {
+    let mut app = quiet_app();
+    let mut solver = IpoptLocalSolve::new(&mut app).with_time_limit(Duration::ZERO);
+    let r = find_minima(&bowl(), &mut solver, &opts(Method::Multistart, 1, 4)).unwrap();
+    assert_eq!(r.stop, Stop::Aborted);
+    assert_eq!(r.n_solves, 0);
+    assert!(r.minima.is_empty());
+}
+
+#[test]
 fn already_cancelled_search_skips_the_initial_gradient() {
     let cancelled = Rc::new(Cell::new(true));
     let evals = Rc::new(Cell::new(0));
@@ -537,7 +548,6 @@ fn cancellation_keeps_known_zero_duals_for_an_interior_bound_only_minimum() {
     assert_eq!(r.n_solves, 1);
     assert_eq!(r.minima.len(), 1);
     assert_eq!(solver.solves.get(), 1);
-    assert!(r.minima[0].z_l.is_empty());
     assert_eq!(r.minima[0].z_l, vec![0.0, 0.0]);
     assert_eq!(r.minima[0].z_u, vec![0.0, 0.0]);
 }
