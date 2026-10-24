@@ -174,6 +174,9 @@ fn cold_solve_with_redundant_equalities_and_no_backend_probe() {
         .solve(&qp, None, &opts)
         .expect("rank-deficient equality QP must solve");
     assert_eq!(sol.status, QpStatus::Optimal);
+    // The cold-solve equality prune ran — it was skipped outright on a
+    // backend without a probe before the fix — and the counter says so.
+    assert!(solver.rank_guard_calls() >= 1);
     for i in 0..p {
         let want = 0.5 * (t[i] + t[i + p]);
         assert!(

@@ -147,6 +147,12 @@ impl ParametricActiveSetSolver {
         }
     }
 
+    /// Linear-independence guard passes this solver has run, across every
+    /// solve since it was built. See [`LinearSolver::rank_guard_calls`].
+    pub fn rank_guard_calls(&self) -> u32 {
+        self.linsol.rank_guard_calls()
+    }
+
     /// §4.5 inertia-controlled factorization. Tries the factor
     /// without shift first; on `WrongInertia` or `Singular`, shifts
     /// the H-block diagonal by progressively larger δ and re-tries.
@@ -4599,6 +4605,7 @@ fn independent_active_subset_any(
     active_cons: &[usize],
     active_bounds: &[usize],
 ) -> (Vec<usize>, Vec<usize>) {
+    linsol.note_rank_guard_call();
     // The sparse rank-reveal (feral's `SparseLu` degeneracy probe, which
     // `LinearSolver` provides whatever the KKT backend — gh#1061) factors a
     // sparse augmented system in O(nnz) instead of the dense O(k²·n)

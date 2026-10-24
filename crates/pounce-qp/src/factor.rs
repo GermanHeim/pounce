@@ -48,6 +48,9 @@ pub struct LinearSolver {
     cached_jcn: Option<Vec<Index>>,
     cached_dim: usize,
     factored: bool,
+    /// Linear-independence guard passes run against this solver; see
+    /// [`Self::rank_guard_calls`].
+    rank_guard_calls: u32,
 }
 
 impl LinearSolver {
@@ -58,6 +61,7 @@ impl LinearSolver {
             cached_jcn: None,
             cached_dim: 0,
             factored: false,
+            rank_guard_calls: 0,
         }
     }
 
@@ -200,6 +204,18 @@ impl LinearSolver {
     /// Whether a cached factor is currently available.
     pub fn has_cached_factor(&self) -> bool {
         self.factored
+    }
+
+    /// How many linear-independence guard passes have run against this
+    /// solver since it was built, sparse or dense. Cumulative, never reset: a
+    /// QP that spends its time pruning dependent rows is otherwise
+    /// indistinguishable from one that spends it pivoting (gh#1061).
+    pub fn rank_guard_calls(&self) -> u32 {
+        self.rank_guard_calls
+    }
+
+    pub(crate) fn note_rank_guard_call(&mut self) {
+        self.rank_guard_calls = self.rank_guard_calls.saturating_add(1);
     }
 
     /// Whether [`Self::determine_dependent_rows`] is available. Always

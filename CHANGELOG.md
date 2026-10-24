@@ -27,6 +27,13 @@ changes.
   damped BFGS. A 20 000-variable model solves in seconds; the dense matrix
   alone would have been 1.6 GB.
 
+- **`CrossoverReport::eqp` says how the step-3 QP ended (gh #1061).** A
+  `QpFailed` decline used to cover an iteration cap, an infeasible verdict and
+  a hard linear-solver error alike. The new field holds the QP's own status or
+  error, with its pivots, refactorizations, Schur updates, rank-guard passes
+  and wall time, on accepted reports too. `ParametricActiveSetSolver::rank_guard_calls`
+  counts the linear-independence guard passes behind the last of these.
+
 ### Changed
 - **Active-set SQP step QPs use Schur-complement updates when `n + m ≥ 500`**
   unless `sqp_qp_use_schur_updates` is set (gh #1054). On all 138
