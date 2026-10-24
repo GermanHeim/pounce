@@ -308,7 +308,7 @@ impl<'a> Driver<'a> {
     }
 
     /// The duals recorded when the optional recovery solve was skipped
-    /// because the search was cancelled.
+    /// because the search was cancelled before reaching the target.
     fn duals_without_recovery(&self) -> Duals {
         Duals {
             lambda: vec![0.0; self.m],
@@ -326,6 +326,8 @@ impl<'a> Driver<'a> {
     /// Budget-exempt: the point is already kept, so this does not consume a
     /// `--max-solves` slot. Falls back to zeros if the recovery solve does not
     /// converge or the nlp exposes no user-facing duals (length ≠ `m` / `n`).
+    /// A pending cancellation skips the solve unless this accept reaches
+    /// `n_minima`; that result reports success, so it gets the same duals.
     ///
     /// With no constraints the re-solve is skipped unless `x` sits on a finite
     /// bound: it was not free. Started exactly at an interior minimum, where
@@ -341,9 +343,6 @@ impl<'a> Driver<'a> {
     /// misread it.
     fn recover_duals(&mut self, x: &[Number]) -> Duals {
         let n = x.len();
-        if self.solver.should_stop() {
-            return self.duals_without_recovery();
-        }
         let zeros = || Duals {
             lambda: vec![0.0; self.m],
             z_l: vec![0.0; n],
@@ -354,6 +353,9 @@ impl<'a> Driver<'a> {
                 lambda: Vec::new(),
                 ..zeros()
             };
+        }
+        if self.solver.should_stop() && self.archive.len() + 1 < self.cfg.n_minima {
+            return self.duals_without_recovery();
         }
         let t: Rc<RefCell<dyn TNLP>> = Rc::new(RefCell::new(SeededTnlp::new(
             Rc::clone(&self.base),
@@ -627,12 +629,7 @@ impl<'a> Driver<'a> {
         // archiving (issue #196, related): the search may have accepted a
         // point from an augmented penalty/tunnel solve whose multipliers are
         // not the base problem's.
-        let cancelled = self.solver.should_stop();
-        let duals = if cancelled {
-            self.duals_without_recovery()
-        } else {
-            self.recover_duals(&x)
-        };
+        let duals = self.recover_duals(&x);
         self.archive.add(x, duals, fval);
         self.stagnant = 0;
         if let Some(cb) = self.hooks.on_accept.as_mut() {
@@ -644,7 +641,7 @@ impl<'a> Driver<'a> {
         if self.archive.len() >= self.cfg.n_minima {
             return Err(Stop::TargetReached);
         }
-        if cancelled {
+        if self.solver.should_stop() {
             return Err(Stop::Aborted);
         }
         Ok(true)

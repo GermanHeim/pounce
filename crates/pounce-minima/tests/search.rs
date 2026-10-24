@@ -347,6 +347,25 @@ impl LocalSolve for Cancelling {
     }
 }
 
+/// `IpoptLocalSolve` with a cancellation flag that trips after a scripted
+/// number of solves.
+struct CancelAfter<'a> {
+    inner: IpoptLocalSolve<'a>,
+    stop_after: usize,
+    solves: usize,
+}
+
+impl LocalSolve for CancelAfter<'_> {
+    fn solve(&mut self, problem: Rc<RefCell<dyn TNLP>>, mode: HessianMode) -> LocalOutcome {
+        self.solves += 1;
+        self.inner.solve(problem, mode)
+    }
+
+    fn should_stop(&self) -> bool {
+        self.solves >= self.stop_after
+    }
+}
+
 /// Forwards to `inner` and counts objective / gradient evaluations.
 struct CountingTnlp {
     inner: Rc<RefCell<dyn TNLP>>,
@@ -487,18 +506,40 @@ fn already_cancelled_search_skips_the_initial_gradient() {
 
 #[test]
 fn reaching_the_target_takes_precedence_over_cancellation() {
-    let mut solver = Cancelling::new(Some(vec![0.0, 0.3]));
-    solver.stop_after_solves = Some(1);
-    let cfg = MinimaOptions {
-        n_minima: 1,
-        ..mlsl_cancellation_cfg()
+    let mut app = quiet_app();
+    let mut solver = CancelAfter {
+        inner: IpoptLocalSolve::new(&mut app),
+        stop_after: 1,
+        solves: 0,
     };
-    let r = find_minima(&bound_active(), &mut solver, &cfg).unwrap();
+    let r = find_minima(
+        &bound_active(),
+        &mut solver,
+        &opts(Method::Multistart, 1, 4),
+    )
+    .unwrap();
     assert_eq!(r.stop, Stop::TargetReached);
+    assert_eq!(r.n_solves, 1);
+    assert_eq!(r.minima.len(), 1);
+    assert_eq!(solver.solves, 2);
+    let z_l = &r.minima[0].z_l;
+    assert_eq!(z_l.len(), 2);
+    assert!((z_l[0] - 2.0).abs() < 1e-6, "{z_l:?}");
+    assert!(z_l[1].abs() < 1e-6, "{z_l:?}");
+}
+
+#[test]
+fn cancellation_keeps_known_zero_duals_for_an_interior_bound_only_minimum() {
+    let mut solver = Cancelling::new(Some(vec![1.0, -0.5]));
+    solver.stop_after_solves = Some(1);
+    let r = find_minima(&bowl(), &mut solver, &mlsl_cancellation_cfg()).unwrap();
+    assert_eq!(r.stop, Stop::Aborted);
     assert_eq!(r.n_solves, 1);
     assert_eq!(r.minima.len(), 1);
     assert_eq!(solver.solves.get(), 1);
     assert!(r.minima[0].z_l.is_empty());
+    assert_eq!(r.minima[0].z_l, vec![0.0, 0.0]);
+    assert_eq!(r.minima[0].z_u, vec![0.0, 0.0]);
 }
 
 #[test]
