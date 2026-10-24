@@ -449,8 +449,7 @@ fn cancellation_after_the_first_minimum_keeps_it_and_skips_extra_solves() {
     solver.stop_after_solves = Some(1);
     let r = find_minima(&bound_active(), &mut solver, &mlsl_cancellation_cfg()).unwrap();
     assert_eq!(r.stop, Stop::Cancelled);
-    assert_eq!(r.stop, Stop::Aborted);
-    assert!(matches!(r.stop, Stop::Cancelled));
+    assert_eq!(r.stop.as_str(), "cancelled");
     assert_eq!(r.n_solves, 1);
     assert_eq!(r.minima.len(), 1);
     assert_eq!(r.minima[0].x, vec![0.0, 0.3]);
@@ -474,7 +473,7 @@ fn cancellation_stops_a_large_mlsl_sample_batch() {
     let mut solver = Cancelling::new(None);
     solver.external_cancel = Some(cancelled);
     let r = find_minima(&base, &mut solver, &mlsl_cancellation_cfg()).unwrap();
-    assert_eq!(r.stop, Stop::Aborted);
+    assert_eq!(r.stop, Stop::Cancelled);
     assert_eq!(r.n_solves, 1);
     assert_eq!(r.minima.len(), 1);
     assert_eq!(solver.solves.get(), 1);
@@ -486,7 +485,7 @@ fn ipopt_local_solve_zero_time_limit_cancels_before_any_solve() {
     let mut app = quiet_app();
     let mut solver = IpoptLocalSolve::new(&mut app).with_time_limit(Duration::ZERO);
     let r = find_minima(&bowl(), &mut solver, &opts(Method::Multistart, 1, 4)).unwrap();
-    assert_eq!(r.stop, Stop::Aborted);
+    assert_eq!(r.stop, Stop::Cancelled);
     assert_eq!(r.n_solves, 0);
     assert!(r.minima.is_empty());
 }
@@ -507,7 +506,7 @@ fn already_cancelled_search_skips_the_initial_gradient() {
     let mut solver = Cancelling::new(None);
     solver.external_cancel = Some(cancelled);
     let r = find_minima(&base, &mut solver, &opts(Method::Multistart, 1, 4)).unwrap();
-    assert_eq!(r.stop, Stop::Aborted);
+    assert_eq!(r.stop, Stop::Cancelled);
     assert_eq!(r.n_solves, 0);
     assert!(r.minima.is_empty());
     assert_eq!(solver.solves.get(), 0);
@@ -544,7 +543,7 @@ fn cancellation_keeps_known_zero_duals_for_an_interior_bound_only_minimum() {
     let mut solver = Cancelling::new(Some(vec![1.0, -0.5]));
     solver.stop_after_solves = Some(1);
     let r = find_minima(&bowl(), &mut solver, &mlsl_cancellation_cfg()).unwrap();
-    assert_eq!(r.stop, Stop::Aborted);
+    assert_eq!(r.stop, Stop::Cancelled);
     assert_eq!(r.n_solves, 1);
     assert_eq!(r.minima.len(), 1);
     assert_eq!(solver.solves.get(), 1);

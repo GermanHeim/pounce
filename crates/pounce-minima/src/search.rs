@@ -51,19 +51,15 @@ pub enum Stop {
     /// (gh#989: this used to read `budget_exhausted`, naming the wrong
     /// budget).
     SampleCapReached,
-    /// A [`Hooks::on_accept`] callback returned `ControlFlow::Break`, or the
-    /// local solver asked the search to cancel via [`LocalSolve::should_stop`].
-    /// The minima accepted before the cancellation are kept.
+    /// A [`Hooks::on_accept`] callback returned `ControlFlow::Break`.
     Aborted,
+    /// The local solver asked the search to cancel via
+    /// [`LocalSolve::should_stop`]. The minima accepted before the
+    /// cancellation are kept.
+    Cancelled,
 }
 
 impl Stop {
-    /// The cancellation outcome, named for callers that distinguish a
-    /// deadline from the `on_accept` callback. It is the same variant as
-    /// [`Stop::Aborted`], whose status string remains `"aborted"`.
-    #[allow(non_upper_case_globals)]
-    pub const Cancelled: Self = Self::Aborted;
-
     /// The status string `find_minima` and the CLI's JSON report use.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -72,6 +68,7 @@ impl Stop {
             Stop::BudgetExhausted => "budget_exhausted",
             Stop::SampleCapReached => "sample_cap_reached",
             Stop::Aborted => "aborted",
+            Stop::Cancelled => "cancelled",
         }
     }
 }
@@ -245,7 +242,7 @@ impl<'a> Driver<'a> {
     /// Check if the local solver has asked the search to stop.
     fn check_cancel(&self) -> Result<(), Stop> {
         if self.solver.should_stop() {
-            Err(Stop::Aborted)
+            Err(Stop::Cancelled)
         } else {
             Ok(())
         }
@@ -253,7 +250,7 @@ impl<'a> Driver<'a> {
 
     /// Run one solve of `solve_tnlp` in the given Hessian mode and return the
     /// converged minimizer. Returns `Err(Stop::BudgetExhausted)` once the
-    /// solve budget is spent, or [`Stop::Aborted`] when the solver asks to
+    /// solve budget is spent, or [`Stop::Cancelled`] when the solver asks to
     /// cancel before the solve starts.
     fn run_solve(
         &mut self,
@@ -642,7 +639,7 @@ impl<'a> Driver<'a> {
             return Err(Stop::TargetReached);
         }
         if self.solver.should_stop() {
-            return Err(Stop::Aborted);
+            return Err(Stop::Cancelled);
         }
         Ok(true)
     }
@@ -741,7 +738,7 @@ impl<'a> Driver<'a> {
                 better_sample_within(&pool_x, &pool_f, &self.l_scale, radius, &|| {
                     self.solver.should_stop()
                 })
-                .ok_or(Stop::Aborted)?;
+                .ok_or(Stop::Cancelled)?;
             let mut order: Vec<usize> = (0..bign).collect();
             order.sort_by(|&a, &b| {
                 pool_f[a]
