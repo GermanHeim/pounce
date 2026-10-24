@@ -208,6 +208,12 @@ changes.
   a non-negative whole number, and for a Jacobian whose rows, columns and
   values differ in count, rather than wrapping, saturating or truncating.
 ### Fixed
+- **`max_wall_time` bounds the convex active-set path, simplex seed and all
+  (gh #1061).** The active-set solve after the simplex seed was handed the
+  budget as it stood *before* the seed ran, and starts its own clock, so it
+  got the whole limit again: NETLIB `gen` stopped at 61 s for
+  `max_wall_time 30` and at 496 s for 300, `gen4` at 602 s for 300. The solve
+  now gets what the seed left.
 - **The active-set QP's linear-independence guard no longer depends on
   `linear_solver` (gh #1061).** With MA57, which has no sparse rank-reveal,
   the guard fell back to dense modified Gram-Schmidt: one length-`n` row per
