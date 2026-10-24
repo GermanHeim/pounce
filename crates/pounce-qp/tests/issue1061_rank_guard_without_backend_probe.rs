@@ -110,12 +110,13 @@ fn linear_solver_rank_reveals_for_a_backend_without_a_probe() {
 }
 
 /// A cold solve whose equality block is rank-deficient, at a size where the
-/// dense guard is `k²·n ≈ 2·10¹⁰` per pass — well past what it may spend.
+/// dense guard is `k²·n = 2.7·10¹⁰` per pass — past what it may spend.
 ///
 /// Measured on this fixture: 0.04 s with the sparse probe, 68 s through the
-/// dense guard before the fix. The `time_limit` turns the old behaviour into a
-/// `TimeLimit` status instead of a slow pass, with an order of magnitude of
-/// headroom over the fixed path for a loaded CI runner.
+/// dense guard before the fix. The `time_limit` only bounds the solve around
+/// the guard, not a pass of it — the guard's loops check no deadline — so it
+/// caps a regression's damage to the suite rather than turning it into a
+/// prompt `TimeLimit`.
 ///
 /// `min ½‖x − t‖²` subject to `x_i − x_{i+p} = 0` for `i < p`, each row
 /// repeated once scaled by 2 (rank `p` out of `2p` rows). The optimum pairs

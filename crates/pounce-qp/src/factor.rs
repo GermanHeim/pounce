@@ -48,7 +48,7 @@ pub struct LinearSolver {
     cached_jcn: Option<Vec<Index>>,
     cached_dim: usize,
     factored: bool,
-    /// Linear-independence guard passes run against this solver; see
+    /// Linear-independence rank tests run against this solver; see
     /// [`Self::rank_guard_calls`].
     rank_guard_calls: u32,
 }
@@ -206,10 +206,13 @@ impl LinearSolver {
         self.factored
     }
 
-    /// How many linear-independence guard passes have run against this
-    /// solver since it was built, sparse or dense. Cumulative, never reset: a
-    /// QP that spends its time pruning dependent rows is otherwise
-    /// indistinguishable from one that spends it pivoting (gh#1061).
+    /// How many rank tests the linear-independence guard has run against
+    /// this solver since it was built, sparse or dense (or skipped as over
+    /// budget). One guard pass runs a second test when its first answer
+    /// dropped a permanent row (gh#974), so this can exceed the passes.
+    /// Cumulative, never reset: a QP that spends its time pruning dependent
+    /// rows is otherwise indistinguishable from one that spends it pivoting
+    /// (gh#1061).
     pub fn rank_guard_calls(&self) -> u32 {
         self.rank_guard_calls
     }

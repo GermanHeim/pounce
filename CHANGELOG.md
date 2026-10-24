@@ -30,9 +30,9 @@ changes.
 - **`CrossoverReport::eqp` says how the step-3 QP ended (gh #1061).** A
   `QpFailed` decline used to cover an iteration cap, an infeasible verdict and
   a hard linear-solver error alike. The new field holds the QP's own status or
-  error, with its pivots, refactorizations, Schur updates, rank-guard passes
+  error, with its working-set changes, refactorizations, Schur updates, rank tests
   and wall time, on accepted reports too. `ParametricActiveSetSolver::rank_guard_calls`
-  counts the linear-independence guard passes behind the last of these.
+  counts the linear-independence guard's rank tests behind the last of these.
   Every active-set SQP step QP, including those in crossover's step 4 and the
   IPM→SQP handover, now logs the same figures at debug level
   (`RUST_LOG=pounce::sqp::qp=debug`), so a slow SQP can be traced to the QP

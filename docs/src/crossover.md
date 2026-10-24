@@ -329,7 +329,7 @@ if let Some(r) = app.crossover_report() {
     println!("complementarity (declared frame): {:e}", r.compl_after);
     if let Some(q) = &r.eqp {                     // the step-3 QP, when it ran
         println!("step-3 QP: {:?} in {:?}", q.outcome, q.time);
-        println!("  {} pivots, {} refactors, {} rank-guard passes",
+        println!("  {} working-set changes, {} refactors, {} rank tests",
                  q.working_set_changes, q.refactors, q.rank_guard_calls);
     }
 }

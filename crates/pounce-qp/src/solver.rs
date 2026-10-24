@@ -147,7 +147,7 @@ impl ParametricActiveSetSolver {
         }
     }
 
-    /// Linear-independence guard passes this solver has run, across every
+    /// Linear-independence rank tests this solver has run, across every
     /// solve since it was built. See [`LinearSolver::rank_guard_calls`].
     pub fn rank_guard_calls(&self) -> u32 {
         self.linsol.rank_guard_calls()
@@ -276,15 +276,36 @@ impl ParametricActiveSetSolver {
         // constraint block is a legitimate indefinite-reduced-Hessian shift
         // and passes through untouched (the common case is δ == 0, which skips
         // the probe entirely).
+        //
+        // A rank test that could not run (the sparse probe failed and the
+        // dense fallback is over budget, gh#1061) is not a full-rank verdict:
+        // here "nothing dropped" would *accept* the shifted factor, which is
+        // the one outcome this guard exists to prevent. Report it as the same
+        // recoverable failure; the callers' prune then finds nothing to drop
+        // either and moves to its next recovery.
         if delta > 0.0 {
-            let (kc, kb) =
-                independent_active_subset(&mut self.linsol, qp, active_cons, active_bounds);
-            if kc.len() < k_c || kb.len() < k_b {
-                return Err(QpError::LinearSolverFailure(
-                    "pinned KKT constraint block is rank-deficient (inertia shift masked a \
-                     singular constraint block); prune to a linearly-independent subset"
-                        .into(),
-                ));
+            match checked_independent_active_subset(
+                &mut self.linsol,
+                qp,
+                active_cons,
+                active_bounds,
+            ) {
+                Some((kc, kb)) if kc.len() == k_c && kb.len() == k_b => {}
+                Some(_) => {
+                    return Err(QpError::LinearSolverFailure(
+                        "pinned KKT constraint block is rank-deficient (inertia shift masked \
+                         a singular constraint block); prune to a linearly-independent subset"
+                            .into(),
+                    ));
+                }
+                None => {
+                    return Err(QpError::LinearSolverFailure(
+                        "pinned KKT needed an inertia shift and its constraint block could not \
+                         be rank-checked; treating it as singular rather than trusting the \
+                         shifted factor"
+                            .into(),
+                    ));
+                }
             }
         }
         Ok(rhs[..n].to_vec())
@@ -1094,12 +1115,13 @@ impl ParametricActiveSetSolver {
         // to `solve_general` (same recovery as the exact-failure branch).
         // A δ > 0 with a full-rank block is a legitimate indefinite /
         // unbounded reduced-Hessian shift and falls through to the
-        // recession-ray test below unchanged (#326).
+        // recession-ray test below unchanged (#326). A rank test that could
+        // not run is no evidence of full rank, so it delegates too (gh#1061).
         if delta > 0.0 {
             let eq_rows: Vec<usize> = (0..qp.m).collect();
-            let (kept, _) = independent_active_subset(&mut self.linsol, qp, &eq_rows, &[]);
-            if kept.len() < qp.m {
-                return self.solve_general(qp, None, opts);
+            match checked_independent_active_subset(&mut self.linsol, qp, &eq_rows, &[]) {
+                Some((kept, _)) if kept.len() == qp.m => {}
+                _ => return self.solve_general(qp, None, opts),
             }
         }
 
@@ -4400,13 +4422,31 @@ impl PrunedEqualities {
 /// can rescue a rank-deficient *constraint* block). General-constraint
 /// rows are processed before variable bounds, so equality / general
 /// rows are preferred over bounds when a tie must be broken.
+///
+/// When no rank test could run (see [`checked_independent_active_subset`])
+/// every row is kept, which the pruning callers read as "this guard cannot
+/// help" and move on to their next recovery. A caller for which "nothing
+/// dropped" means "full rank, accept" must use the checked form instead.
 pub(crate) fn independent_active_subset(
     linsol: &mut LinearSolver,
     qp: &QpProblem,
     active_cons: &[usize],
     active_bounds: &[usize],
 ) -> (Vec<usize>, Vec<usize>) {
-    let (kc, kb) = independent_active_subset_any(linsol, qp, active_cons, active_bounds);
+    checked_independent_active_subset(linsol, qp, active_cons, active_bounds)
+        .unwrap_or_else(|| (active_cons.to_vec(), active_bounds.to_vec()))
+}
+
+/// [`independent_active_subset`], or `None` when no rank test could run: the
+/// sparse probe failed and the dense fallback is over
+/// [`DENSE_GUARD_FLOP_BUDGET`] (gh#1061).
+pub(crate) fn checked_independent_active_subset(
+    linsol: &mut LinearSolver,
+    qp: &QpProblem,
+    active_cons: &[usize],
+    active_bounds: &[usize],
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    let (kc, kb) = independent_active_subset_any(linsol, qp, active_cons, active_bounds)?;
 
     // Permanent rows are pruned only for dependence on *each other* (gh#974).
     //
@@ -4430,15 +4470,19 @@ pub(crate) fn independent_active_subset(
     let dropped_permanent = active_cons.iter().any(|&i| permanent_c(&i) && !kept_c[i])
         || active_bounds.iter().any(|&j| permanent_b(&j) && !kept_b[j]);
     if !dropped_permanent {
-        return (kc, kb);
+        return Some((kc, kb));
     }
     let perm_c: Vec<usize> = active_cons.iter().copied().filter(permanent_c).collect();
     let perm_b: Vec<usize> = active_bounds.iter().copied().filter(permanent_b).collect();
-    let (pc, pb) = independent_active_subset_any(linsol, qp, &perm_c, &perm_b);
+    // Unchecked, the probe's selection stands, as it does past the
+    // re-selection budget below.
+    let Some((pc, pb)) = independent_active_subset_any(linsol, qp, &perm_c, &perm_b) else {
+        return Some((kc, kb));
+    };
     if pc.iter().all(|&i| kept_c[i]) && pb.iter().all(|&j| kept_b[j]) {
         // Every permanent row the probe dropped was dependent on the kept
         // permanent rows alone: the prune is sound as it stands.
-        return (kc, kb);
+        return Some((kc, kb));
     }
     // Re-select with the independent permanent rows taking precedence — when
     // that is affordable. The re-selection is dense in the active constraint
@@ -4455,7 +4499,7 @@ pub(crate) fn independent_active_subset(
         .collect();
     let k_c = (pc.len() + other_c.len()) as Number;
     if k_c * k_c * qp.n as Number > RESELECT_FLOP_BUDGET {
-        return (kc, kb);
+        return Some((kc, kb));
     }
     let other_b: Vec<usize> = active_bounds
         .iter()
@@ -4465,7 +4509,7 @@ pub(crate) fn independent_active_subset(
     let (mut keep_c, mut keep_b) = independent_with_precedence(qp, &pc, &pb, &other_c, &other_b);
     keep_c.sort_unstable();
     keep_b.sort_unstable();
-    (keep_c, keep_b)
+    Some((keep_c, keep_b))
 }
 
 /// Largest `k_c²·n` for which [`independent_active_subset`] re-selects a
@@ -4599,12 +4643,13 @@ fn independent_with_precedence(
 
 /// [`independent_active_subset`] without the permanent-row precedence: which
 /// member of a dependent set is dropped is whatever the rank test prefers.
+/// `None` when no rank test ran.
 fn independent_active_subset_any(
     linsol: &mut LinearSolver,
     qp: &QpProblem,
     active_cons: &[usize],
     active_bounds: &[usize],
-) -> (Vec<usize>, Vec<usize>) {
+) -> Option<(Vec<usize>, Vec<usize>)> {
     linsol.note_rank_guard_call();
     // The sparse rank-reveal (feral's `SparseLu` degeneracy probe, which
     // `LinearSolver` provides whatever the KKT backend — gh#1061) factors a
@@ -4612,19 +4657,23 @@ fn independent_active_subset_any(
     // modified-Gram-Schmidt grind, which is the operation that grinds large
     // degenerate LPs (the NETLIB GEN family) to a halt.
     if let Some(kept) = independent_active_subset_sparse(linsol, qp, active_cons, active_bounds) {
-        return kept;
+        return Some(kept);
     }
     // The probe failed. Dense MGS is the fallback only while it is
     // affordable: past the budget it is gigabytes of dense normals and a
     // pass measured in minutes, run inside loops that check no deadline.
-    // Keeping every row is what the guard returned before it existed; each
-    // caller already treats "nothing dropped" as "this guard cannot help"
-    // and moves on to its next recovery (inertia shift, elastic mode).
+    // Past it no rank test runs, and the caller is told so: "nothing
+    // dropped" is "cannot help" to a pruning caller but "full rank" to the
+    // masked-deficiency guards, which must not accept on it.
     let k = (active_cons.len() + active_bounds.len()) as Number;
     if k * k * qp.n as Number > DENSE_GUARD_FLOP_BUDGET {
-        return (active_cons.to_vec(), active_bounds.to_vec());
+        return None;
     }
-    independent_active_subset_dense(qp, active_cons, active_bounds)
+    Some(independent_active_subset_dense(
+        qp,
+        active_cons,
+        active_bounds,
+    ))
 }
 
 /// Largest `k²·n` for which [`independent_active_subset_any`] falls back to
@@ -6615,6 +6664,196 @@ mod precedence_tests {
         assert!(
             dependent_cases > 100,
             "only {dependent_cases} cases had a dependence"
+        );
+    }
+}
+
+#[cfg(test)]
+mod issue1061_unchecked_rank_tests {
+    //! gh#1061: past `DENSE_GUARD_FLOP_BUDGET`, a failed sparse probe leaves
+    //! no rank test at all. To a pruning caller that is "nothing to drop";
+    //! to the masked-deficiency guard in `factor_pinned_primal` it must not
+    //! read as "full rank", or the guard accepts the very shifted factor it
+    //! exists to reject. Lives inside `solver` to reach that private method.
+    use pounce_common::types::{Index, Number};
+    use pounce_feral::FeralSolverInterface;
+    use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
+    use pounce_linsol::{EMatrixFormat, ESymSolverStatus, SparseSymLinearSolverInterface};
+
+    use super::{ParametricActiveSetSolver, checked_independent_active_subset};
+    use crate::{HessianInertia, QpOptions, QpProblem};
+
+    /// Claims a rank-reveal and fails it, and masks a singular KKT once it
+    /// has been shifted: the first failure is reported, the inertia loop's
+    /// shifted retry comes back `Success` with the right-hand side unsolved.
+    /// That is the feral-around-`δ ≈ 1e8` behaviour the guard's comment
+    /// describes, compressed into one shift.
+    struct MaskingNoProbe {
+        inner: FeralSolverInterface,
+        reported: bool,
+    }
+
+    impl SparseSymLinearSolverInterface for MaskingNoProbe {
+        fn initialize_structure(
+            &mut self,
+            dim: Index,
+            nonzeros: Index,
+            ia: &[Index],
+            ja: &[Index],
+        ) -> ESymSolverStatus {
+            self.inner.initialize_structure(dim, nonzeros, ia, ja)
+        }
+        fn values_array_mut(&mut self) -> &mut [Number] {
+            self.inner.values_array_mut()
+        }
+        fn multi_solve(
+            &mut self,
+            new_matrix: bool,
+            ia: &[Index],
+            ja: &[Index],
+            nrhs: Index,
+            rhs_vals: &mut [Number],
+            check_neg_evals: bool,
+            number_of_neg_evals: Index,
+        ) -> ESymSolverStatus {
+            let st = self.inner.multi_solve(
+                new_matrix,
+                ia,
+                ja,
+                nrhs,
+                rhs_vals,
+                check_neg_evals,
+                number_of_neg_evals,
+            );
+            if st == ESymSolverStatus::Success || self.reported {
+                self.reported = false;
+                return ESymSolverStatus::Success;
+            }
+            self.reported = true;
+            st
+        }
+        fn number_of_neg_evals(&self) -> Index {
+            self.inner.number_of_neg_evals()
+        }
+        fn increase_quality(&mut self) -> bool {
+            self.inner.increase_quality()
+        }
+        fn provides_inertia(&self) -> bool {
+            self.inner.provides_inertia()
+        }
+        fn matrix_format(&self) -> EMatrixFormat {
+            self.inner.matrix_format()
+        }
+        fn provides_degeneracy_detection(&self) -> bool {
+            true
+        }
+        fn determine_dependent_rows(
+            &mut self,
+            _n_rows: Index,
+            _n_cols: Index,
+            _irn: &[Index],
+            _jcn: &[Index],
+            _vals: &[Number],
+            _c_deps: &mut Vec<Index>,
+        ) -> ESymSolverStatus {
+            ESymSolverStatus::FatalError
+        }
+    }
+
+    /// `x_i − x_{i+p} = 0` for `i < p`, each row repeated once scaled by 2:
+    /// `2p` equality rows of rank `p`, `n = 2p`, `H = I`. Runs `f` on the QP
+    /// and a solver over the masking backend.
+    fn with_paired<R>(
+        p: usize,
+        f: impl FnOnce(&QpProblem, &mut ParametricActiveSetSolver) -> R,
+    ) -> R {
+        let (n, m) = (2 * p, 2 * p);
+        let diag: Vec<Index> = (1..=n as Index).collect();
+        let mut h = SymTMatrix::new(SymTMatrixSpace::new(n as Index, diag.clone(), diag));
+        h.set_values(&vec![1.0; n]);
+        let (mut irn, mut jcn, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        for i in 0..p {
+            for (row, scale) in [(i, 1.0), (p + i, 2.0)] {
+                irn.extend([row as Index + 1, row as Index + 1]);
+                jcn.extend([i as Index + 1, (i + p) as Index + 1]);
+                vals.extend([scale, -scale]);
+            }
+        }
+        let mut a = GenTMatrix::new(GenTMatrixSpace::new(m as Index, n as Index, irn, jcn));
+        a.set_values(&vals);
+        let g: Vec<Number> = (0..n).map(|j| 6.0 - ((j * 7) % 13) as Number).collect();
+        let (bl, bu) = (vec![0.0; m], vec![0.0; m]);
+        let (xl, xu) = (vec![-1e20; n], vec![1e20; n]);
+        let qp = QpProblem {
+            n,
+            m,
+            h: &h,
+            g: &g,
+            a: &a,
+            bl: &bl,
+            bu: &bu,
+            xl: &xl,
+            xu: &xu,
+            hessian_inertia: HessianInertia::Psd,
+        };
+        let mut solver = ParametricActiveSetSolver::new(Box::new(MaskingNoProbe {
+            inner: FeralSolverInterface::new(),
+            reported: false,
+        }));
+        f(&qp, &mut solver)
+    }
+
+    /// Pin every row of the paired QP and return what the pinned factor says.
+    fn pin_all(p: usize) -> Result<Vec<Number>, crate::QpError> {
+        with_paired(p, |qp, solver| {
+            let rows: Vec<usize> = (0..qp.m).collect();
+            let targets = vec![0.0; qp.m];
+            solver.factor_pinned_primal(qp, &rows, &targets, &[], &[], &QpOptions::default())
+        })
+    }
+
+    // Two sizes, because the guard branches on the dense budget (`k²·n ≤
+    // 1e10`): p = 40 is `k²·n ≈ 5·10⁵`, inside it; p = 1100 is `≈ 1.06·10¹⁰`,
+    // past it.
+
+    #[test]
+    fn the_rank_test_reports_when_it_could_not_run() {
+        let rows = |qp: &QpProblem| (0..qp.m).collect::<Vec<_>>();
+        let small = with_paired(40, |qp, s| {
+            checked_independent_active_subset(&mut s.linsol, qp, &rows(qp), &[])
+        });
+        assert_eq!(
+            small.map(|(kc, _)| kc.len()),
+            Some(40),
+            "dense fallback ran"
+        );
+        let big = with_paired(1100, |qp, s| {
+            checked_independent_active_subset(&mut s.linsol, qp, &rows(qp), &[])
+        });
+        assert!(big.is_none(), "past the budget no rank test runs");
+    }
+
+    #[test]
+    fn a_masked_shift_within_the_dense_budget_is_caught() {
+        let r = pin_all(40);
+        assert!(
+            r.as_ref()
+                .is_err_and(|e| e.is_recoverable_factorization_failure()),
+            "{r:?}"
+        );
+    }
+
+    /// Before the fix the unchecked guard kept every row, read that as full
+    /// rank, and returned the masked factor's unsolved right-hand side
+    /// (`x = −g`) as the pinned primal.
+    #[test]
+    fn a_masked_shift_past_the_dense_budget_is_not_accepted() {
+        let r = pin_all(1100);
+        assert!(
+            r.as_ref()
+                .is_err_and(|e| e.is_recoverable_factorization_failure()),
+            "accepted an unchecked shifted factor: {:?}",
+            r.as_ref().map(|x| &x[..4])
         );
     }
 }

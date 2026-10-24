@@ -227,7 +227,7 @@ pub enum CrossoverDecline {
 /// `Optimal` — an iteration cap, an infeasible verdict, a hard linear-solver
 /// error — and on a large model those call for different responses. This is
 /// the detail behind it, kept on accepted reports too, so a slow crossover can
-/// be attributed: pivots, refactorizations and rank-guard passes against the
+/// be attributed: working-set changes, refactorizations and rank tests against the
 /// wall time they cost.
 #[derive(Debug, Clone)]
 pub struct EqpReport {
@@ -240,7 +240,7 @@ pub struct EqpReport {
     /// Schur-complement updates between refactorizations. `0` when the QP
     /// returned an error.
     pub schur_updates: u32,
-    /// Linear-independence guard passes, counted on errors too.
+    /// Linear-independence rank tests, counted on errors too.
     pub rank_guard_calls: u32,
     /// Wall time of the QP call.
     pub time: std::time::Duration,

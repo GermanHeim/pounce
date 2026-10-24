@@ -1988,11 +1988,11 @@ fn step_qp_iter_budget(current: u32, n: usize, m: usize) -> u32 {
 /// subproblem both maps are the identity.
 ///
 /// Each solve is logged at debug level under `pounce::sqp::qp` with its
-/// outcome, pivots, refactorizations, Schur updates, rank-guard passes and
-/// wall time (gh#1061). A QP that takes minutes is otherwise one opaque
-/// number, and the remedies differ: a pivot count says the working set moved
-/// a lot, a refactor count says the Schur path kept resetting, and a
-/// rank-guard count says it spent its time pruning dependent rows.
+/// outcome, working-set changes, refactorizations, Schur updates, rank tests
+/// and wall time (gh#1061). A QP that takes minutes is otherwise one opaque
+/// number, and the remedies differ: many working-set changes say the working
+/// set moved a lot, a refactor count says the Schur path kept resetting, and
+/// a rank-test count says it spent its time pruning dependent rows.
 fn solve_step_qp(
     solver: &mut ParametricActiveSetSolver,
     data: &SqpQpData,
@@ -2010,12 +2010,12 @@ fn solve_step_qp(
     match &sol {
         Ok(s) => tracing::debug!(target: "pounce::sqp::qp",
             "step QP (n={}, m={}, warm={}): {} in {:.3?}, {} working-set changes, \
-             {} refactors, {} Schur updates, {} rank-guard passes, phase1={}",
+             {} refactors, {} Schur updates, {} rank tests, phase1={}",
             qp.n, qp.m, warm.is_some(), s.status, started.elapsed(),
             s.stats.n_working_set_changes, s.stats.n_refactor, s.stats.n_schur_updates,
             rank_guard_calls, s.stats.used_phase1),
         Err(e) => tracing::debug!(target: "pounce::sqp::qp",
-            "step QP (n={}, m={}, warm={}): error {e:?} after {:.3?}, {} rank-guard passes",
+            "step QP (n={}, m={}, warm={}): error {e:?} after {:.3?}, {} rank tests",
             qp.n, qp.m, warm.is_some(), started.elapsed(), rank_guard_calls),
     }
     Ok(data.unlift_solution(sol?))
