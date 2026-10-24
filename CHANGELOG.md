@@ -16,6 +16,49 @@ changes.
   filtering, and before the optional dual-recovery solve, keeping the minima
   accepted so far. `IpoptLocalSolve` exposes it through
   `IpoptLocalSolve::with_time_limit(Duration)`.
+- **The JSON report records `mu_strategy_fallback` re-solves (gh #1042)** as
+  `statistics.mu_strategy_fallback` (first attempt's status, iterations,
+  restoration calls and objective; the retry's; whether it was promoted).
+  `scripts/sweep-fixtures.sh` shows it in a new `mu=` column. Previously a
+  first attempt that got worse and was rescued by the fallback read as a
+  speed-up.
+- **`ipm_sqp_handover`: the interior-point method can hand its iterate to the
+  active-set SQP before convergence (gh #1054).** Once the overall NLP error
+  reaches `ipm_sqp_handover_tol` (default `1e-4`), or has not halved in
+  `ipm_sqp_handover_stall_iter` iterations, the active set is identified from
+  the multipliers against the slacks and the SQP finishes from there. A point
+  is accepted only if it meets the stopping tolerances in user units and
+  passes the interior method's negative-curvature check; otherwise the
+  interior iteration continues unchanged. Off by default. Over the CLI
+  fixture corpus it shortens 73 of 234 solves and worsens no status. See
+  `docs/src/crossover.md`.
+- **The active-set SQP scales to large quasi-Newton models (gh #1054).** Above
+  `sqp_dense_hessian_max_n` (default 1000) variables, `sqp_hessian=lbfgs` is
+  handed to the step QP in a lifted low-rank form that keeps it sparse, and
+  `hessian_approximation=limited-memory` selects it there instead of the dense
+  damped BFGS. A 20 000-variable model solves in seconds; the dense matrix
+  alone would have been 1.6 GB.
+
+### Changed
+- **`--minima mlsl` no longer counts a repeat infeasible landing against
+  `patience` (gh #1042 R4c).** A launch that ends violating the constraints
+  at a point an earlier launch already ended at is one more sample of that
+  infeasible basin, not evidence that the landscape is exhausted. The first
+  hit of each infeasible point, every other failure, and every infeasible
+  landing before a minimum has been found still count. On
+  `circle_parabola_t0p5` (`--n-minima 6 --max-solves 30 --patience 8`, seeds
+  0–9) MLSL now finds both minima on 8 of 10 seeds (was 5; 0.12.0 7), at
+  19.5 mean solves (was 10.0). Applies to the CLI and `pounce.find_minima`
+  alike; other methods are unchanged.
+- **Active-set SQP step QPs use Schur-complement updates when `n + m ≥ 500`**
+  unless `sqp_qp_use_schur_updates` is set (gh #1054). On all 138
+  Maros-Mészáros problems through `algorithm=active-set-sqp` the update path
+  solves 79 against 57, with no objective changed. Small models keep the
+  refactor path, where the two cost the same.
+- **The SQP step-QP iteration budget scales with the problem** (`10·(n + m)`,
+  between 200 and 200 000) unless `sqp_qp_max_iter` is set, as the direct
+  convex active-set driver's already did. The flat 200 made a cold first QP
+  with thousands of active bounds report `Maximum_Iterations_Exceeded`.
 
 - **The corrector and the activity classification run over an interior-point
   result pounce did not compute.** Both now live in `pounce-sens-core`,
@@ -160,6 +203,23 @@ changes.
   a non-negative whole number, and for a Jacobian whose rows, columns and
   values differ in count, rather than wrapping, saturating or truncating.
 ### Fixed
+- **`dallass`-style `|x|^p·|x|^q` products no longer produce a NaN Hessian
+  at `x = 0` (gh #1042).** The `.nl` reader now merges `|e|^p·|e|^q` into
+  `|e|^(p+q)` (positive literal exponents, identical operands only; values
+  unchanged to rounding). `dallass` exact goes 123 → 28 iterations with no
+  restoration calls (v0.12.0: 41), and the limited-memory leg, which failed on
+  0.12.0 and 0.13.0, now solves.
+- **`max_wall_time` and `max_cpu_time` now bound `algorithm=active-set-sqp`
+  and crossover (gh #1054).** Neither was read on those paths, so a stalled
+  QP ran until killed from outside. The SQP stops with
+  `Maximum_WallTime_Exceeded` / `Maximum_CpuTime_Exceeded`, each QP gets what
+  is left of the budget, and crossover declines and keeps the interior
+  solution.
+- **Crossover no longer accepts a point that is feasible only in scaled
+  units (gh #1054).** It now also requires `constr_viol_tol`, `dual_inf_tol`
+  and `compl_inf_tol` in user units on the model as declared; gradient scaling
+  can shrink a row's violation by orders of magnitude (a violation of 1 read
+  `3.3e-7` on `hs13_bigstart`).
 - **A convex QCQP with a large cost vector now solves on the conic path
   (gh #1056).** `qcqp_ball` with its cost scaled to `(g, g)` ended
   `Numerical failure` on the conic arm from `g = 1e15`, and across
