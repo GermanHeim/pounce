@@ -33,6 +33,10 @@ changes.
   error, with its pivots, refactorizations, Schur updates, rank-guard passes
   and wall time, on accepted reports too. `ParametricActiveSetSolver::rank_guard_calls`
   counts the linear-independence guard passes behind the last of these.
+  Every active-set SQP step QP, including those in crossover's step 4 and the
+  IPM→SQP handover, now logs the same figures at debug level
+  (`RUST_LOG=pounce::sqp::qp=debug`), so a slow SQP can be traced to the QP
+  that cost it.
 
 ### Changed
 - **Active-set SQP step QPs use Schur-complement updates when `n + m ≥ 500`**
