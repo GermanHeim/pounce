@@ -10,6 +10,12 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **The JSON report records `mu_strategy_fallback` re-solves (gh #1042)** as
+  `statistics.mu_strategy_fallback` (first attempt's status, iterations,
+  restoration calls and objective; the retry's; whether it was promoted).
+  `scripts/sweep-fixtures.sh` shows it in a new `mu=` column. Previously a
+  first attempt that got worse and was rescued by the fallback read as a
+  speed-up.
 - **`ipm_sqp_handover`: the interior-point method can hand its iterate to the
   active-set SQP before convergence (gh #1054).** Once the overall NLP error
   reaches `ipm_sqp_handover_tol` (default `1e-4`), or has not halved in
@@ -28,6 +34,16 @@ changes.
   alone would have been 1.6 GB.
 
 ### Changed
+- **`--minima mlsl` no longer counts a repeat infeasible landing against
+  `patience` (gh #1042 R4c).** A launch that ends violating the constraints
+  at a point an earlier launch already ended at is one more sample of that
+  infeasible basin, not evidence that the landscape is exhausted. The first
+  hit of each infeasible point, every other failure, and every infeasible
+  landing before a minimum has been found still count. On
+  `circle_parabola_t0p5` (`--n-minima 6 --max-solves 30 --patience 8`, seeds
+  0–9) MLSL now finds both minima on 8 of 10 seeds (was 5; 0.12.0 7), at
+  19.5 mean solves (was 10.0). Applies to the CLI and `pounce.find_minima`
+  alike; other methods are unchanged.
 - **Active-set SQP step QPs use Schur-complement updates when `n + m ≥ 500`**
   unless `sqp_qp_use_schur_updates` is set (gh #1054). On all 138
   Maros-Mészáros problems through `algorithm=active-set-sqp` the update path
@@ -181,6 +197,12 @@ changes.
   a non-negative whole number, and for a Jacobian whose rows, columns and
   values differ in count, rather than wrapping, saturating or truncating.
 ### Fixed
+- **`dallass`-style `|x|^p·|x|^q` products no longer produce a NaN Hessian
+  at `x = 0` (gh #1042).** The `.nl` reader now merges `|e|^p·|e|^q` into
+  `|e|^(p+q)` (positive literal exponents, identical operands only; values
+  unchanged to rounding). `dallass` exact goes 123 → 28 iterations with no
+  restoration calls (v0.12.0: 41), and the limited-memory leg, which failed on
+  0.12.0 and 0.13.0, now solves.
 - **`max_wall_time` and `max_cpu_time` now bound `algorithm=active-set-sqp`
   and crossover (gh #1054).** Neither was read on those paths, so a stalled
   QP ran until killed from outside. The SQP stops with
