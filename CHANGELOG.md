@@ -181,6 +181,17 @@ changes.
   a non-negative whole number, and for a Jacobian whose rows, columns and
   values differ in count, rather than wrapping, saturating or truncating.
 ### Fixed
+- **The active-set QP's linear-independence guard no longer depends on
+  `linear_solver` (gh #1061).** With MA57, which has no sparse rank-reveal,
+  the guard fell back to dense modified Gram-Schmidt: one length-`n` row per
+  active constraint, `O(k²·n)` time, gigabytes on an equality-heavy NLP. Every
+  SQP QP paid that cost, including the step-4 fallback of the IPM→SQP
+  handover. The QP now always uses FERAL's sparse LU probe for the rank test
+  and keeps the chosen backend for the KKT factorizations, so MA57 also gets
+  the cold-solve equality pruning. If the probe fails, the dense fallback runs
+  only below `k²·n = 10¹⁰`. On a 3000-row rank-deficient equality block, a
+  cold solve with a backend that has no rank-reveal of its own drops from 68 s
+  to 0.04 s.
 - **`max_wall_time` and `max_cpu_time` now bound `algorithm=active-set-sqp`
   and crossover (gh #1054).** Neither was read on those paths, so a stalled
   QP ran until killed from outside. The SQP stops with

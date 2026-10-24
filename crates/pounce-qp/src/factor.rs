@@ -202,11 +202,12 @@ impl LinearSolver {
         self.factored
     }
 
-    /// Whether the backend can rank-reveal a constraint Jacobian (the
-    /// sparse linear-independence guard). Falls back to dense MGS when
-    /// `false` (e.g. the MA57 backend).
+    /// Whether [`Self::determine_dependent_rows`] is available. Always
+    /// `true`: a backend without a rank-reveal of its own (MA57) borrows
+    /// FERAL's sparse probe, so the QP's linear-independence guard never
+    /// depends on `linear_solver` (gh#1061).
     pub fn provides_degeneracy_detection(&self) -> bool {
-        self.backend.provides_degeneracy_detection()
+        true
     }
 
     /// Rank-reveal the dependent rows of the constraint Jacobian `J`
@@ -214,6 +215,15 @@ impl LinearSolver {
     /// 0-based indices of a maximal set of redundant rows. The backend
     /// factors a throwaway system internal to itself, leaving this
     /// wrapper's cached KKT factor untouched.
+    ///
+    /// A backend that does not rank-reveal (MA57 keeps the trait default)
+    /// is answered by FERAL's sparse LU probe instead. Before gh#1061 the
+    /// caller fell back to dense modified Gram-Schmidt for it — one length-`n`
+    /// normal per active row, `O(k·n)` memory and `O(k²·n)` time — so picking
+    /// MA57 for the interior point put that in every SQP QP: on an NLP with
+    /// `n ≈ 15 000` and `≈ 10 800` equalities, gigabytes and `~10¹²` flops
+    /// per pass. The probe factors a throwaway matrix, so which backend owns
+    /// the KKT factor is irrelevant to it.
     pub fn determine_dependent_rows(
         &mut self,
         n_rows: Index,
@@ -223,7 +233,11 @@ impl LinearSolver {
         vals: &[Number],
         c_deps: &mut Vec<Index>,
     ) -> ESymSolverStatus {
-        self.backend
-            .determine_dependent_rows(n_rows, n_cols, irn, jcn, vals, c_deps)
+        if self.backend.provides_degeneracy_detection() {
+            self.backend
+                .determine_dependent_rows(n_rows, n_cols, irn, jcn, vals, c_deps)
+        } else {
+            pounce_feral::determine_dependent_rows(n_rows, n_cols, irn, jcn, vals, c_deps)
+        }
     }
 }

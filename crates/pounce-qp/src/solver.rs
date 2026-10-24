@@ -4276,16 +4276,10 @@ impl PrunedEqualities {
         if eq_rows.len() < 2 {
             return None;
         }
-        // Sparse rank-reveal only. This now runs on *every* cold solve with
-        // two or more equality rows, not just after a factorization has
-        // failed, and the dense fallback in `independent_active_subset` is
-        // `O(k²·n)` modified Gram-Schmidt — on a backend without the sparse
-        // probe (MA57) and a Maros-Meszaros-sized equality block that is the
-        // whole solve budget. Without the probe, keep the pre-gh#971
-        // behaviour rather than pay that on every solve.
-        if !linsol.provides_degeneracy_detection() {
-            return None;
-        }
+        // This runs on *every* cold solve with two or more equality rows, not
+        // just after a factorization has failed, so it must be the sparse
+        // probe: `LinearSolver` supplies FERAL's for every KKT backend, MA57
+        // included (gh#1061), and the dense fallback behind it is budgeted.
         let (kept, _) = independent_active_subset(linsol, qp, &eq_rows, &[]);
         if kept.len() >= eq_rows.len() {
             return None;
@@ -4605,20 +4599,34 @@ fn independent_active_subset_any(
     active_cons: &[usize],
     active_bounds: &[usize],
 ) -> (Vec<usize>, Vec<usize>) {
-    // Prefer the backend's sparse rank-reveal (feral's `SparseLu`
-    // degeneracy probe) when available — it factors a sparse augmented
-    // system in O(nnz) instead of the dense O(k²·n) modified-Gram-Schmidt
-    // grind, which is the operation that grinds large degenerate LPs
-    // (the NETLIB GEN family) to a halt. Fall back to dense MGS for
-    // backends that don't rank-reveal (e.g. MA57).
-    if linsol.provides_degeneracy_detection() {
-        if let Some(kept) = independent_active_subset_sparse(linsol, qp, active_cons, active_bounds)
-        {
-            return kept;
-        }
+    // The sparse rank-reveal (feral's `SparseLu` degeneracy probe, which
+    // `LinearSolver` provides whatever the KKT backend — gh#1061) factors a
+    // sparse augmented system in O(nnz) instead of the dense O(k²·n)
+    // modified-Gram-Schmidt grind, which is the operation that grinds large
+    // degenerate LPs (the NETLIB GEN family) to a halt.
+    if let Some(kept) = independent_active_subset_sparse(linsol, qp, active_cons, active_bounds) {
+        return kept;
+    }
+    // The probe failed. Dense MGS is the fallback only while it is
+    // affordable: past the budget it is gigabytes of dense normals and a
+    // pass measured in minutes, run inside loops that check no deadline.
+    // Keeping every row is what the guard returned before it existed; each
+    // caller already treats "nothing dropped" as "this guard cannot help"
+    // and moves on to its next recovery (inertia shift, elastic mode).
+    let k = (active_cons.len() + active_bounds.len()) as Number;
+    if k * k * qp.n as Number > DENSE_GUARD_FLOP_BUDGET {
+        return (active_cons.to_vec(), active_bounds.to_vec());
     }
     independent_active_subset_dense(qp, active_cons, active_bounds)
 }
+
+/// Largest `k²·n` for which [`independent_active_subset_any`] falls back to
+/// dense Gram-Schmidt when the sparse probe fails: seconds rather than minutes
+/// (the gh#1061 test fixture, `k²·n = 2.7·10¹⁰`, spent 68 s in the guard), and
+/// at the worst `k ≈ n` shape about `n = 2000`, some 30 MB of dense normals. The
+/// gh#1061 model (`k ≈ 14 000`, `n ≈ 15 000`) is `3·10¹²`, so it is skipped
+/// rather than ground through.
+const DENSE_GUARD_FLOP_BUDGET: Number = 1e10;
 
 /// Sparse linear-independence guard via the backend's Ipopt-style
 /// degeneracy probe. Builds the active-row Jacobian `J` as a 1-based
@@ -4711,9 +4719,8 @@ fn independent_active_subset_sparse(
 }
 
 /// Dense modified-Gram-Schmidt linear-independence guard — the fallback
-/// for backends without a sparse rank-reveal. Allocates a dense normal
-/// per active row and orthogonalizes; O(k²·n). Retained byte-for-byte
-/// for the MA57 backend.
+/// when the sparse probe fails, within [`DENSE_GUARD_FLOP_BUDGET`].
+/// Allocates a dense normal per active row and orthogonalizes; O(k²·n).
 fn independent_active_subset_dense(
     qp: &QpProblem,
     active_cons: &[usize],
