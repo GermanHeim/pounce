@@ -10,6 +10,12 @@ changes.
 ## [Unreleased]
 
 ### Added
+- **Cooperative cancellation hook for `pounce-minima` local solvers.**
+  `LocalSolve::should_stop` (default `false`) lets a local solver cancel the
+  search before a solve, while sampling, during MLSL clustering and start
+  filtering, and before the optional dual-recovery solve, keeping the minima
+  accepted so far. `IpoptLocalSolve` exposes it through
+  `IpoptLocalSolve::with_time_limit(Duration)`.
 - **The JSON report records `mu_strategy_fallback` re-solves (gh #1042)** as
   `statistics.mu_strategy_fallback` (first attempt's status, iterations,
   restoration calls and objective; the retry's; whether it was promoted).
