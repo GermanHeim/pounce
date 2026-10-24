@@ -52,7 +52,7 @@ iterations after a now-*correct* inertia report.
 | **R2d** | `pooling_rt2stp` iteration 4 (sibling of R2) | FERAL 0.21 reports 71 negatives, 72 required; FERAL 0.20 reported 73 on v0.12.0's matrix | either an inertia-count defect in FERAL (crates.io dependency `feral = 0.21.0`, upstream jkitchin/feral — not vendored) or a genuinely ambiguous near-singular matrix | **measure first** — exact count vs both FERAL counts on the dumped matrix; fix upstream, or work around in `pounce-feral` (classify as noise → `Singular`, no escalation spent) | **not recoverable here — not a count defect (measured)** (2026-10-22: the 0.13.0 iteration-4 matrix is singular to working precision — two scaled eigenvalues 1.6e-18 / 1.1e-15, next 7.7e-4 — and its exact count is 71, which FERAL 0.21, 0.20 and 0.18 all report on the dump; v0.12.0's iteration-4 matrix is a *different*, nonsingular one (min \|λ\| 2.4e-9, exact 73, all three FERALs 73); the noise rule is gated off by `min_piv` 5.95e-14 vs floor 3.33e-14; three pounce-feral workarounds measured, none admissible; see log). Next: **R2c** |
 | **R2e** | `pooling_rt2stp` iteration 4 (sibling of R2) | both versions accept a `δ_c`-free factor with min \|eig\| 2e-17 after the gh#592 walk-back | the walk-back accepts any factor FERAL calls `Success`; a numerically singular one is the source of the 6.4e16 step | **candidate** — refuse the withdrawal when the factor's `min_pivot_magnitude` is under the inertia trust floor; keeps `δ_c` instead of repairing the step downstream | **not recoverable this way (measured)** (2026-10-22 on `3e186634`. *Re-baselined after R2b* first: the regression still reproduces — base solve 494 it `Solved_To_Acceptable_Level`, 22 resto, rescued by `mu_strategy_fallback` (109) — so not `dropped`. Refuted by the item's own clause: the iteration-4 walk-back's `Success` has `min_piv` **3.98e-14, above** the `150·ε` = 3.33e-14 floor. The rule's corpus population, both legs, is **8** first-`δ_c`-free `Success` factors, all on exact pooling (iterations 5–39 + restoration); firing on them takes the base solve 494 Acceptable → **3000 `MaximumIterationsExceeded`** and the reported verdict `SolveSucceeded` → MaxIter. The widened form (certify sub-floor uncertified `Singular`s too) is gh#981's rejected "reinstate on any `Singular`": base 141 Acceptable at −3261.36, reported 491, gh#884's reproducer dual 1.3e-10 → 7.0e-5; see log) |
 | **R3** | `dallass` (exact, x86) | 41 → **123** it (arm64 41 → 65, *issue*) | FERAL 0.21 path lands on `x = 0` of `|x|²·|x|^0.85` terms 12 times instead of 2; each is a non-finite Hessian → restoration entry; `5fc8c797` only stops the third from ending the solve | **partial** — (A) the Hessian is an evaluator artefact (`0·∞` from the product rule; the true second derivative of `|x|^2.85` at 0 is 0), fixable in `pounce-nl`; (B) R2 may move it; re-baseline after R2 | **done** (2026-10-22, option A: `.nl` reader merges `|e|^p·|e|^q`; exact 123 → **28** it, 12 → **0** restoration calls; lbfgs ErrorInStep/146 → SolveSucceeded/301; see log) |
-| **R4** | minima `circle_parabola_t0p5` mlsl | found 2 of 2 → **1** | #993 `91b6dcda`: `MLSL_GAMMA` 2 → 0.5; at 0.5 the extra launches re-find the first minimum and the stagnation counter (`patience 8`) stops the search | **partial** — no single gamma wins at seed 0 (table in R4); needs a 10-seed measurement; the structural stagnation rule is now its own item, **R4b** | todo |
+| **R4** | minima `circle_parabola_t0p5` mlsl | found 2 of 2 → **1** | #993 `91b6dcda`: `MLSL_GAMMA` 2 → 0.5; at 0.5 the extra launches re-find the first minimum and the stagnation counter (`patience 8`) stops the search | **partial** — no single gamma wins at seed 0 (table in R4); needs a 10-seed measurement; the structural stagnation rule is now its own item, **R4b** | **not recoverable this way (measured)** (2026-10-24, 10 seeds × 8 gammas, x86_64: no gamma meets step 3(a). circle_parabola finds 2 on **5/10** seeds at every gamma 0.4–0.75 (4/10 at 0.6) and **7/10** at 1.0 and at 0.12.0's 2.0 — the seed-0 "2 → 1" is 7/10 → 5/10 across seeds, mean found 1.7 → 1.5 — and the gammas that reach 7/10 cost camel 5.8 → 4.0 / 2.0 and haverly 2.0 → 1.5 / 1.0 (wavy 6 → 1 at 2.0). Gamma stays 0.5; nothing changed. Table: `dev-notes/issue-1042-r4-mlsl-gamma-grid.tsv`; see log. The structural lever is R4b's) |
 | **R4b** | minima `circle_parabola_t0p5` mlsl (sibling of R4) | at gamma 0.5 the search ends `converged` after 9 solves: 8 consecutive launches re-find minimum 1 and trip `patience 8` with 21 of 30 solves unused | the stagnation counter treats an MLSL launch that converges to an archived minimum as a failed independent draw; it is basin information | **candidate** — grow that minimum's exclusion radius and do not count the re-find as a full strike; gamma stays 0.5 | todo |
 | **B1** | benchmark `qcqp1000-2c` (mittelmann) | 99 it / 28 s → 163 it / 112 s (*comment*) | pounce reuses the symbolic ordering FERAL chose for the least-squares multiplier-init matrix (W = 0, D = I) for every later KKT; `invalidate_symbolic_cache()` after the init factor halves factor time (*comment*) | **yes** for the code change; **measurement blocked** here (no benchmark corpus on this machine); a branch `perf/feral-symbolic-after-init` is said to be in progress — check `origin` first | **skipped — owner's work in progress** (2026-10-22: the branch is on `origin` at `c9182194` and is draft PR **#1046**, open; the owner's follow-up comment 6346290866 records it as model-dependent — wins qcqp1000-2c 106 → 76 s wall, NARX_CFy, clnlbeam, pooling; losses qcqp1000-2nc, qcqp1500-1c 206 → 586 it, nql180, dallasl, x86 deb7 — and moves the principled fix into FERAL, jkitchin/feral#227. Not duplicated here; see §6 B1 log) |
 | B2 | benchmark `brainpc0/1` (vanderbei) | 58 it / 1.1 s → 1073 + 52 it / 75 s; 185 + 24 → 2117 + 24 (*comment*) | after a now-correct inertia at one iterate, pounce's restoration takes 811 of 1073 iterations (*comment*) | **unknown** — investigate only after B1 lands (B1 changes the trajectory) and only with the corpus | blocked (and owner's work in progress: open PR **#1047**, branch `fix/brainpc-restoration-path`, plus the restoration outer-progress item in comment 6350601458; B1 log) |
@@ -125,6 +125,11 @@ to the rest of a family once one member recovers the target.
    log). B2's restoration path is likewise in the owner's open PR #1047.
 6. **R4** MLSL gamma — independent, own sweep (`sweep-minima.sh`); its
    10-seed table is also R4b's measure-first step, so R4 runs first.
+   **Closed 2026-10-24: not recoverable this way** — no gamma recovers
+   circle_parabola on more than 7 of 10 seeds (0.12.0's own 2.0 included),
+   and every value that reaches 7 loses camel / haverly minima; the table
+   is `dev-notes/issue-1042-r4-mlsl-gamma-grid.tsv`, regenerated by the
+   `.sh` beside it (§6 R4 log).
 7. **R4b** structural MLSL-aware stagnation rule — sibling of R4; drop or
    keep per §4 once R4's decision is in.
 8. **R1d** cut the first, unequilibrated HSDE solve short — convex arm, but
@@ -1422,7 +1427,12 @@ new minimum", which is what patience is for.
 **Reproduce.** `p-prev` row above (found 1 / 9 / `converged`); count the
 re-finds in the trace (`TraceEntry.accepted == false` with `success`).
 
-**Measure first.** The 10-seed table R4 step 2 produces (seeds 0–9, camel /
+**Measure first.** *(R4 ran, 2026-10-24: the table is
+`dev-notes/issue-1042-r4-mlsl-gamma-grid.tsv`, re-runnable on any binary with
+`dev-notes/issue-1042-r4-mlsl-gamma-grid.sh <pounce> <out.tsv> 0.5`; its
+`exit_*` columns give the re-find / infeasible split per run — read the R4
+log's strike table before implementing, it bears directly on this item's
+gate.)* The 10-seed table R4 step 2 produces (seeds 0–9, camel /
 circle_parabola_t0p5 / haverly_t3_brf0 / wavy / wavy_1e12, gamma 0.5) —
 reuse it if R4 ran; otherwise run it here, adding per run: launches that
 re-found an archived minimum, and the stop reason. The item is worth it
@@ -1796,6 +1806,24 @@ raise it. Docs-only iterations (skips) still run `cargo fmt --check`.
   `Solve_Succeeded` attempt at 492 again. The R2 family's target (pooling
   ≤ 300 on the first attempt) remains unmet with every member terminal;
   a further lever would need a new item, measured on the first attempt.
+- **R4 MLSL default `gamma` (circle_parabola_t0p5 mlsl).** No default
+  recovers it without undoing #993: over seeds 0–9 circle_parabola finds
+  both minima on 5/10 seeds at gamma 0.4–0.75 and 7/10 at 1.0 and 2.0,
+  while camel's mean found falls 5.8 (0.5) → 4.0 (1.0) → 2.0 (2.0) and
+  haverly's 2.0 → 1.5 → 1.0 — the #993/gh#989 failure (sample cap before
+  the solves launch) coming back. Even v0.12.0's gamma 2 misses circle's
+  second minimum on 3 of 10 seeds, so the seed-0 line overstated the loss
+  (7/10 → 5/10, not 2 → 1). On every failing seed the stop is `patience 8`
+  (status `converged`), and the strikes are mostly **locally infeasible
+  launches**, not re-finds of minimum 1: at gamma 0.5, seeds 1/2/4 are
+  7 infeasible + 1 re-find, seed 6 is 5 + 3, only seed 0 is 2 + 6. Suggested
+  follow-up issue: **"find-minima mlsl: circle_parabola_t0p5 stops at
+  `patience 8` on locally infeasible launches, finding 1 of 2 minima on
+  5/10 seeds with 21 of 30 solves unused"** — whether an infeasible
+  launch should be a full strike on a constrained model is the question,
+  not a known defect. Numbers: 5/10 seeds stop at
+  found 1, 9 solves; 7 of 8 strikes infeasible on 3 of those 5; 0 of 10
+  stops are budget or sample cap.
 - **Anything that requires the benchmark corpus** (B1's benefit, B2, B3) is
   blocked on this machine: `POUNCE_BENCH_DATA` is unset and no
   `~/projects/pounce-bench-data` exists. The code half of B1 is still in
@@ -3178,3 +3206,123 @@ Paused for budget before R4 started; R4 made no changes. To resume, pick up
 §2 at **R4** (then R4b, R1d, R1e, R1b, R1c), following §4 including the C1
 first-attempt rule. The `p-base` (v0.12.0) binary and sweep outputs lived in
 the session scratchpad and are gone; rebuild them.
+
+### R4 — 2026-10-24 — not recoverable this way (measured)
+
+Measured on x86_64 (4 CPUs, AVX2+FMA) with `p-prev` = release `pounce`
+built from `59fec629` (PR #1048's head after merging main; this file and
+the `mu=` column are in it) in a separate worktree and `CARGO_TARGET_DIR`,
+on branch `claude/pounce-1042-loop-r4` (the loop's own branch is being
+validated by another agent in parallel and was not touched).
+`POUNCE_BENCH_DATA` unset, no `~/projects/pounce-bench-data` (checked once;
+R4 does not need it). `p-base` (v0.12.0) was **not** rebuilt: the
+Baseline log already records `p-base` at its default 2 = found 2 / 11 and
+`p-base --gamma 0.5` = found 1 / 9 at seed 0, i.e. the loss is the
+gamma value, and `p-prev --gamma 2` reproduces 2 / 11 exactly, so the
+grid's `2.0` row stands in for 0.12.0's default on this binary.
+
+**#993's rationale, checked (PR #993 item (f), issue #989 item 4).**
+gamma 2 on a 2-D box gave a critical radius that left "a better sample
+nearby" for almost every sample, so MLSL hit the sample cap after 2
+solves on six-hump camel (2 of 6 minima at `max_solves 60, patience 15`);
+0.5 finds all 6, and the CLI was aligned to the Python default, which
+reads the same crate constant (`python/pounce/_minima.py` passes
+`strategy_kw["gamma"]` through; the default lives only in
+`MLSL_GAMMA`). Any recovery has to keep that: the camel / wavy columns
+below are that contract measured across seeds.
+
+**Reproduce (`p-prev`, sweep-minima.sh, seed 0).** `circle_parabola_t0p5
+mlsl converged solves=9 found=1` — reproduces the inventory row. The other
+mlsl lines: camel converged 12 / 4, haverly converged 10 / 2, wavy and
+wavy_1e12 target_reached 6 / 6, the three saddle fixtures converged 8 / 0,
+wavy_accept_anything converged 8 / 0 kkt_rej=8 (54 lines total).
+
+**Measured: seeds 0–9 × gamma ∈ {0.4, 0.45, 0.5, 0.55, 0.6, 0.75, 1.0,
+2.0}** (step 2's grid plus 0.4 / 0.45 / 0.55 to rule out a nearby winner
+and 2.0 as the 0.12.0 reference), sweep budget `--n-minima 6
+--max-solves 30 --patience 8`. Cell = mean minima found / mean solves over
+10 seeds. All 400 runs: `dev-notes/issue-1042-r4-mlsl-gamma-grid.tsv`,
+regenerated byte-identically by `dev-notes/issue-1042-r4-mlsl-gamma-grid.sh
+<pounce> <out.tsv> [gammas]` (it reads the embedded models out of
+`scripts/sweep-minima.sh`, so the two cannot drift); deterministic — two
+independent runs of the grid were identical.
+
+| gamma | camel | circle_parabola_t0p5 | haverly_t3_brf0 | wavy | wavy_1e12 |
+|---|---|---|---|---|---|
+| 0.4 | 6.0 / 7.4 | 1.5 / 10.0 (**5/10** find 2) | 2.0 / 10.2 | 6.0 / 6.0 | 6.0 / 6.1 |
+| 0.45 | 5.9 / 8.0 | 1.5 / 10.0 (**5/10** find 2) | 2.0 / 10.4 | 6.0 / 6.1 | 6.0 / 6.1 |
+| **0.5** (default) | 5.8 / 8.2 | 1.5 / 10.0 (**5/10** find 2) | 2.0 / 10.2 | 6.0 / 6.1 | 6.0 / 6.0 |
+| 0.55 | 5.7 / 6.6 | 1.5 / 10.0 (**5/10** find 2) | 2.0 / 10.2 | 6.0 / 6.0 | 6.0 / 6.0 |
+| 0.6 | 5.5 / 5.9 | 1.4 / 9.8 (**4/10** find 2) | 2.0 / 10.3 | 6.0 / 6.0 | 6.0 / 6.0 |
+| 0.75 | 4.6 / 4.6 | 1.5 / 10.6 (**5/10** find 2) | 2.0 / 8.8 | 6.0 / 6.0 | 6.0 / 6.0 |
+| 1.0 | 4.0 / 4.0 | 1.7 / 11.5 (**7/10** find 2) | 1.5 / 2.0 | 6.0 / 6.0 | 6.0 / 6.0 |
+| 2.0 (0.12.0) | 2.0 / 2.0 | 1.7 / 10.6 (**7/10** find 2) | 1.0 / 1.0 | 1.0 / 1.0 | 1.0 / 1.0 |
+
+Stop status: at 0.5 camel is `target_reached` 9/10 (seed 0 `converged`
+at 4), wavy / wavy_1e12 `target_reached` 10/10, circle and haverly
+`converged` 10/10; at 1.0 camel and haverly are `sample_cap_reached`
+10/10; at 2.0 every fixture except circle is `sample_cap_reached` 10/10 —
+the gh#989 failure. circle_parabola is `converged` (stagnation at
+`patience 8`) on all 80 runs: never budget, never sample cap.
+
+**Decision (step 3).** (a) needs a value that is never worse than 0.5 on
+camel / wavy mean found *and* recovers circle on most seeds. No value
+does: circle is flat at 5/10 from 0.4 to 0.75 (4/10 at 0.6), and the only
+values that lift it (7/10 at 1.0 and 2.0) take camel 5.8 → 4.0 / 2.0 and
+haverly 2.0 → 1.5 / 1.0 — reintroducing exactly what #993 fixed. 0.12.0's
+own default fails circle on 3 of 10 seeds, so the seed-0 line overstated
+the regression: across seeds it is **7/10 → 5/10 seeds, mean found 1.7 →
+1.5**, not "2 → 1". (b) is the structural stagnation change, which §3
+since made its own item, **R4b**; §4 forbids both in one iteration, so R4
+closes here. **gamma stays 0.5; no code, help text, docs, CHANGELOG or
+Python default changed.**
+
+**For R4b — what the strikes are.** The grid's `exit_*` columns count
+per-solve `EXIT:` banners (they include one dual-recovery re-solve per
+accepted minimum, m > 0; the identity `solves = exit_optimal +
+exit_infeasible + exit_other − found` holds on all 80 circle and 80
+haverly rows). "rej-opt" below is `exit_optimal − 2·found`: launches that
+converged Optimal and were rejected — re-finds of an archived minimum, or
+the saddle / bounds vetoes (`kkt_rej` is 0 throughout), so it is an
+*upper* bound on re-finds. circle_parabola_t0p5, found / solves (rej-opt,
+locally infeasible):
+
+| seed | γ 0.5 | γ 1.0 | γ 2.0 |
+|---|---|---|---|
+| 0 | 1 / 9 (6, 2) | 2 / 15 (7, 6) | 2 / 11 (3, 6) |
+| 1 | 1 / 9 (1, 7) | 2 / 14 (6, 6) | 1 / 9 (2, 6) |
+| 2 | 1 / 9 (1, 7) | 1 / 9 (3, 5) | 2 / 11 (4, 5) |
+| 3 | 2 / 10 (3, 5) | 2 / 10 (4, 4) | 2 / 10 (2, 6) |
+| 4 | 1 / 9 (1, 7) | 1 / 9 (1, 7) | 2 / 15 (5, 8) |
+| 5 | 2 / 11 (3, 6) | 2 / 11 (5, 4) | 2 / 11 (4, 5) |
+| 6 | 1 / 9 (3, 5) | 1 / 9 (2, 6) | 1 / 9 (1, 7) |
+| 7 | 2 / 10 (5, 3) | 2 / 10 (6, 2) | 2 / 10 (3, 5) |
+| 8 | 2 / 11 (2, 7) | 2 / 16 (2, 12) | 1 / 9 (1, 7) |
+| 9 | 2 / 13 (5, 6) | 2 / 12 (6, 4) | 2 / 11 (4, 5) |
+
+On the five gamma-0.5 seeds that stop at found 1, the eight strikes are
+6+2, 1+7, 1+7, 1+7, 3+5 (rej-opt + infeasible): re-finds dominate **only
+seed 0**, the one seed every earlier table used. On seeds 1/2/4 seven of
+eight strikes are launches that converged to a point of local
+infeasibility (objective 2.0, the circle's infeasible stationary point).
+R4b's measure-first gate ("re-finds dominate the stop on circle_parabola
+on most seeds") reads as **unmet on this data** — R4b should confirm with
+a direct trace count (`TraceEntry.accepted == false` with `success`)
+before implementing, and its stop condition is the first thing to check.
+Not decided here (R4b is its own iteration).
+
+**Sweeps.** `scripts/sweep-minima.sh` was taken on `p-prev` (the numbers
+above). No code changed, so the new binary *is* `p-prev`: the minima
+sweep and `scripts/sweep-fixtures.sh` (both legs) diff empty by
+construction and were not re-run.
+
+**Tests.** `cargo fmt --all -- --check` (clean). Not run, and why: the
+pounce-minima / pounce-cli tests and `issue989_mlsl_cli` (nothing they
+exercise changed); the Python tests — the extension is not built in this
+environment (no `pounce` module, no `maturin`, no `pytest`), and nothing
+on the Python side moved (the default is the crate's, read by both
+frontends).
+
+**Next.** R4b (§2 item 7), starting from this table and the strike split
+above. Sibling rule: R4 did not move gamma, so R4b is not re-baselined —
+its reproduce step is this log's seed-0 row (found 1 / 9, `converged`).
