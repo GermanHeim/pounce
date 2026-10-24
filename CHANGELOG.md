@@ -34,6 +34,16 @@ changes.
   alone would have been 1.6 GB.
 
 ### Changed
+- **`--minima mlsl` no longer counts a repeat infeasible landing against
+  `patience` (gh #1042 R4c).** A launch that ends violating the constraints
+  at a point an earlier launch already ended at is one more sample of that
+  infeasible basin, not evidence that the landscape is exhausted. The first
+  hit of each infeasible point, every other failure, and every infeasible
+  landing before a minimum has been found still count. On
+  `circle_parabola_t0p5` (`--n-minima 6 --max-solves 30 --patience 8`, seeds
+  0–9) MLSL now finds both minima on 8 of 10 seeds (was 5; 0.12.0 7), at
+  19.5 mean solves (was 10.0). Applies to the CLI and `pounce.find_minima`
+  alike; other methods are unchanged.
 - **Active-set SQP step QPs use Schur-complement updates when `n + m ≥ 500`**
   unless `sqp_qp_use_schur_updates` is set (gh #1054). On all 138
   Maros-Mészáros problems through `algorithm=active-set-sqp` the update path
