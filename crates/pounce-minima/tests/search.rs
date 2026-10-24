@@ -11,6 +11,14 @@
 //! | `a_single_minimum_converges` | `Stop::Converged` via patience after accepts |
 //! | `the_solve_budget_stops_the_search` | `Stop::BudgetExhausted` |
 //! | `mlsl_sample_cap_stops_the_search` | `Stop::SampleCapReached` |
+//! | `cancellation_after_the_first_minimum_keeps_it_and_skips_extra_solves` | `Stop::Cancelled`, preserving the archive and skipping dual recovery |
+//! | `cancellation_takes_precedence_over_patience_after_rejection` | cancellation versus `patience = 1`, all six strategy loops |
+//! | `cancellation_stops_a_large_mlsl_sample_batch` | cancellation during MLSL sampling |
+//! | `ipopt_local_solve_time_limit_resets_for_each_search` | a fresh time budget when reusing the solver across searches |
+//! | `ipopt_local_solve_zero_time_limit_cancels_before_any_solve` | zero time budget cancels before any solve |
+//! | `already_cancelled_search_skips_the_initial_gradient` | cancellation before the initial objective and gradient evaluations |
+//! | `reaching_the_target_takes_precedence_over_cancellation` | target success and bound dual recovery despite cancellation |
+//! | `cancellation_keeps_known_zero_duals_for_an_interior_bound_only_minimum` | cancellation preserves known zero bound multipliers |
 //! | `kkt_tol_vetoes_a_converged_non_stationary_point` | the gh#983 veto, and `kkt_tol: None` |
 //! | `failed_solves_exhaust_patience` | a non-converged solve → reject → patience |
 //! | `ipopt_local_solve_puts_the_callers_hook_back` | `IpoptLocalSolve`'s `Drop` |
@@ -458,6 +466,37 @@ fn cancellation_after_the_first_minimum_keeps_it_and_skips_extra_solves() {
 }
 
 #[test]
+fn cancellation_takes_precedence_over_patience_after_rejection() {
+    for method in [
+        Method::Multistart,
+        Method::Mlsl,
+        Method::Basinhopping,
+        Method::Flooding,
+        Method::Deflation,
+        Method::Tunneling,
+    ] {
+        for cancelled in [false, true] {
+            let mut solver = Cancelling::new(Some(vec![3.0, 3.0]));
+            solver.stop_after_solves = cancelled.then_some(1);
+            let cfg = MinimaOptions {
+                patience: 1,
+                ..opts(method, 1, 4)
+            };
+            let r = find_minima(&bowl(), &mut solver, &cfg).unwrap();
+            let expected = if cancelled {
+                Stop::Cancelled
+            } else {
+                Stop::Converged
+            };
+            assert_eq!(r.stop, expected, "{method:?}, cancelled={cancelled}");
+            assert_eq!(r.n_solves, 1);
+            assert!(r.minima.is_empty());
+            assert_eq!(solver.solves.get(), 1);
+        }
+    }
+}
+
+#[test]
 fn cancellation_stops_a_large_mlsl_sample_batch() {
     let cancelled = Rc::new(Cell::new(false));
     let evals = Rc::new(Cell::new(0));
@@ -478,6 +517,31 @@ fn cancellation_stops_a_large_mlsl_sample_batch() {
     assert_eq!(r.minima.len(), 1);
     assert_eq!(solver.solves.get(), 1);
     assert_eq!(evals.get(), 3);
+}
+
+#[test]
+fn ipopt_local_solve_time_limit_resets_for_each_search() {
+    let mut app = quiet_app();
+    let mut solver = IpoptLocalSolve::new(&mut app).with_time_limit(Duration::from_millis(200));
+    let base = bowl();
+    let mut cfg = opts(Method::Multistart, 1, 4);
+
+    let first = find_minima(&base, &mut solver, &cfg).unwrap();
+    assert_eq!(first.stop, Stop::TargetReached);
+    assert_eq!(first.minima.len(), 1);
+    assert_eq!(first.n_solves, 1);
+
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        solver.should_stop(),
+        "the first search's budget has expired"
+    );
+
+    cfg.seed = 1;
+    let second = find_minima(&base, &mut solver, &cfg).unwrap();
+    assert_eq!(second.stop, Stop::TargetReached);
+    assert_eq!(second.minima.len(), 1);
+    assert_eq!(second.n_solves, 1);
 }
 
 #[test]

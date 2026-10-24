@@ -119,9 +119,6 @@ fn better_sample_within(
         let fi = fs[i];
         let mut hit = false;
         for &j in by_key[pos + 1..].iter() {
-            if should_stop() {
-                return None;
-            }
             if key(j) - ki >= radius {
                 break;
             }
@@ -132,9 +129,6 @@ fn better_sample_within(
         }
         if !hit {
             for &j in by_key[..pos].iter().rev() {
-                if should_stop() {
-                    return None;
-                }
                 if ki - key(j) >= radius {
                     break;
                 }
@@ -660,6 +654,8 @@ impl<'a> Driver<'a> {
     }
 
     fn reject(&mut self) -> Result<bool, Stop> {
+        // An expired deadline must not be reported as patience convergence.
+        self.check_cancel()?;
         self.stagnant += 1;
         if self.stagnant >= self.cfg.patience {
             return Err(Stop::Converged);
@@ -1044,6 +1040,7 @@ pub fn find_minima_with<'a>(
     cfg: &'a MinimaOptions,
     hooks: Hooks<'a>,
 ) -> Result<MinimaResult, MinimaError> {
+    solver.begin_search();
     let info = base
         .borrow_mut()
         .get_nlp_info()
@@ -1314,6 +1311,8 @@ mod tests {
     /// The pruned sweep must give exactly the naive single-linkage answer.
     #[test]
     fn pruned_nearest_better_matches_the_naive_scan() {
+        use std::cell::Cell;
+
         let mut state = 12345u64;
         let mut rnd = || {
             state = state
@@ -1327,7 +1326,13 @@ mod tests {
             .collect();
         let fs: Vec<f64> = (0..400).map(|_| rnd()).collect();
         for radius in [0.01, 0.1, 0.3, 2.0] {
-            let fast = better_sample_within(&xs, &fs, &l, radius, &|| false).unwrap();
+            let polls = Cell::new(0);
+            let fast = better_sample_within(&xs, &fs, &l, radius, &|| {
+                polls.set(polls.get() + 1);
+                false
+            })
+            .unwrap();
+            assert_eq!(polls.get(), xs.len(), "radius {radius}");
             for i in 0..xs.len() {
                 let naive = (0..xs.len()).any(|j| {
                     j != i && fs[j] < fs[i] && scaled_distance(&xs[i], &xs[j], &l) < radius

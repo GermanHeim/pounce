@@ -80,6 +80,8 @@ pub struct LocalOutcome {
 /// it) and, for the repulsion strategies, already augmented. Calls are
 /// sequential and the search counts them against its own budget.
 pub trait LocalSolve {
+    fn begin_search(&mut self) {}
+
     fn solve(&mut self, problem: Rc<RefCell<dyn TNLP>>, mode: HessianMode) -> LocalOutcome;
 
     /// Cooperative cancellation: the search polls this between units of work
@@ -148,7 +150,7 @@ pub struct IpoptLocalSolve<'a> {
     caller_hessian: Option<String>,
     /// Whole-search time limit; `None` keeps the search unbounded.
     time_limit: Option<Duration>,
-    /// When the search first polled the limit.
+    /// When the current search began (or first polled outside a search).
     started: Cell<Option<Instant>>,
 }
 
@@ -174,6 +176,8 @@ impl<'a> IpoptLocalSolve<'a> {
     }
 
     /// Stop the search cooperatively once `limit` of wall clock has elapsed.
+    /// The budget restarts at each call to [`find_minima`](crate::find_minima)
+    /// or [`find_minima_with`](crate::find_minima_with), including setup time.
     pub fn with_time_limit(mut self, limit: Duration) -> Self {
         self.time_limit = Some(limit);
         self.started.set(None);
@@ -182,6 +186,10 @@ impl<'a> IpoptLocalSolve<'a> {
 }
 
 impl LocalSolve for IpoptLocalSolve<'_> {
+    fn begin_search(&mut self) {
+        self.started.set(Some(Instant::now()));
+    }
+
     fn should_stop(&self) -> bool {
         let Some(limit) = self.time_limit else {
             return false;
