@@ -3178,3 +3178,44 @@ Paused for budget before R4 started; R4 made no changes. To resume, pick up
 §2 at **R4** (then R4b, R1d, R1e, R1b, R1c), following §4 including the C1
 first-attempt rule. The `p-base` (v0.12.0) binary and sweep outputs lived in
 the session scratchpad and are gone; rebuild them.
+
+### Re-validated on main 68230fab — 2026-10-24
+
+Branch tip `59fec629` = merge of `origin/main` `68230fab` (gh#1054 SQP at
+scale / IPM→SQP handover, gh#1056 cone balancing, gh#1050 SOC corrector,
+gh#1055 external-iterate sensitivity, gh#1049) into the previous head
+`eab6e8fc`. Measured on x86_64, release `pounce-cli` built per worktree for
+`68230fab` (`p-main`) and `59fec629` (`p-pr`). Both sweeps used the
+branch's `scripts/sweep-fixtures.sh` (main's has no `mu=` column; `p-main`
+reads `-` there regardless), and the column was dropped with
+`sed -E 's/ mu=[^ ]+ +/ /'` before diffing. 242 fixture-legs each (121
+fixtures × 2), no `NO_JSON`; engine split identical either side (exact
+46 cvx-qp / 12 cvx-qcqp / 63 nlp; lbfgs 46 / 12 / 62 + 1 `square-lm`,
+`square_flowsheet_resto`, unchanged from main).
+
+```
+19c19
+< exact  dallass  nlp  SolveSucceeded          it=123  q=19  2nd=-                obj=-32393.22574
+---
+> exact  dallass  nlp  SolveSucceeded          it=28   q=0   2nd=-                obj=-32393.22574
+140c140
+< lbfgs  dallass  nlp  ErrorInStepComputation  it=146  q=4   2nd=kept(1),tot=292  obj=-32388.50847
+---
+> lbfgs  dallass  nlp  SolveSucceeded          it=301  q=1   2nd=-                obj=-32393.22574
+```
+
+Exactly R3's two lines, with R3's numbers unchanged; nothing main brought in
+interacts with the `.nl` merge. Lines with `mu=` other than `-` on `p-pr`
+are the same four as at C1, none new from main:
+
+- exact `csfi2` — `adaptive@Solved_To_Acceptable_Level/35,tot=56` (promoted; `it=21`)
+- exact `mu_fallback_point_floor` — `kept(adaptive:Infeasible_Problem_Detected/31),tot=86`
+- lbfgs `mu_fallback_point_floor` — `kept(monotone:Solved_To_Acceptable_Level/26),tot=46`
+- lbfgs `eigenb2` — `kept(monotone:Solved_To_Acceptable_Level/42),tot=89`
+
+`cargo fmt --all -- --check` clean; `cargo clippy --workspace --exclude
+pounce-hsl --all-targets -- -D clippy::correctness -D clippy::suspicious`
+exit 0 (warnings only, none denied); `cargo test -p pounce-nl -p pounce-nlp
+-p pounce-solve-report -p pounce-algorithm -p pounce-cli --no-fail-fast`
+2345 passed, 0 failed, 1 ignored. Not run: `vanderbei`/`benchmarks/qp`
+(`POUNCE_BENCH_DATA` unset), `scripts/sweep-minima.sh` (no minima change).
