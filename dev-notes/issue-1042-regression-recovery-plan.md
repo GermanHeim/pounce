@@ -3789,3 +3789,25 @@ so the CLI help and `python/pounce/_minima.py` are unchanged.
 **Next.** §2 item 8, **R1d** (cut the first, unequilibrated HSDE solve
 short) — convex arm, so it can at most reach `swept — needs benchmarks/qp
 before merge` here. The R4 family is closed by R4c.
+
+### Vanderbei A/B: `dallasl` / `dallasm` — 2026-10-24 — x86_64
+
+Models supplied by the owner; binaries: v0.12.0, main `68230fab`, PR
+`2864a85a` (the later merge of R4c touches only `pounce-minima`). Every PR
+run is a single attempt (`mu_strategy_fallback` null, no second opinion).
+
+| model | leg | v0.12.0 | main | PR |
+|---|---|---|---|---|
+| dallasl | exact | Acceptable/49, mu retry lost (tot 77) | Optimal 145, 10 resto | **Optimal 28, 0 resto** |
+| dallasl | lbfgs | ErrorInStep 495 | Optimal 51 (−202577.38) | Optimal 146 (−202603.62) |
+| dallasm | exact | ErrorInStep 32 | Optimal 314, 26 resto | **Optimal 22, 0 resto** |
+| dallasm | lbfgs | ErrorInStep 377 | ErrorInStep 332 + ladder (tot 664) | **Optimal 22** |
+
+The merge fires on every term (872 in dallasl, 182 in dallasm, 0 on main);
+non-finite Hessian evaluations go 9 → 0 and 26 → 0. Attribution controls are
+bit-identical: the PR binary on an unmerged copy reproduces main's tables,
+and main on a hand-merged copy reproduces the PR's. The one slower line,
+dallasl lbfgs 51 → 146, splits from main at iteration 4 on a rounding-level
+difference; perturbing one start value by 1e-14 moves that leg 51–345 on main
+and 22–380 on the PR, while the exact leg stays 22–30 with no restoration on
+the PR (main 40–314, always restoring). Not measured: arm64.
