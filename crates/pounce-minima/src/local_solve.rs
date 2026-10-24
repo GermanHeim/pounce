@@ -81,6 +81,17 @@ pub struct LocalOutcome {
 pub trait LocalSolve {
     fn solve(&mut self, problem: Rc<RefCell<dyn TNLP>>, mode: HessianMode) -> LocalOutcome;
 
+    /// Cooperative cancellation: the search polls this between units of work
+    /// (before solves, while sampling, clustering, and filtering starts) and
+    /// returns the archive accumulated so far when it returns `true`.
+    ///
+    /// It cannot interrupt a solve or an objective evaluation already under
+    /// way; those must return before the search can stop. The default keeps
+    /// existing solvers running to completion.
+    fn should_stop(&self) -> bool {
+        false
+    }
+
     /// Whether the problem's `eval_h` is its real Hessian. A frontend that
     /// declares a Hessian structure only to give L-BFGS a workspace, and fills
     /// it with zeros, returns `false`: the search then treats the problem as

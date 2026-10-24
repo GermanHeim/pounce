@@ -9,6 +9,12 @@ changes.
 
 ## [Unreleased]
 
+### Added
+- **Cooperative cancellation between local solves in `pounce-minima`.**
+  `LocalSolve::should_stop` (default `false`) is polled before solves, while
+  sampling, during MLSL clustering and start filtering, and before the
+  optional dual-recovery solve.
+
 ### Fixed
 - **A convex QCQP with a large cost vector now solves on the conic path
   (gh #1056).** `qcqp_ball` with its cost scaled to `(g, g)` ended
