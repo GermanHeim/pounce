@@ -959,6 +959,51 @@ where
             crate::simplex::SeedOutcome::NoSeed => None,
         }
     };
+    // An LP whose simplex phase 2 finished is solved: return the vertex and
+    // its basis duals once they pass the same status verification as an
+    // active-set answer (gh#1061). Certifying it with the active-set engine
+    // instead is what failed: on Mészáros `aircraft` (n = 7 517, 3 754
+    // equalities) the engine, started on the optimal vertex, wandered to its
+    // iteration cap 35.5 infeasible. A vertex that does not verify is still a
+    // feasible seed, and the active-set solve below takes it from there.
+    let vertex = match vertex {
+        Some(mut v) => match v.lp_optimum.take() {
+            Some(opt) => {
+                let mut candidate = QpSolution {
+                    status: QpStatus::Optimal,
+                    x: opt.x,
+                    y: opt.y,
+                    z: opt.z,
+                    z_lb: opt.z_lb,
+                    z_ub: opt.z_ub,
+                    obj: opt.obj,
+                    iters: opt.stats.pivots_phase1 + opt.stats.pivots_phase2,
+                    iterates: Vec::new(),
+                };
+                candidate.status = verify_status(
+                    ActiveSetStatus::Optimal,
+                    None,
+                    SecondOrderVerdict::NotChecked,
+                    &candidate,
+                    prob,
+                    opts,
+                );
+                debug_trace(|| {
+                    format!(
+                        "LP simplex optimum -> {:?} kkt_err={:.3e}",
+                        candidate.status,
+                        candidate.kkt_residuals(prob).kkt_error()
+                    )
+                });
+                if candidate.status == QpStatus::Optimal {
+                    return Attempt::opaque(candidate);
+                }
+                Some(v)
+            }
+            None => Some(v),
+        },
+        None => None,
+    };
     let seed = vertex.map(|v| {
         use crate::simplex::AtBound;
         let mut working = WorkingSet::cold(n, m);
