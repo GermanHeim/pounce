@@ -251,10 +251,16 @@ changes.
   carries an id (`IpoptData::on_converged_id`) that travels with its attempt's
   `finalize_solution` payload into the floor, and
   `IpoptApplication::reported_on_converged_id()` names the firing behind the
-  reported answer; the three consumers keep every firing and hold that one. A
-  floor replay also re-records the floor as the current answer, so a retry
-  wrapper nested outside the one that replayed no longer floors to the inner
-  retry's discarded payload.
+  reported answer; the three consumers keep every firing and hold that one.
+- **Two declined retries in series reported the inner loser's point.** A
+  floor replay re-delivered the winning payload without recording it as the
+  current answer, so a retry wrapper nested outside the one that replayed (the
+  gh#884 retry wraps the μ fallback and the gh#983 audit) took the inner
+  retry's discarded payload as its own floor, and delivered it as the answer
+  beside the base attempt's statistics. Measured on
+  `mpcc_scholtes4_biactive` at `bound_relax_factor=0 tol=1e-8
+  mu_strategy_fallback=yes`: the model received the declined μ retry's point.
+  A replay now re-records the floor.
 - **The active-set QP's rank check is correct, and 25–350× faster (gh
   #1061).** It rank-revealed the active rows with a Gilbert–Peierls LU in an
   AMD order under strict partial pivoting, which on 10⁴-row step QPs filled

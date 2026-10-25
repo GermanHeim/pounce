@@ -875,11 +875,24 @@ re-delivered the payload, so after an inner retry lost, `last_finalize` still
 held that retry's discarded payload — and the wrappers nest (this retry wraps
 the μ fallback and the gh#983 scale audit), each taking its floor from
 `last_finalize`. An outer wrapper that then declined its own retry floored to
-the inner loser. That case is read off the code, not measured: no fixture here
-puts two declined retries in series (the gh#884 detector does not fire on the
-acceptable-level exits that make the μ fallback's declines deterministic). The
-mechanism is pinned at unit level by `restoring_a_floor_records_it_as_the_answer`
-in `application.rs`.
+the inner loser, and **delivered that loser's point** as the answer, beside the
+base attempt's statistics. That is a wrong answer in the reported point, not
+only in sensitivity, and it predates the `on_converged` work.
+
+Measured on `mpcc_scholtes4_biactive` at `bound_relax_factor=0 tol=1e-8
+mu_strategy_fallback=yes`: the base attempt exits `Solved_To_Acceptable_Level`
+with this retry's signature, the μ fallback retries that acceptable exit and
+declines (its retry is also only acceptable), and then this retry runs and
+declines. With replay alone the model received the declined μ retry's
+`[1.68e-13, 1.68e-13, -1.8175e-9]` against the base attempt's `[2.91e-13,
+2.91e-13, -1.8170e-9]` — close on this model, unbounded in general. An earlier
+draft of this note said no fixture reaches two declined retries in series,
+reasoning that this detector does not fire on acceptable-level exits; that was
+generalized from a probe at `tol=1e-30`, and scholtes4 at `tol=1e-8` is the
+counterexample. Pinned by
+`pounce-sensitivity/tests/floored_solve_retry_wrappers.rs` (which also covers
+this retry's and the gh#983 audit's floors singly) and, at unit level, by
+`restoring_a_floor_records_it_as_the_answer` in `application.rs`.
 
 ### Reproducing the family
 

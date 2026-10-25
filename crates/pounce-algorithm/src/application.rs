@@ -1703,8 +1703,13 @@ impl IpoptApplication {
     /// Recording it matters beyond this call. The retries nest -- the gh#884
     /// retry wraps the μ fallback and the scale audit -- and each takes its
     /// floor from `last_finalize`, so a replay that only re-delivered the
-    /// payload would leave the *losing* inner retry's payload there for the
-    /// outer wrapper to floor to, and for `reported_on_converged_id` to read.
+    /// payload left the *losing* inner retry's payload there for the outer
+    /// wrapper to floor to, and to deliver as the answer: measured on
+    /// `mpcc_scholtes4_biactive` with `mu_strategy_fallback=yes`, a declined
+    /// μ retry and then a declined gh#884 retry
+    /// (`pounce-sensitivity/tests/floored_solve_retry_wrappers.rs`).
+    /// `reported_on_converged_id` reads it too, so without the record even a
+    /// single declined retry would name its own firing.
     fn restore_floor(&self, floor: &FinalizeSnapshot, tnlp: &Rc<RefCell<dyn TNLP>>) {
         floor.replay(tnlp);
         *self.last_finalize.borrow_mut() = Some(floor.clone());
