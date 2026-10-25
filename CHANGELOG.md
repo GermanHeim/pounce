@@ -337,8 +337,21 @@ changes.
   once, and the fixed-primal `jacrev` case keeps its single multi-RHS solve.
   The same lane-0 read sat in `JaxProblem`'s factor-reuse back-solve
   (reached from `solve_with_warm(factor_reuse=True)`), latent only because
-  that forward cannot yet be vmapped; it now groups lanes by solver id, and
-  the stacked-factor callbacks raise on mixed ids instead of reading lane 0.
+  that forward cannot yet be vmapped; it now groups lanes by solver id, as
+  the stacked-factor callbacks do too (gh #1052).
+- **`JaxProblem.batched_solve`, `batched_solve_with_warm` and
+  `vmap_solve_parallel` (and `pounce.jax.vmap_solve_parallel`) compose with
+  an outer `jax.vmap` (gh #1052)**, including `vmap(grad)` and
+  `vmap(jacrev)` with `factor_reuse=True` or `False`; they raised
+  `NotImplementedError` before. Each outer lane is its own stacked solve
+  with its own held factor, so the stacked factor-reuse back-solve and the
+  `batched_jvp_from_state` solve now group rows by solver id — one
+  `kkt_solve_many` per factor — instead of refusing mixed ids. Under an
+  outer vmap, `vmap_solve_parallel` runs one inner batch at a time, so
+  `workers` still bounds the threads of each inner batch and pools never
+  nest. An outer batch holds one stacked factor per lane until its backward
+  runs; past `_solver_registry_capacity` (128) that fails loudly, as
+  `grad(vmap_solve)` does.
 - **`pounce.jax.solve_with_warm` and `JaxProblem.solve_with_warm` compose
   with `jax.vmap`** (one host solve per lane), including `vmap(grad)` and
   `vmap(jacrev)`; they raised `NotImplementedError` before (gh #1049).
