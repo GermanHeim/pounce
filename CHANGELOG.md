@@ -45,6 +45,16 @@ changes.
   that cost it.
 
 ### Changed
+- **`algorithm=active-set-sqp` on a large model starts from the interior
+  point (gh #1061).** When `n + m ≥ 5000` and `ipm_sqp_handover` is not set,
+  the solve runs the interior point with the IPM→SQP handover instead of a
+  cold active-set SQP, whose first step QP needs about one iteration per
+  active constraint: on four 9–20 k-variable equality-heavy NLPs not one
+  first QP finished in 300 s. Now `ubh5` solves in 1 s and `robot_1600` in
+  6 s; the active-set SQP gives the answer when a handover attempt is
+  accepted, the converged interior point otherwise. The banner and the
+  report's `engine` field say which. `ipm_sqp_handover=no` keeps the cold
+  active-set SQP.
 - **`--minima mlsl` no longer counts a repeat infeasible landing against
   `patience` (gh #1042 R4c).** A launch that ends violating the constraints
   at a point an earlier launch already ended at is one more sample of that
@@ -208,6 +218,33 @@ changes.
   a non-negative whole number, and for a Jacobian whose rows, columns and
   values differ in count, rather than wrapping, saturating or truncating.
 ### Fixed
+- **The active-set QP's rank check is correct, and 25–350× faster (gh
+  #1061).** It rank-revealed the active rows with a Gilbert–Peierls LU in an
+  AMD order under strict partial pivoting, which on 10⁴-row step QPs filled
+  the factor 400–1000× and took 1.7–24 s a call — the whole budget of the
+  IPM→SQP handover's step-3 QP — and gave wrong answers: against dense SVD it
+  dropped 165 rows where 90 were dependent and still left the kept rows
+  singular, and on 60 generated Jacobians it was wrong on 47. It now uses
+  threshold-Markowitz pivoting: 0.07–0.25 s on the same Jacobians, right on
+  all 60, and on all 401 rank checks NETLIB `DEGEN2` makes (158 of which the
+  old one got wrong). Which member of a dependent set it drops is its
+  pivoting's choice, so past the dense precedence re-selection's budget the
+  check is re-run with the equality rows weighted: an equality the prune
+  drops is gone for good. On a 420-row test set the unweighted pass dropped 60
+  of 300 equalities and the weighted one none.
+- **LPs on the active-set arm are solved by the simplex (gh #1061).** The
+  simplex seed stopped at a feasible vertex and left the active-set engine to
+  optimize, which it cannot do on a degenerate LP: NETLIB `DEGEN2` spent its
+  first 8 530 iterations without progress and was solved only by a later
+  fallback (190–430 s). For an LP the seed now runs simplex phase 2 and
+  returns the vertex with its basis duals once they pass the same status
+  verification as an active-set answer. Phase 2 also meets a degenerate stall
+  with bound perturbation before Bland's rule, which on `DEGEN2` had pivoted
+  25 000 times through distinct bases without moving the objective, and a
+  phase-2 vertex that drifted a few ulps outside a bound is cleaned up by
+  phase 1 and optimized again rather than discarded. `DEGEN2` now takes 0.2
+  s, Mészáros `aircraft` 3 s (was 47 s) and `small005` 0.3 s (was 9 s); the
+  simplex is also what LP crossover runs.
 - **`max_wall_time` bounds the convex active-set path, simplex seed and all
   (gh #1061).** The active-set solve after the simplex seed was handed the
   budget as it stood *before* the seed ran, and starts its own clock, so it

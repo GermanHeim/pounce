@@ -362,7 +362,9 @@ as long as it took.
 ## Handing over before convergence (`ipm_sqp_handover`)
 
 ```
-ipm_sqp_handover               yes | no   (default: no)
+ipm_sqp_handover               yes | no   (default: no; yes under
+                                          algorithm=active-set-sqp at
+                                          n + m ≥ 5000, gh#1061)
 ipm_sqp_handover_tol           number     (default: 1e-4)
 ipm_sqp_handover_stall_iter    integer    (default: 0, off)
 ipm_sqp_handover_max_attempts  integer    (default: 3)
