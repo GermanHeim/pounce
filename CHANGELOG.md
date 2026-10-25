@@ -51,6 +51,22 @@ changes.
   that cost it.
 
 ### Changed
+- **The post-optimal KKT factor uses the Hessian at the converged point.**
+  The main loop checks convergence before it updates the Hessian, so the
+  sensitivity layer used to factor `W(w_k)` from the final Newton step
+  alongside Jacobians, slacks, multipliers and `Σ` read at `w*`, which is a
+  hybrid of two iterates. `IpoptApplication` now re-evaluates `W` at `w*`
+  (exact and finite-difference Hessians; quasi-Newton matrices are kept)
+  before the `on_converged` hook fires, so `parametric_step`,
+  `reduced_hessian` and `kkt_solve` back-solve against the KKT Jacobian at
+  the reported point. The step moves by `O(‖w* − w_k‖)`: 7.0e-6 relative on
+  the new `converged_hessian_at_w_star.rs` fixture, and inside every existing
+  test's tolerance (about 2e-8 on the `parametric_cpp` model's `η₂`
+  direction), because those Hessians are constant or the perturbed directions
+  miss the entries that move. It costs one Hessian evaluation per
+  converged solve with a hook installed;
+  `IpoptApplication::set_on_converged_refreshes_hessian(false)` turns it off,
+  which the CLI does when the hook only collects duals.
 - **`algorithm=active-set-sqp` on a large model starts from the interior
   point (gh #1061).** When `n + m ≥ 5000` and `ipm_sqp_handover` is not set,
   the solve runs the interior point with the IPM→SQP handover instead of a
@@ -224,6 +240,27 @@ changes.
   a non-negative whole number, and for a Jacobian whose rows, columns and
   values differ in count, rather than wrapping, saturating or truncating.
 ### Fixed
+- **Sensitivity across a floored solve describes the reported answer, not the
+  retry that lost.** `on_converged` fires once per converged attempt, and when
+  a retry converges but is declined (the `mu_strategy_fallback` re-solve, the
+  gh#884 retry, the gh#983 scale audit) the first attempt's answer is replayed.
+  `Solver`, `SensSolve` and the CLI kept the last firing, so they held the
+  losing retry's point and factor beside the winner's status: measured on
+  `parametric.nl`, the `.sol`'s `sens_sol_state_1` read `x[0] = 0.576480`
+  against `0.576310` for the same solve without the retry. Each firing now
+  carries an id (`IpoptData::on_converged_id`) that travels with its attempt's
+  `finalize_solution` payload into the floor, and
+  `IpoptApplication::reported_on_converged_id()` names the firing behind the
+  reported answer; the three consumers keep every firing and hold that one.
+- **Two declined retries in series reported the inner loser's point.** A
+  floor replay re-delivered the winning payload without recording it as the
+  current answer, so a retry wrapper nested outside the one that replayed (the
+  gh#884 retry wraps the μ fallback and the gh#983 audit) took the inner
+  retry's discarded payload as its own floor, and delivered it as the answer
+  beside the base attempt's statistics. Measured on
+  `mpcc_scholtes4_biactive` at `bound_relax_factor=0 tol=1e-8
+  mu_strategy_fallback=yes`: the model received the declined μ retry's point.
+  A replay now re-records the floor.
 - **The active-set QP's rank check is correct, and 25–350× faster (gh
   #1061).** It rank-revealed the active rows with a Gilbert–Peierls LU in an
   AMD order under strict partial pivoting, which on 10⁴-row step QPs filled
