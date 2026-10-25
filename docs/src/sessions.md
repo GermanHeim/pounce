@@ -28,10 +28,21 @@ rebuilding it on every call. The same machinery serves two workloads:
 | Re-solving a convex QP family with presolve *and* warm starts         | `pounce_convex::ConvexPresolveSession` (Rust; `pounce_rs::convex` with `convex`) |
 
 The session API does **not** rebuild the IPM. Each `solve()` call runs
-the full barrier method from scratch. What it reuses is the **factor
-that exists at convergence**: KKT back-solves and sensitivity
-operations skip the symbolic factor, AMD ordering, and numeric
-factorization.
+the full barrier method from scratch. The factor it holds is **not**
+the one from the final Newton step: that one was formed at the iterate
+before the last step was taken, so it is stale once the step is
+accepted. The first KKT back-solve or sensitivity operation after a
+solve therefore pays **one numeric refactorization** at the converged
+point, reusing the symbolic analysis and ordering (the sparsity pattern
+is unchanged). Every later operation against that factor is back-solves
+only.
+
+The Jacobians, slacks, multipliers and barrier diagonal `Σ` in that
+refactorization are evaluated at the converged point `w*`. The Hessian
+block is the one from the final iteration, `W(w_k)` rather than
+`W(w*)`, because the main loop checks convergence before it updates the
+Hessian. The difference is of order `‖w* − w_k‖`, which leaves the
+sensitivities first-order correct.
 
 ## Python
 
@@ -172,7 +183,10 @@ of its callers. See
 
 * **Symbolic factor / AMD ordering.** Owned by the linear-solver
   backend; reused on every back-solve and on `refactor()`.
-* **Numeric factor.** Reused on every back-solve until you refactor.
+* **Numeric factor.** Formed once at the converged point, on the first
+  operation after the solve, then reused on every back-solve until you
+  refactor. Operations that change the operator (a fix-relax release,
+  for example) factor their own modified matrix.
 * **The converged primal-dual state** (`x*`, multipliers, `g(x*)`,
   iteration stats).
 
