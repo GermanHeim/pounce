@@ -4574,14 +4574,46 @@ pub(crate) fn checked_independent_active_subset(
         .filter(|i| !permanent_c(i))
         .collect();
     let k_c = (pc.len() + other_c.len()) as Number;
-    if k_c * k_c * qp.n as Number > RESELECT_FLOP_BUDGET {
-        return Some((kc, kb));
-    }
     let other_b: Vec<usize> = active_bounds
         .iter()
         .copied()
         .filter(|j| !permanent_b(j))
         .collect();
+    if k_c * k_c * qp.n as Number > RESELECT_FLOP_BUDGET {
+        // Past the dense budget, ask the sparse probe again with the
+        // independent permanent rows weighted (gh#1061). Measured on Mészáros
+        // `small005` (n = 764): the first pass dropped 6 equality rows, the
+        // re-selection was over budget (k_c²n = 1.2e8), and the solve lost
+        // feasibility by 0.015 for good. The weighted probe keeps them; if
+        // it still drops one, the probe's first selection stands, as before.
+        let mut heavy_c = vec![false; qp.m];
+        pc.iter().for_each(|&i| heavy_c[i] = true);
+        let mut heavy_b = vec![false; qp.n];
+        pb.iter().for_each(|&j| heavy_b[j] = true);
+        let cons_in: Vec<usize> = pc.iter().chain(&other_c).copied().collect();
+        let bnds_in: Vec<usize> = pb.iter().chain(&other_b).copied().collect();
+        linsol.note_rank_guard_call();
+        let weight = |heavy: bool| if heavy { PRECEDENCE_WEIGHT } else { 1.0 };
+        if let Some((mut wc, mut wb)) = independent_active_subset_sparse_weighted(
+            linsol,
+            qp,
+            &cons_in,
+            &bnds_in,
+            |i| weight(heavy_c[i]),
+            |j| weight(heavy_b[j]),
+        ) {
+            let mut kept_wc = vec![false; qp.m];
+            wc.iter().for_each(|&i| kept_wc[i] = true);
+            let mut kept_wb = vec![false; qp.n];
+            wb.iter().for_each(|&j| kept_wb[j] = true);
+            if pc.iter().all(|&i| kept_wc[i]) && pb.iter().all(|&j| kept_wb[j]) {
+                wc.sort_unstable();
+                wb.sort_unstable();
+                return Some((wc, wb));
+            }
+        }
+        return Some((kc, kb));
+    }
     let (mut keep_c, mut keep_b) = independent_with_precedence(qp, &pc, &pb, &other_c, &other_b);
     keep_c.sort_unstable();
     keep_b.sort_unstable();
@@ -4591,7 +4623,18 @@ pub(crate) fn checked_independent_active_subset(
 /// Largest `k_c²·n` for which [`independent_active_subset`] re-selects a
 /// prune that dropped a permanent row: about 50 ms of dense Gram-Schmidt. Every
 /// gh#974 generator seed (`n < 30`) and `HUES-MOD` (`k_c = 2`) fall inside it.
+/// Past it the re-selection is the weighted sparse probe instead.
 const RESELECT_FLOP_BUDGET: Number = 5e7;
+
+/// How much heavier the weighted sparse re-selection makes the independent
+/// permanent rows (gh#1061). Threshold-Markowitz accepts a pivot within
+/// `u = 0.1` of its column's largest entry, so at 100× an unweighted row is
+/// shut out of any column where a permanent row's entry is no more than ten
+/// times smaller than its own — which is a preference, not a guarantee, and
+/// why the caller checks the result. Kept at two orders:
+/// the probe's dependency floor is relative to the largest entry, so every
+/// order of weight loosens it for the unweighted rows by one more.
+const PRECEDENCE_WEIGHT: Number = 100.0;
 
 /// Smallest `1 − ‖Qᵀe_j‖²` for which [`independent_with_precedence`] restores
 /// orthonormality with the rank-1 formula rather than afresh: its `(1 − s)^{-½}`
@@ -4773,6 +4816,29 @@ fn independent_active_subset_sparse(
     active_cons: &[usize],
     active_bounds: &[usize],
 ) -> Option<(Vec<usize>, Vec<usize>)> {
+    independent_active_subset_sparse_weighted(
+        linsol,
+        qp,
+        active_cons,
+        active_bounds,
+        |_| 1.0,
+        |_| 1.0,
+    )
+}
+
+/// [`independent_active_subset_sparse`] with each general row `i` scaled by
+/// `w_con(i)` and each bound row `j` by `w_bnd(j)`. Scaling a row changes
+/// none of the dependencies, only which member of a dependent set the
+/// probe's pivoting flags: a heavily weighted row out-pivots the others in
+/// every column it touches, so the singular pivots fall on the light ones.
+fn independent_active_subset_sparse_weighted(
+    linsol: &mut LinearSolver,
+    qp: &QpProblem,
+    active_cons: &[usize],
+    active_bounds: &[usize],
+    w_con: impl Fn(usize) -> Number,
+    w_bnd: impl Fn(usize) -> Number,
+) -> Option<(Vec<usize>, Vec<usize>)> {
     let n_cols = qp.n;
     let n_c = active_cons.len();
     let n_b = active_bounds.len();
@@ -4802,7 +4868,7 @@ fn independent_active_subset_sparse(
             let col = (a_jcols[k] - 1) as usize;
             irn.push((pos + 1) as Index);
             jcn.push((col + 1) as Index);
-            vals.push(a_vals[k]);
+            vals.push(a_vals[k] * w_con(row));
         }
     }
 
@@ -4810,7 +4876,7 @@ fn independent_active_subset_sparse(
     for (b, &var) in active_bounds.iter().enumerate() {
         irn.push((n_c + b + 1) as Index);
         jcn.push((var + 1) as Index);
-        vals.push(1.0);
+        vals.push(w_bnd(var));
     }
 
     let mut c_deps: Vec<Index> = Vec::new();
@@ -7092,5 +7158,79 @@ mod issue1061_time_limit_counts_tests {
             sol.stats
         );
         assert!(sol.stats.used_phase1, "{:?}", sol.stats);
+    }
+}
+
+#[cfg(test)]
+mod issue1061_precedence_tests {
+    //! gh#1061: past `RESELECT_FLOP_BUDGET` the dense precedence re-selection
+    //! is skipped, and the sparse probe's choice of which member of a
+    //! dependent set to drop is its pivoting's, so it can drop an equality —
+    //! gone for good, since nothing re-adds a `bl == bu` row. The weighted
+    //! re-probe makes the permanent rows win.
+    use pounce_common::types::{Index, Number};
+    use pounce_feral::FeralSolverInterface;
+    use pounce_linalg::triplet::{GenTMatrix, GenTMatrixSpace, SymTMatrix, SymTMatrixSpace};
+
+    use super::{RESELECT_FLOP_BUDGET, independent_active_subset};
+    use crate::{HessianInertia, LinearSolver, QpProblem};
+
+    /// `n = 400`; 300 sparse equality rows, independent; then 120 inequality
+    /// rows, each twice an equality row, all active. Rank 300: the correct
+    /// prune drops the 120 inequalities and keeps every equality.
+    #[test]
+    fn past_the_dense_budget_the_equalities_are_kept() {
+        let (n, m_eq, m_dup) = (400usize, 300usize, 120usize);
+        let m = m_eq + m_dup;
+        assert!(((m * m * n) as Number) > RESELECT_FLOP_BUDGET);
+        let mut rows: Vec<Vec<(usize, Number)>> = Vec::new();
+        for i in 0..m_eq {
+            rows.push(vec![
+                (i, 1.0 + (i % 7) as Number),
+                ((i * 37 + 11) % n, 0.5),
+                ((i * 101 + 3) % n, -0.25),
+            ]);
+        }
+        for k in 0..m_dup {
+            let src = (k * 5) % m_eq;
+            rows.push(rows[src].iter().map(|&(c, v)| (c, 2.0 * v)).collect());
+        }
+        let (mut irn, mut jcn, mut vals) = (Vec::new(), Vec::new(), Vec::new());
+        for (i, row) in rows.iter().enumerate() {
+            for &(c, v) in row {
+                irn.push(i as Index + 1);
+                jcn.push(c as Index + 1);
+                vals.push(v);
+            }
+        }
+        let mut a = GenTMatrix::new(GenTMatrixSpace::new(m as Index, n as Index, irn, jcn));
+        a.set_values(&vals);
+        let h = SymTMatrix::new(SymTMatrixSpace::new(n as Index, Vec::new(), Vec::new()));
+        let g = vec![0.0; n];
+        let mut bl = vec![0.0; m];
+        let mut bu = vec![0.0; m];
+        for k in 0..m_dup {
+            bl[m_eq + k] = -1e20;
+            bu[m_eq + k] = 0.0;
+        }
+        let (xl, xu) = (vec![-1e20; n], vec![1e20; n]);
+        let qp = QpProblem {
+            n,
+            m,
+            h: &h,
+            g: &g,
+            a: &a,
+            bl: &bl,
+            bu: &bu,
+            xl: &xl,
+            xu: &xu,
+            hessian_inertia: HessianInertia::Psd,
+        };
+        let mut linsol = LinearSolver::new(Box::new(FeralSolverInterface::new()));
+        let active: Vec<usize> = (0..m).collect();
+        let (kept, _) = independent_active_subset(&mut linsol, &qp, &active, &[]);
+        let lost: Vec<usize> = (0..m_eq).filter(|i| !kept.contains(i)).collect();
+        assert!(lost.is_empty(), "equality rows dropped: {lost:?}");
+        assert_eq!(kept.len(), m_eq, "kept {kept:?}");
     }
 }
