@@ -209,3 +209,40 @@ def test_stacked_jvp_groups_lanes_by_anchor():
             np.testing.assert_allclose(
                 jp.batched_jvp_from_state(st, dp), ref, atol=1e-8,
             )
+
+
+def test_vmap_grad_with_equality_and_inequality_rows():
+    """The y_c (equality) block's per-group de-interleave, under an outer vmap.
+
+    Every fixture above has one inequality, so only the y_d block ever
+    reached the grouped back-solve; an equality row runs through the y_c
+    offsets, which a lane-0 or misaligned de-interleave would get wrong.
+    """
+    def f3(x, p):
+        return ((x[0] - p[0]) ** 2 + p[1] * (x[1] - 1.0) ** 2
+                + (x[2] - p[0] * p[1]) ** 2 + x[0] * x[1])
+
+    def g3(x, p):
+        return jnp.array([x[0] + x[1] + x[2] - p[1], x[0] - x[2]])
+
+    jp = pj.JaxProblem(
+        f=f3, g=g3, n=3, m=2, p_example=jnp.array([1.0, 1.0]),
+        cl=np.array([-np.inf, 0.0]), cu=np.array([0.5, 0.0]), options=OPTS,
+        factor_reuse=True,
+    )
+    x0, w3 = jnp.ones(3), jnp.array([1.0, -2.0, 0.7])
+
+    def loss(P):
+        return jnp.sum(jp.batched_solve(P, x0) @ w3)
+
+    got = np.asarray(jax.vmap(jax.grad(loss))(PS))
+    ref = np.stack([np.asarray(jax.grad(loss)(P)) for P in PS])
+    np.testing.assert_allclose(got, ref, atol=1e-10, rtol=0)
+    assert np.abs(ref[0] - ref[1]).max() > 1e-6, "lanes must differ"
+
+    jac = jax.jacrev(lambda P: jp.batched_solve(P, x0))
+    np.testing.assert_allclose(
+        np.asarray(jax.vmap(jac)(PS)),
+        np.stack([np.asarray(jac(P)) for P in PS]),
+        atol=1e-10, rtol=0,
+    )
