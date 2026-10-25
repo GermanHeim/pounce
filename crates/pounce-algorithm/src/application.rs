@@ -1019,6 +1019,9 @@ pub struct IpoptApplication {
     /// before the user TNLP's `finalize_solution`. See
     /// [`ConvergedCallback`].
     on_converged: Option<ConvergedCallback>,
+    /// Re-evaluate `W` at the converged point before `on_converged` fires.
+    /// See [`Self::set_on_converged_refreshes_hessian`].
+    on_converged_refreshes_hessian: bool,
     /// When `true`, the per-iteration `IterRecord` trajectory is
     /// captured into [`SolveStatistics::iterations`] for downstream
     /// consumers (the JSON solve report in pounce-cli, pounce#8). Off
@@ -1346,6 +1349,7 @@ impl IpoptApplication {
             debug_hook: None,
             restoration_factory_provider: None,
             on_converged: None,
+            on_converged_refreshes_hessian: true,
             record_iter_history: false,
             option_file_resolved: false,
             convex_routing_available: false,
@@ -1613,6 +1617,24 @@ impl IpoptApplication {
     /// back (`pounce_minima::IpoptLocalSolve` does, gh#966).
     pub fn take_on_converged(&mut self) -> Option<ConvergedCallback> {
         self.on_converged.take()
+    }
+
+    /// Whether `data.w` is re-evaluated at the converged point `w*` before
+    /// the [`Self::set_on_converged`] hook fires. On by default.
+    ///
+    /// The main loop checks convergence before it updates the Hessian, so at
+    /// that moment `data.w` is still `W(w_k)` from the final Newton step,
+    /// while the Jacobians, slacks, multipliers and `Σ` are read at `w*`. A
+    /// hook that factors the KKT matrix (post-optimal sensitivity) needs the
+    /// Hessian at `w*` too, or it factors a hybrid of two iterates.
+    ///
+    /// The refresh costs one Hessian evaluation, counted in the solve's
+    /// statistics like any other. A hook that only reads the iterate and
+    /// never factors (the CLI collecting duals for a `.sol` file) can turn it
+    /// off so a plain solve reports the same evaluation counts with or
+    /// without the hook installed.
+    pub fn set_on_converged_refreshes_hessian(&mut self, refresh: bool) {
+        self.on_converged_refreshes_hessian = refresh;
     }
 
     /// Was the reported answer replayed from an earlier attempt's floor,
@@ -7260,6 +7282,20 @@ impl IpoptApplication {
                 | ApplicationReturnStatus::SolvedToAcceptableLevel
         ) {
             if let Some(cb) = self.on_converged.as_mut() {
+                // `data.w` is one iterate behind here: the main loop checks
+                // convergence before it updates the Hessian, so it still holds
+                // `W(w_k)` from the final Newton step while every other block
+                // the hook factors (Jacobians, slacks, multipliers, `Σ`) is
+                // read at the converged point `w*`. Re-evaluate it so the
+                // sensitivity matrix is the KKT Jacobian at `w*` rather than a
+                // hybrid of two iterates. Updaters with no `W` to re-evaluate
+                // (the quasi-Newton ones) answer `None` and keep theirs.
+                // See `set_on_converged_refreshes_hessian`.
+                if self.on_converged_refreshes_hessian
+                    && let Some(w) = alg.bundle.hess.hessian_at_current(&alg.data, &alg.cq)
+                {
+                    alg.data.borrow_mut().w = Some(w);
+                }
                 if let Some(sd) = alg.search_dir.as_mut() {
                     let pd = sd.pd_solver_rc();
                     cb(&alg.data, &alg.cq, &nlp_handle, pd);

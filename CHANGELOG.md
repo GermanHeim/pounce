@@ -51,6 +51,22 @@ changes.
   that cost it.
 
 ### Changed
+- **The post-optimal KKT factor uses the Hessian at the converged point.**
+  The main loop checks convergence before it updates the Hessian, so the
+  sensitivity layer used to factor `W(w_k)` from the final Newton step
+  alongside Jacobians, slacks, multipliers and `Σ` read at `w*`, which is a
+  hybrid of two iterates. `IpoptApplication` now re-evaluates `W` at `w*`
+  (exact and finite-difference Hessians; quasi-Newton matrices are kept)
+  before the `on_converged` hook fires, so `parametric_step`,
+  `reduced_hessian` and `kkt_solve` back-solve against the KKT Jacobian at
+  the reported point. The step moves by `O(‖w* − w_k‖)`: 7.0e-6 relative on
+  the new `converged_hessian_at_w_star.rs` fixture, and inside every existing
+  test's tolerance (about 2e-8 on the `parametric_cpp` model's `η₂`
+  direction), because those Hessians are constant or the perturbed directions
+  miss the entries that move. It costs one Hessian evaluation per
+  converged solve with a hook installed;
+  `IpoptApplication::set_on_converged_refreshes_hessian(false)` turns it off,
+  which the CLI does when the hook only collects duals.
 - **`algorithm=active-set-sqp` on a large model starts from the interior
   point (gh #1061).** When `n + m ≥ 5000` and `ipm_sqp_handover` is not set,
   the solve runs the interior point with the IPM→SQP handover instead of a

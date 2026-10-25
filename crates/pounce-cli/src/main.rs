@@ -1589,6 +1589,10 @@ fn real_main() -> ExitCode {
         let release_eps = pounce_sensitivity::release_floor_from_options(app.options());
         let sens_opts_cb = sens_options;
         let fixed_var_duals = app.reports_fixed_var_duals();
+        // Only the sensitivity and reduced-Hessian paths factor the KKT
+        // matrix in this hook; a `.sol` / JSON capture only reads the iterate,
+        // and should not cost (or report) an extra Hessian evaluation.
+        app.set_on_converged_refreshes_hessian(sens_active || wants_red_hessian);
         app.set_on_converged(Box::new(move |data, cq, nlp, pd| {
             let curr = match data.borrow().curr.clone() {
                 Some(c) => c,

@@ -37,12 +37,14 @@ point, reusing the symbolic analysis and ordering (the sparsity pattern
 is unchanged). Every later operation against that factor is back-solves
 only.
 
-The Jacobians, slacks, multipliers and barrier diagonal `Σ` in that
-refactorization are evaluated at the converged point `w*`. The Hessian
-block is the one from the final iteration, `W(w_k)` rather than
-`W(w*)`, because the main loop checks convergence before it updates the
-Hessian. The difference is of order `‖w* − w_k‖`, which leaves the
-sensitivities first-order correct.
+Every block of that matrix is evaluated at the converged point `w*`,
+the Hessian included: the main loop checks convergence before it
+updates the Hessian, so `W` is still the final iteration's `W(w_k)` when
+the solve stops, and it is re-evaluated at `w*` (one extra Hessian
+evaluation) before the factor is captured. Under
+`hessian_approximation=limited-memory` or `partitioned` there is no
+Hessian to re-evaluate, and the quasi-Newton matrix from the final
+iteration is used.
 
 ## Python
 
