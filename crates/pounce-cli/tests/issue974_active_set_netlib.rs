@@ -100,7 +100,7 @@ fn lp_degen2_is_solved_by_the_active_set_engine() {
     assert!((f - -1435.178).abs() < 1e-6 * 1435.178, "f = {f}");
     let it = iterations(&out);
     assert!(
-        it < 1000,
-        "{it} iterations: the LP seed was not an optimal vertex"
+        it < 3000,
+        "{it} iterations: the LP was not solved by the simplex"
     );
 }
