@@ -995,7 +995,20 @@ where
                         candidate.kkt_residuals(prob).kkt_error()
                     )
                 });
-                if candidate.status == QpStatus::Optimal {
+                // The pivots are this route's iterations, and the budget the
+                // user set for them (`max_iter`, `sqp_qp_max_iter`) is the one
+                // the engine would have spent: a phase 2 that needed more than
+                // that reports the limit, as the engine does when it runs out,
+                // rather than ignoring the cap.
+                if candidate.status == QpStatus::Optimal
+                    && candidate.iters > qopts.max_iter as usize
+                {
+                    candidate.status = QpStatus::IterationLimit;
+                }
+                if matches!(
+                    candidate.status,
+                    QpStatus::Optimal | QpStatus::IterationLimit
+                ) {
                     return Attempt::opaque(candidate);
                 }
                 Some(v)
