@@ -857,6 +857,30 @@ from the last `finalize_solution` payload. That payload is always the
 answer being reported, on this path and the ordinary one, because the
 floor restores the winner *by* calling `finalize_solution`.
 
+The KKT state itself — what the sensitivity layer and the CLI's sIPOPT step
+and reduced Hessian factor — is not in that payload, and for a while this was
+left open: those results were taken about the losing retry's point. It is now
+closed by keeping rather than rewinding. Each `on_converged` firing carries an
+id (`IpoptData::on_converged_id`), the id travels with its attempt's
+`finalize_solution` payload into the floor, and
+`IpoptApplication::reported_on_converged_id()` names the firing behind the
+answer actually reported. Consumers keep every firing and hold that one; each
+attempt's own `Rc` handles keep its factor alive. Pinned end to end by
+`pounce-sensitivity/tests/floored_solve_sensitivity.rs` and
+`pounce-cli/tests/floored_solve_sens_suffix.rs`, both on the μ fallback's
+floor.
+
+A replay also re-records the floor as the current answer. Before, it only
+re-delivered the payload, so after an inner retry lost, `last_finalize` still
+held that retry's discarded payload — and the wrappers nest (this retry wraps
+the μ fallback and the gh#983 scale audit), each taking its floor from
+`last_finalize`. An outer wrapper that then declined its own retry floored to
+the inner loser. That case is read off the code, not measured: no fixture here
+puts two declined retries in series (the gh#884 detector does not fire on the
+acceptable-level exits that make the μ fallback's declines deterministic). The
+mechanism is pinned at unit level by `restoring_a_floor_records_it_as_the_answer`
+in `application.rs`.
+
 ### Reproducing the family
 
 ```python

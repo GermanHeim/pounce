@@ -240,6 +240,21 @@ changes.
   a non-negative whole number, and for a Jacobian whose rows, columns and
   values differ in count, rather than wrapping, saturating or truncating.
 ### Fixed
+- **Sensitivity across a floored solve describes the reported answer, not the
+  retry that lost.** `on_converged` fires once per converged attempt, and when
+  a retry converges but is declined (the `mu_strategy_fallback` re-solve, the
+  gh#884 retry, the gh#983 scale audit) the first attempt's answer is replayed.
+  `Solver`, `SensSolve` and the CLI kept the last firing, so they held the
+  losing retry's point and factor beside the winner's status: measured on
+  `parametric.nl`, the `.sol`'s `sens_sol_state_1` read `x[0] = 0.576480`
+  against `0.576310` for the same solve without the retry. Each firing now
+  carries an id (`IpoptData::on_converged_id`) that travels with its attempt's
+  `finalize_solution` payload into the floor, and
+  `IpoptApplication::reported_on_converged_id()` names the firing behind the
+  reported answer; the three consumers keep every firing and hold that one. A
+  floor replay also re-records the floor as the current answer, so a retry
+  wrapper nested outside the one that replayed no longer floors to the inner
+  retry's discarded payload.
 - **The active-set QP's rank check is correct, and 25–350× faster (gh
   #1061).** It rank-revealed the active rows with a Gilbert–Peierls LU in an
   AMD order under strict partial pivoting, which on 10⁴-row step QPs filled
